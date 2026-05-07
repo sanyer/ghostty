@@ -339,27 +339,44 @@ comptime {
     }
 }
 
-pub const std_options: std.Options = options: {
-    if (builtin.target.cpu.arch.isWasm()) break :options .{
+pub const std_options: std.Options = opts: {
+    var options: std.Options = .{};
+
+    if (builtin.target.cpu.arch.isWasm()) {
         // Wasm builds we specifically want to optimize for space with small
         // releases so we bump up to warn. Everything else acts pretty normal.
-        .log_level = switch (builtin.mode) {
+        options.log_level = switch (builtin.mode) {
             .Debug => .debug,
             .ReleaseSmall => .warn,
             else => .info,
-        },
+        };
 
         // Wasm doesn't have access to stdio so we have a custom log function.
-        .logFn = @import("os/wasm/log.zig").log,
-    };
+        options.logFn = @import("os/wasm/log.zig").log;
+    } else if (terminal.options.c_abi) {
+        // For C ABI builds, use a custom log function that dispatches to an
+        // embedder-provided callback (or silently discards when none is set).
+        options.logFn = @import("terminal/c/sys.zig").logFn;
+    }
 
-    // For C ABI builds, use a custom log function that dispatches to an
-    // embedder-provided callback (or silently discards when none is set).
-    if (terminal.options.c_abi) break :options .{
-        .logFn = @import("terminal/c/sys.zig").logFn,
-    };
+    if (builtin.target.os.tag.isDarwin() and builtin.target.os.tag != .macos) {
+        // If are building for a non-MacOS Darwin target (e.g., iOS), we need to
+        // disable stack tracing for the time being. This is due to the fact that
+        // Zig switched to using _dyld_get_image_header_containing_address and some
+        // other (deprecated) calls to speed up stack unwinding; these calls are
+        // available on MacOS, but not on other platforms.
+        //
+        // A fix has already been submitted to exempt non-MacOS (but still Darwin)
+        // targets, so this can likely be removed in Zig 0.17.0, or a 0.16.x patch
+        // version if it releases beforehand.
+        //
+        // More details:
+        //   https://codeberg.org/ziglang/zig/commit/89f86e46d278a35a613bbc662cdd3f65ffc76ed7
+        //
+        options.allow_stack_tracing = false;
+    }
 
-    break :options .{};
+    break :opts options;
 };
 
 test {

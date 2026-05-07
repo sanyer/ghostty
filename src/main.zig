@@ -22,5 +22,10 @@ else
     .{};
 
 test {
+    // Zig 0.16.0 has made test logging more strict. Now, *anything* that gets
+    // printed to stderr results in a "failed command" message, even if the
+    // tests ultimately passed. To reduce confusion here (and honestly, test
+    // log spam in general), we bump the default testing log level to error.
+    std.testing.log_level = std.log.Level.err;
     _ = entrypoint;
 }
