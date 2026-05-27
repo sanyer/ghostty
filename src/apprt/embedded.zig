@@ -1606,6 +1606,11 @@ pub const CAPI = struct {
         return surface.core_surface.needsConfirmQuit();
     }
 
+    /// Returns true if the surface cursor is currently at a semantic prompt.
+    export fn ghostty_surface_is_at_prompt(surface: *Surface) bool {
+        return surface.core_surface.isAtPrompt();
+    }
+
     /// Returns true if the surface process has exited.
     export fn ghostty_surface_process_exited(surface: *Surface) bool {
         return surface.core_surface.child_exited;
