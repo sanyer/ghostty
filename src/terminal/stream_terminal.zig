@@ -88,6 +88,19 @@ pub const Handler = struct {
         /// handler.terminal.getPwd().
         pwd_changed: ?*const fn (*Handler) void,
 
+        /// Called when the running program sets the clipboard via OSC 52.
+        /// The kind byte identifies the target selection ('c' clipboard,
+        /// 'p' primary, 's' selection, '0'-'7' cut buffers) and data is the
+        /// base64-encoded payload exactly as received; decoding and kind
+        /// interpretation are left to the embedder. The data is only valid
+        /// during the lifetime of the call.
+        ///
+        /// Clipboard read requests (OSC 52 with a "?" payload) are never
+        /// forwarded: answering one would let any program running in the
+        /// terminal silently read the user's clipboard, and a VT state
+        /// library has no way to mediate that with user consent.
+        clipboard_set: ?*const fn (*Handler, u8, []const u8) void,
+
         /// Called in response to an XTVERSION query. Returns the version
         /// string to report (e.g. "ghostty 1.2.3"). The returned memory
         /// must be valid for the lifetime of the call. The maximum length
@@ -99,6 +112,7 @@ pub const Handler = struct {
         /// effects beyond that.
         pub const readonly: Effects = .{
             .bell = null,
+            .clipboard_set = null,
             .color_scheme = null,
             .device_attributes = null,
             .enquiry = null,
@@ -276,6 +290,7 @@ pub const Handler = struct {
             .window_title => self.windowTitle(value.title),
             .report_pwd => self.reportPwd(value.url),
             .xtversion => self.reportXtversion(),
+            .clipboard_contents => self.clipboardContents(value.kind, value.data),
 
             // No supported DCS commands have any terminal-modifying effects,
             // but they may in the future. For now we just ignore it.
@@ -287,7 +302,6 @@ pub const Handler = struct {
             // Have no terminal-modifying effect
             .show_desktop_notification,
             .progress_report,
-            .clipboard_contents,
             .title_push,
             .title_pop,
             => {},
@@ -302,6 +316,19 @@ pub const Handler = struct {
     fn bell(self: *Handler) void {
         const func = self.effects.bell orelse return;
         func(self);
+    }
+
+    fn clipboardContents(self: *Handler, kind: u8, data: []const u8) void {
+        const func = self.effects.clipboard_set orelse return;
+
+        // Read requests are deliberately not forwarded; see the
+        // clipboard_set effect docs. Empty payloads carry nothing to set
+        // (some emitters use them to clear the clipboard), so they are
+        // ignored as well rather than inventing clear semantics here.
+        if (data.len == 0) return;
+        if (data.len == 1 and data[0] == '?') return;
+
+        func(self, kind, data);
     }
 
     fn reportDeviceAttributes(self: *Handler, req: device_attributes.Req) void {
@@ -1414,6 +1441,67 @@ test "bell effect callback" {
 
         s.nextSlice("\x07\x07");
         try testing.expectEqual(@as(usize, 3), S.bell_count);
+    }
+}
+
+test "clipboard_set effect callback" {
+    var t: Terminal = try .init(testing.allocator, .{ .cols = 80, .rows = 24 });
+    defer t.deinit(testing.allocator);
+
+    // Test OSC 52 with null callback (default readonly effects) doesn't crash
+    {
+        var s: Stream = .initAlloc(testing.allocator, .init(&t));
+        defer s.deinit();
+
+        s.nextSlice("\x1B]52;c;aGVsbG8=\x1B\\");
+
+        // Terminal should still be functional after the ignored sequence
+        s.nextSlice("AfterClipboard");
+        const str = try t.plainString(testing.allocator);
+        defer testing.allocator.free(str);
+        try testing.expectEqualStrings("AfterClipboard", str);
+    }
+
+    t.fullReset();
+
+    // Test OSC 52 with a callback
+    {
+        const S = struct {
+            var count: usize = 0;
+            var last_kind: u8 = 0;
+            var last_data: ?[:0]const u8 = null;
+            fn clipboardSet(_: *Handler, kind: u8, data: []const u8) void {
+                count += 1;
+                last_kind = kind;
+                if (last_data) |old| testing.allocator.free(old);
+                last_data = testing.allocator.dupeZ(u8, data) catch null;
+            }
+        };
+        S.count = 0;
+        defer if (S.last_data) |data| testing.allocator.free(data);
+
+        var handler: Handler = .init(&t);
+        handler.effects.clipboard_set = &S.clipboardSet;
+
+        var s: Stream = .initAlloc(testing.allocator, handler);
+        defer s.deinit();
+
+        // A write is forwarded with its kind and undecoded base64 payload.
+        s.nextSlice("\x1B]52;c;aGVsbG8=\x1B\\");
+        try testing.expectEqual(@as(usize, 1), S.count);
+        try testing.expectEqual(@as(u8, 'c'), S.last_kind);
+        try testing.expectEqualStrings("aGVsbG8=", S.last_data.?);
+
+        // BEL termination and a non-default kind work too.
+        s.nextSlice("\x1B]52;p;d29ybGQ=\x07");
+        try testing.expectEqual(@as(usize, 2), S.count);
+        try testing.expectEqual(@as(u8, 'p'), S.last_kind);
+        try testing.expectEqualStrings("d29ybGQ=", S.last_data.?);
+
+        // Read requests and empty payloads are never forwarded.
+        s.nextSlice("\x1B]52;c;?\x1B\\");
+        s.nextSlice("\x1B]52;c;\x1B\\");
+        try testing.expectEqual(@as(usize, 2), S.count);
     }
 }
 

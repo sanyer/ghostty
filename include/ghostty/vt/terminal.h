@@ -82,6 +82,7 @@ extern "C" {
  * | `GHOSTTY_TERMINAL_OPT_SIZE`             | `GhosttyTerminalSizeFn`           | XTWINOPS size query (CSI 14/16/18 t)      |
  * | `GHOSTTY_TERMINAL_OPT_COLOR_SCHEME`     | `GhosttyTerminalColorSchemeFn`    | Color scheme query (CSI ? 996 n)          |
  * | `GHOSTTY_TERMINAL_OPT_DEVICE_ATTRIBUTES`| `GhosttyTerminalDeviceAttributesFn`| Device attributes query (CSI c / > c / = c)|
+ * | `GHOSTTY_TERMINAL_OPT_CLIPBOARD_SET`    | `GhosttyTerminalClipboardSetFn`   | Clipboard write via OSC 52                |
  *
  * ### Defining a write_pty callback
  * @snippet c-vt-effects/src/main.c effects-write-pty
@@ -283,6 +284,34 @@ typedef struct {
  */
 typedef void (*GhosttyTerminalBellFn)(GhosttyTerminal terminal,
                                       void* userdata);
+
+/**
+ * Callback function type for clipboard_set.
+ *
+ * Called when the running program sets the clipboard via OSC 52. The
+ * kind byte identifies the target selection ('c' clipboard, 'p' primary,
+ * 's' selection, '0'-'7' cut buffers); most terminals treat everything
+ * as the standard clipboard. The data is the base64-encoded payload
+ * exactly as received; decoding is left to the embedder. The data is
+ * only valid for the duration of the call.
+ *
+ * OSC 52 clipboard *read* requests ("?") are never forwarded to this
+ * callback: answering one would let any program running in the terminal
+ * silently read the user's clipboard.
+ *
+ * @param terminal The terminal handle
+ * @param userdata The userdata pointer set via GHOSTTY_TERMINAL_OPT_USERDATA
+ * @param kind The OSC 52 selection kind byte
+ * @param data Pointer to the base64-encoded payload bytes
+ * @param len Length of the payload in bytes
+ *
+ * @ingroup terminal
+ */
+typedef void (*GhosttyTerminalClipboardSetFn)(GhosttyTerminal terminal,
+                                              void* userdata,
+                                              uint8_t kind,
+                                              const uint8_t* data,
+                                              size_t len);
 
 /**
  * Callback function type for color scheme queries (CSI ? 996 n).
@@ -693,6 +722,15 @@ typedef enum GHOSTTY_ENUM_TYPED {
    * Input type: GhosttyTerminalPwdChangedFn
    */
   GHOSTTY_TERMINAL_OPT_PWD_CHANGED = 25,
+
+  /**
+   * Callback invoked when the running program sets the clipboard via
+   * OSC 52. Set to NULL to ignore clipboard writes. Read requests are
+   * always ignored; see GhosttyTerminalClipboardSetFn.
+   *
+   * Input type: GhosttyTerminalClipboardSetFn
+   */
+  GHOSTTY_TERMINAL_OPT_CLIPBOARD_SET = 26,
   GHOSTTY_TERMINAL_OPT_MAX_VALUE = GHOSTTY_ENUM_MAX_VALUE,
 } GhosttyTerminalOption;
 

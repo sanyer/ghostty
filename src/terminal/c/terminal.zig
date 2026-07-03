@@ -54,6 +54,7 @@ const Effects = struct {
     title_changed: ?TitleChangedFn = null,
     pwd_changed: ?PwdChangedFn = null,
     size_cb: ?SizeFn = null,
+    clipboard_set: ?ClipboardSetFn = null,
 
     /// Scratch buffer for DA1 feature codes. The device attributes
     /// trampoline converts C feature codes into this buffer and returns
@@ -83,6 +84,11 @@ const Effects = struct {
     /// must remain valid until the callback returns. An empty string
     /// (len=0) causes the default "libghostty" to be reported.
     pub const XtversionFn = *const fn (Terminal, ?*anyopaque) callconv(lib.calling_conv) lib.String;
+
+    /// C function pointer type for the clipboard_set callback. The kind
+    /// byte identifies the OSC 52 target selection and the data is the
+    /// base64-encoded payload exactly as received.
+    pub const ClipboardSetFn = *const fn (Terminal, ?*anyopaque, u8, [*]const u8, usize) callconv(lib.calling_conv) void;
 
     /// C function pointer type for the title_changed callback.
     pub const TitleChangedFn = *const fn (Terminal, ?*anyopaque) callconv(lib.calling_conv) void;
@@ -136,6 +142,13 @@ const Effects = struct {
         const wrapper: *TerminalWrapper = @fieldParentPtr("stream", stream_ptr);
         const func = wrapper.effects.bell orelse return;
         func(@ptrCast(wrapper), wrapper.effects.userdata);
+    }
+
+    fn clipboardSetTrampoline(handler: *Handler, kind: u8, data: []const u8) void {
+        const stream_ptr: *Stream = @fieldParentPtr("handler", handler);
+        const wrapper: *TerminalWrapper = @fieldParentPtr("stream", stream_ptr);
+        const func = wrapper.effects.clipboard_set orelse return;
+        func(@ptrCast(wrapper), wrapper.effects.userdata, kind, data.ptr, data.len);
     }
 
     fn colorSchemeTrampoline(handler: *Handler) ?device_status.ColorScheme {
@@ -296,6 +309,7 @@ fn new_(
         .title_changed = &Effects.titleChangedTrampoline,
         .pwd_changed = &Effects.pwdChangedTrampoline,
         .size = &Effects.sizeTrampoline,
+        .clipboard_set = &Effects.clipboardSetTrampoline,
     };
 
     wrapper.* = .{
@@ -343,6 +357,7 @@ pub const Option = enum(c_int) {
     default_cursor_blink = 23,
     glyph_protocol = 24,
     pwd_changed = 25,
+    clipboard_set = 26,
 
     /// Input type expected for setting the option.
     pub fn InType(comptime self: Option) type {
@@ -357,6 +372,7 @@ pub const Option = enum(c_int) {
             .title_changed => ?Effects.TitleChangedFn,
             .pwd_changed => ?Effects.PwdChangedFn,
             .size_cb => ?Effects.SizeFn,
+            .clipboard_set => ?Effects.ClipboardSetFn,
             .title, .pwd => ?*const lib.String,
             .color_foreground, .color_background, .color_cursor => ?*const color.RGB.C,
             .color_palette => ?*const color.PaletteC,
@@ -413,6 +429,7 @@ fn setTyped(
         .title_changed => wrapper.effects.title_changed = value,
         .pwd_changed => wrapper.effects.pwd_changed = value,
         .size_cb => wrapper.effects.size_cb = value,
+        .clipboard_set => wrapper.effects.clipboard_set = value,
         .title => {
             const str = if (value) |v| v.ptr[0..v.len] else "";
             wrapper.terminal.setTitle(str) catch return .out_of_memory;
@@ -2419,6 +2436,79 @@ test "set pwd_changed callback" {
     vt_write(t, seq2, seq2.len);
     try testing.expectEqual(@as(usize, 2), S.pwd_count);
     try testing.expectEqualStrings("file:///home/user", zigTerminal(t).?.getPwd().?);
+}
+
+test "set clipboard_set callback" {
+    var t: Terminal = null;
+    try testing.expectEqual(Result.success, new(
+        &lib.alloc.test_allocator,
+        &t,
+        .{
+            .cols = 80,
+            .rows = 24,
+            .max_scrollback = 0,
+        },
+    ));
+    defer free(t);
+
+    const S = struct {
+        var count: usize = 0;
+        var last_userdata: ?*anyopaque = null;
+        var last_kind: u8 = 0;
+        var last_data: [64]u8 = undefined;
+        var last_len: usize = 0;
+
+        fn clipboardSet(
+            _: Terminal,
+            ud: ?*anyopaque,
+            kind: u8,
+            data: [*]const u8,
+            len: usize,
+        ) callconv(lib.calling_conv) void {
+            count += 1;
+            last_userdata = ud;
+            last_kind = kind;
+            last_len = @min(len, last_data.len);
+            @memcpy(last_data[0..last_len], data[0..last_len]);
+        }
+    };
+    S.count = 0;
+    S.last_userdata = null;
+
+    var sentinel: u8 = 88;
+    try testing.expectEqual(Result.success, set(t, .userdata, @ptrCast(&sentinel)));
+    try testing.expectEqual(Result.success, set(t, .clipboard_set, @ptrCast(&S.clipboardSet)));
+
+    // OSC 52 ; c ; base64("hello") ST — clipboard write
+    const seq1 = "\x1B]52;c;aGVsbG8=\x1B\\";
+    vt_write(t, seq1, seq1.len);
+    try testing.expectEqual(@as(usize, 1), S.count);
+    try testing.expectEqual(@as(?*anyopaque, @ptrCast(&sentinel)), S.last_userdata);
+    try testing.expectEqual(@as(u8, 'c'), S.last_kind);
+    try testing.expectEqualStrings("aGVsbG8=", S.last_data[0..S.last_len]);
+
+    // OSC 52 read requests ("?") must never reach the callback.
+    const seq2 = "\x1B]52;c;?\x1B\\";
+    vt_write(t, seq2, seq2.len);
+    try testing.expectEqual(@as(usize, 1), S.count);
+}
+
+test "clipboard_set without callback is silent" {
+    var t: Terminal = null;
+    try testing.expectEqual(Result.success, new(
+        &lib.alloc.test_allocator,
+        &t,
+        .{
+            .cols = 80,
+            .rows = 24,
+            .max_scrollback = 0,
+        },
+    ));
+    defer free(t);
+
+    // OSC 52 without a callback should not crash
+    const seq = "\x1B]52;c;aGVsbG8=\x1B\\";
+    vt_write(t, seq, seq.len);
 }
 
 test "pwd_changed without callback is silent" {
