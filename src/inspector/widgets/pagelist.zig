@@ -58,8 +58,10 @@ pub const Inspector = struct {
             var index: usize = pages.totalPages();
             var node = pages.pages.last;
             while (node) |page_node| : (node = page_node.prev) {
-                const page = page_node.page();
-                row_offset -= page.size.rows;
+                const rows = page_node.rows();
+                const resident = page_node.pageIfResident();
+                const compressed = page_node.storage() == .compressed;
+                row_offset -= rows;
                 index -= 1;
 
                 // We use our location as the ID so that even if reallocations
@@ -69,13 +71,21 @@ pub const Inspector = struct {
 
                 // Open up the tree node.
                 if (!widgets.page.treeNode(.{
-                    .page = page,
+                    .cols = page_node.cols(),
+                    .rows = rows,
                     .index = index,
-                    .row_range = .{ row_offset, row_offset + page.size.rows - 1 },
+                    .row_range = .{ row_offset, row_offset + rows - 1 },
                     .active = node == active_pin.node,
                     .viewport = node == viewport_pin.node,
+                    .compressed = compressed,
+                    .dirty = if (resident) |page| page.isDirty() else null,
                 })) continue;
                 defer cimgui.c.ImGui_TreePop();
+
+                // Opening a compressed entry is an explicit request for its
+                // contents, so restoration is appropriate here. Collapsed
+                // entries use only metadata and remain compressed.
+                const page = resident orelse page_node.page();
                 widgets.page.inspector(page);
             }
         }
@@ -83,6 +93,8 @@ pub const Inspector = struct {
 };
 
 fn summaryTable(pages: *const PageList) void {
+    const memory = pages.memoryStats();
+
     if (!cimgui.c.ImGui_BeginTable(
         "pagelist_summary",
         3,
@@ -106,7 +118,18 @@ fn summaryTable(pages: *const PageList) void {
     _ = cimgui.c.ImGui_TableSetColumnIndex(1);
     widgets.helpMarker("Total number of pages in the linked list.");
     _ = cimgui.c.ImGui_TableSetColumnIndex(2);
-    cimgui.c.ImGui_Text("%d", pages.totalPages());
+    cimgui.c.ImGui_Text("%zu", pages.totalPages());
+
+    summaryCountRow(
+        "Resident Pages",
+        "Pages whose raw backing memory is currently resident.",
+        memory.resident_pages,
+    );
+    summaryCountRow(
+        "Compressed Pages",
+        "Pages retained as encoded data with their raw backing memory discarded.",
+        memory.compressed_pages,
+    );
 
     cimgui.c.ImGui_TableNextRow();
     _ = cimgui.c.ImGui_TableSetColumnIndex(0);
@@ -114,17 +137,42 @@ fn summaryTable(pages: *const PageList) void {
     _ = cimgui.c.ImGui_TableSetColumnIndex(1);
     widgets.helpMarker("Total rows represented by scrollback + active area.");
     _ = cimgui.c.ImGui_TableSetColumnIndex(2);
-    cimgui.c.ImGui_Text("%d", pages.total_rows);
+    cimgui.c.ImGui_Text("%zu", pages.total_rows);
 
-    cimgui.c.ImGui_TableNextRow();
-    _ = cimgui.c.ImGui_TableSetColumnIndex(0);
-    cimgui.c.ImGui_Text("Page Bytes");
-    _ = cimgui.c.ImGui_TableSetColumnIndex(1);
-    widgets.helpMarker("Total bytes allocated for active pages.");
-    _ = cimgui.c.ImGui_TableSetColumnIndex(2);
-    cimgui.c.ImGui_Text(
-        "%d KiB",
-        units.toKibiBytes(pages.page_size),
+    summaryBytesRow(
+        "Logical Page Bytes",
+        "Bytes counted against the scrollback limit. Compression does not change this value.",
+        pages.page_size,
+    );
+    summaryBytesRow(
+        "Raw Mapping Bytes",
+        "Total initialized raw page mappings, including discarded mappings retained for restoration.",
+        memory.raw_bytes,
+    );
+    summaryBytesRow(
+        "Resident Raw Bytes",
+        "Raw page mapping bytes which have not been discarded.",
+        memory.resident_raw_bytes,
+    );
+    summaryBytesRow(
+        "Decommitted Raw Bytes",
+        "Raw page mapping bytes discarded while their virtual addresses remain reserved.",
+        memory.decommitted_raw_bytes,
+    );
+    summaryBytesRow(
+        "Encoded Bytes",
+        "Exact encoded storage retained for compressed pages.",
+        memory.encoded_bytes,
+    );
+    summaryBytesRow(
+        "Estimated Resident Bytes",
+        "Resident raw allocation backing, including unused pool-item tails, plus encoded storage. Allocator and representation overhead are excluded.",
+        memory.estimatedResidentBytes(),
+    );
+    summaryBytesRow(
+        "Estimated Savings",
+        "Decommitted raw mapping bytes minus their replacement encoded storage.",
+        memory.estimatedSavings(),
     );
 
     cimgui.c.ImGui_TableNextRow();
@@ -139,7 +187,7 @@ fn summaryTable(pages: *const PageList) void {
     );
     _ = cimgui.c.ImGui_TableSetColumnIndex(2);
     cimgui.c.ImGui_Text(
-        "%d KiB",
+        "%zu KiB",
         units.toKibiBytes(pages.maxSize()),
     );
 
@@ -157,7 +205,39 @@ fn summaryTable(pages: *const PageList) void {
     _ = cimgui.c.ImGui_TableSetColumnIndex(1);
     widgets.helpMarker("Number of pins tracked for automatic updates.");
     _ = cimgui.c.ImGui_TableSetColumnIndex(2);
-    cimgui.c.ImGui_Text("%d", pages.countTrackedPins());
+    cimgui.c.ImGui_Text("%zu", pages.countTrackedPins());
+}
+
+fn summaryCountRow(
+    label: [:0]const u8,
+    help: [:0]const u8,
+    value: usize,
+) void {
+    cimgui.c.ImGui_TableNextRow();
+    _ = cimgui.c.ImGui_TableSetColumnIndex(0);
+    cimgui.c.ImGui_Text("%s", label.ptr);
+    _ = cimgui.c.ImGui_TableSetColumnIndex(1);
+    widgets.helpMarker(help);
+    _ = cimgui.c.ImGui_TableSetColumnIndex(2);
+    cimgui.c.ImGui_Text("%zu", value);
+}
+
+fn summaryBytesRow(
+    label: [:0]const u8,
+    help: [:0]const u8,
+    bytes: usize,
+) void {
+    cimgui.c.ImGui_TableNextRow();
+    _ = cimgui.c.ImGui_TableSetColumnIndex(0);
+    cimgui.c.ImGui_Text("%s", label.ptr);
+    _ = cimgui.c.ImGui_TableSetColumnIndex(1);
+    widgets.helpMarker(help);
+    _ = cimgui.c.ImGui_TableSetColumnIndex(2);
+    cimgui.c.ImGui_Text(
+        "%zu bytes (%zu KiB)",
+        bytes,
+        units.toKibiBytes(bytes),
+    );
 }
 
 fn scrollbarInfo(pages: *PageList) void {
@@ -321,11 +401,18 @@ fn trackedPinsTable(pages: *const PageList) void {
         }
 
         _ = cimgui.c.ImGui_TableSetColumnIndex(3);
-        const dirty = pin.isDirty();
-        if (dirty) {
-            cimgui.c.ImGui_TextColored(.{ .x = 1.0, .y = 0.4, .z = 0.4, .w = 1.0 }, "dirty");
+        if (pin.node.pageIfResident()) |page| {
+            const dirty = page.dirty or
+                page.getRowAndCell(pin.x, pin.y).row.dirty;
+            if (dirty) {
+                cimgui.c.ImGui_TextColored(.{ .x = 1.0, .y = 0.4, .z = 0.4, .w = 1.0 }, "dirty");
+            } else {
+                cimgui.c.ImGui_TextDisabled("clean");
+            }
         } else {
-            cimgui.c.ImGui_TextDisabled("clean");
+            // Dirty state lives in the discarded mapping. Keep inspector
+            // traversal metadata-only rather than restoring this page.
+            cimgui.c.ImGui_TextDisabled("compressed");
         }
 
         _ = cimgui.c.ImGui_TableSetColumnIndex(4);
