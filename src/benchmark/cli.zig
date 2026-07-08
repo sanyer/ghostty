@@ -8,6 +8,7 @@ const cli = @import("../cli.zig");
 pub const Action = enum {
     @"codepoint-width",
     @"grapheme-break",
+    @"page-compression",
     @"screen-clone",
     @"terminal-parser",
     @"terminal-stream",
@@ -25,6 +26,7 @@ pub const Action = enum {
     pub fn Struct(comptime action: Action) type {
         return switch (action) {
             .@"screen-clone" => @import("ScreenClone.zig"),
+            .@"page-compression" => @import("PageCompression.zig"),
             .@"terminal-stream" => @import("TerminalStream.zig"),
             .@"codepoint-width" => @import("CodepointWidth.zig"),
             .@"grapheme-break" => @import("GraphemeBreak.zig"),
