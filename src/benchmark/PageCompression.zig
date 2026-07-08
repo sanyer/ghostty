@@ -25,6 +25,9 @@
 //! * `noop` walks the input chunks without invoking the codec. This measures the
 //!   benchmark loop's minimum overhead.
 //! * `compress` compresses every input chunk into a reusable output buffer.
+//! * `store` additionally copies each useful result into an exact-sized
+//!   allocation. It retains the most recent `--retained-pages` blocks so that
+//!   allocation, eviction, and allocator reuse resemble bounded scrollback.
 //! * `decompress` prepares compressed blocks during setup, then decompresses
 //!   every block into a reusable output buffer.
 //! * `report` compresses each chunk once and prints raw and encoded sizes. It is
@@ -32,7 +35,9 @@
 //!
 //! Dataset loading, output allocation, and preparation of blocks for
 //! decompression happen in `setup` and are outside `Benchmark`'s timed region.
-//! The `compress` and `decompress` steps perform no allocation.
+//! The `compress` and `decompress` steps perform no allocation. `store`
+//! deliberately performs encoded-block allocations and frees inside the timed
+//! step; only its reusable workspace and ring metadata are prepared in setup.
 //! `hyperfine` still measures full process lifetime, so use `--loops` to
 //! amortize setup and teardown when comparing small corpora.
 //!
@@ -46,11 +51,11 @@
 //!
 //!     ghostty-bench +page-compression --mode=report --data=/tmp/pages.raw
 //!
-//! Compare compression and decompression with `hyperfine`:
+//! Measure the cost of exact encoded storage relative to the codec alone:
 //!
 //!     hyperfine --warmup 3 \
 //!       'ghostty-bench +page-compression --mode=compress --loops=100 --data=/tmp/pages.raw' \
-//!       'ghostty-bench +page-compression --mode=decompress --loops=100 --data=/tmp/pages.raw'
+//!       'ghostty-bench +page-compression --mode=store --loops=100 --data=/tmp/pages.raw'
 const PageCompression = @This();
 
 const std = @import("std");
@@ -58,7 +63,9 @@ const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const Benchmark = @import("Benchmark.zig");
 const options = @import("options.zig");
-const lz4 = @import("../terminal/compress/lz4.zig");
+const compress = @import("../terminal/compress.zig");
+const CompressedPage = compress.Page;
+const lz4 = compress.lz4;
 
 const log = std.log.scoped(.@"page-compression-bench");
 
@@ -75,6 +82,11 @@ data: []u8 = &.{},
 
 /// Compressed blocks prepared during setup for `decompress` mode.
 encoded: std.ArrayList(Encoded) = .empty,
+
+/// Exact encoded allocations retained by `store` mode. Null entries have not
+/// been reached yet; once full, `stored_next` identifies the oldest block.
+stored: []?[]u8 = &.{},
+stored_next: usize = 0,
 
 /// Reused by compression and report modes. Its length is the compression
 /// bound of the largest input chunk.
@@ -101,6 +113,11 @@ pub const Options = struct {
     /// should use the exact backing-memory size of the pages being measured.
     @"page-size": usize = 400 * 1024,
 
+    /// Number of exact encoded allocations retained by `store` mode before
+    /// the oldest allocation is freed and replaced. The default approximates
+    /// a 10 MB scrollback composed of standard 400 KiB terminal pages.
+    @"retained-pages": usize = 25,
+
     /// Pre-generated input corpus. `-` reads stdin, although a regular file is
     /// recommended so identical bytes can be reused across benchmark runs.
     /// When unset, all modes are no-ops.
@@ -118,6 +135,9 @@ pub const Mode = enum {
 
     /// Compress each raw page into a reusable compression-bound buffer.
     compress,
+
+    /// Compress and retain exact-sized encoded blocks in a bounded ring.
+    store,
 
     /// Decompress blocks prepared before the timed region.
     decompress,
@@ -160,6 +180,7 @@ pub fn benchmark(self: *PageCompression) Benchmark {
         .stepFn = switch (self.opts.mode) {
             .noop => stepNoop,
             .compress => stepCompress,
+            .store => stepStore,
             .decompress => stepDecompress,
             .report => stepReport,
         },
@@ -184,6 +205,8 @@ fn setup(ptr: *anyopaque) Benchmark.Error!void {
 fn setupData(self: *PageCompression) !void {
     if (self.opts.loops == 0) return error.InvalidLoops;
     if (self.opts.@"page-size" == 0) return error.InvalidPageSize;
+    if (self.opts.mode == .store and self.opts.@"retained-pages" == 0)
+        return error.InvalidRetainedPages;
 
     const data_file = try options.dataFile(self.opts.data) orelse return;
     defer data_file.close();
@@ -206,7 +229,16 @@ fn setupData(self: *PageCompression) !void {
         self.compression_output = &.{};
     }
 
+    if (self.opts.mode == .store) try self.prepareStored();
     if (self.opts.mode == .decompress) try self.prepareEncoded();
+}
+
+/// Allocate only the ring metadata for `store` mode. The encoded blocks which
+/// populate it are intentionally allocated by the timed benchmark step.
+fn prepareStored(self: *PageCompression) !void {
+    self.stored = try self.alloc.alloc(?[]u8, self.opts.@"retained-pages");
+    @memset(self.stored, null);
+    self.stored_next = 0;
 }
 
 /// Precompress every input page and verify one decode before benchmarking.
@@ -257,6 +289,11 @@ fn clearPreparedData(self: *PageCompression) void {
     self.encoded.deinit(self.alloc);
     self.encoded = .empty;
 
+    for (self.stored) |block| if (block) |bytes| self.alloc.free(bytes);
+    if (self.stored.len > 0) self.alloc.free(self.stored);
+    self.stored = &.{};
+    self.stored_next = 0;
+
     if (self.compression_output.len > 0)
         self.alloc.free(self.compression_output);
     self.compression_output = &.{};
@@ -301,6 +338,56 @@ fn stepCompress(ptr: *anyopaque) Benchmark.Error!void {
                 return error.BenchmarkFailed;
             };
             std.mem.doNotOptimizeAway(encoded_len);
+        }
+    }
+}
+
+/// Compress pages and retain their exact encoded allocations in a bounded
+/// ring. This models the part of `compress.Page.init` which differs from the
+/// allocation-free codec benchmark: copying the result, allocating its
+/// persistent storage, and freeing an old block when scrollback is full.
+fn stepStore(ptr: *anyopaque) Benchmark.Error!void {
+    const self: *PageCompression = @ptrCast(@alignCast(ptr));
+    if (self.data.len == 0) return;
+    assert(self.stored.len > 0);
+
+    for (0..self.opts.loops) |_| {
+        var it = self.pages();
+        while (it.next()) |page| {
+            const output_len = CompressedPage.requiredScratch(page.len) catch |err| {
+                log.warn("failed to size stored page output err={}", .{err});
+                return error.BenchmarkFailed;
+            };
+            if (output_len == 0) continue;
+
+            const encoded_len = lz4.compress(
+                page,
+                self.compression_output[0..output_len],
+                &self.table,
+            ) catch |err| switch (err) {
+                // This is the same profitability outcome as
+                // compress.Page.init: a block which exceeds the useful output
+                // limit remains resident and consumes no encoded allocation.
+                error.OutputTooSmall => continue,
+                error.InputTooLarge => {
+                    log.warn("stored page compression failed err={}", .{err});
+                    return error.BenchmarkFailed;
+                },
+            };
+
+            const encoded = self.alloc.dupe(
+                u8,
+                self.compression_output[0..encoded_len],
+            ) catch |err| {
+                log.warn("stored page allocation failed err={}", .{err});
+                return error.BenchmarkFailed;
+            };
+
+            const slot = &self.stored[self.stored_next];
+            if (slot.*) |previous| self.alloc.free(previous);
+            slot.* = encoded;
+            self.stored_next = (self.stored_next + 1) % self.stored.len;
+            std.mem.doNotOptimizeAway(encoded);
         }
     }
 }
@@ -398,4 +485,34 @@ test PageCompression {
 
     const bench = impl.benchmark();
     _ = try bench.run(.once);
+}
+
+test "PageCompression store retains exact encoded allocations" {
+    const testing = std.testing;
+    const page_size = 1024;
+    const impl: *PageCompression = try .create(testing.allocator, .{
+        .mode = .store,
+        .@"page-size" = page_size,
+        .@"retained-pages" = 2,
+    });
+    defer impl.destroy(testing.allocator);
+
+    impl.data = try testing.allocator.alloc(u8, 3 * page_size);
+    @memset(impl.data, 0);
+    impl.compression_output = try testing.allocator.alloc(
+        u8,
+        try lz4.compressBound(page_size),
+    );
+    try impl.prepareStored();
+
+    try stepStore(impl);
+    try testing.expectEqual(@as(usize, 1), impl.stored_next);
+    for (impl.stored) |block| {
+        const encoded = block.?;
+        try testing.expect(encoded.len < page_size);
+
+        var decoded: [page_size]u8 = undefined;
+        _ = try lz4.decompress(encoded, &decoded);
+        try testing.expect(std.mem.allEqual(u8, &decoded, 0));
+    }
 }
