@@ -138,7 +138,7 @@ pub const ViewportSearch = struct {
         var added: usize = 0;
         while (node_) |node| : (node_ = node.prev) {
             // If the last row of this node isn't wrapped we can't overlap.
-            const row = node.data.getRow(node.data.size.rows - 1);
+            const row = node.page().getRow(node.rows() - 1);
             if (!row.wrap) break;
 
             // We could be more accurate here and count bytes since the
@@ -157,7 +157,7 @@ pub const ViewportSearch = struct {
         // Add any trailing overlap as well.
         trailing: {
             const end: *PageList.List.Node = fingerprint.nodes[fingerprint.nodes.len - 1];
-            if (!end.data.getRow(end.data.size.rows - 1).wrap) break :trailing;
+            if (!end.page().getRow(end.rows() - 1).wrap) break :trailing;
 
             node_ = end.next;
             added = 0;
@@ -166,7 +166,7 @@ pub const ViewportSearch = struct {
                 if (added >= self.window.needle.len - 1) break;
 
                 // If this row doesn't wrap, then we can quit
-                const row = node.data.getRow(node.data.size.rows - 1);
+                const row = node.page().getRow(node.rows() - 1);
                 if (!row.wrap) break;
             }
         }
@@ -348,7 +348,7 @@ test "history search, no active area" {
     defer s.deinit();
 
     // Fill up first page
-    const first_page_rows = t.screens.active.pages.pages.first.?.data.capacity.rows;
+    const first_page_rows = t.screens.active.pages.pages.first.?.capacity().rows;
     s.nextSlice("Fizz\r\n");
     for (1..first_page_rows - 1) |_| s.nextSlice("\r\n");
     try testing.expect(t.screens.active.pages.pages.first == t.screens.active.pages.pages.last);

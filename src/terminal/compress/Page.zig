@@ -8,11 +8,11 @@
 //! as `Page.cloneBuf`: page internals use offsets, so a shallow page copy remains
 //! valid when its memory contents are restored at the same address.
 //!
-//! The resident memory is deliberately not freed by this type. A future
-//! `PageList` integration will keep the virtual range allocated while asking
-//! the operating system to discard its physical pages. Keeping the range has
-//! two useful properties: the embedded page never contains a dangling pointer,
-//! and restoring the page does not require a fallible allocation.
+//! The resident memory is deliberately not freed by this type. `PageList`
+//! keeps the virtual range allocated while asking the operating system to
+//! discard its physical pages. Keeping the range has two useful properties:
+//! the embedded page never contains a dangling pointer, and restoring the page
+//! does not require a fallible allocation.
 //!
 //! The intended state transition is:
 //!
@@ -49,6 +49,13 @@ page: TerminalPage,
 /// Exact raw LZ4 block for `page.memory`.
 encoded: []u8,
 
+/// Allocator which owns `encoded`.
+///
+/// The allocator's backing state must outlive this compressed page. Storing
+/// the allocator here lets a PageList node restore and discard its compressed
+/// state without needing a reference back to the PageList.
+alloc: Allocator,
+
 /// Return the largest scratch buffer that can produce a useful compressed
 /// representation for `raw_len` bytes.
 ///
@@ -56,8 +63,8 @@ encoded: []u8,
 /// compressed representation includes an additional slice compared to a
 /// resident terminal page, so an encoded block which fills more than this
 /// buffer cannot reduce resident memory. Limiting the output here lets a
-/// future PageList caller borrow a standard page-pool item as scratch instead
-/// of retaining a larger, compression-bound allocation.
+/// PageList borrow a standard page-pool item as scratch instead of retaining a
+/// larger, compression-bound allocation.
 ///
 /// Callers are expected to reuse the scratch memory when practical. The
 /// scratch buffer and hash table are never retained by this type.
@@ -80,7 +87,8 @@ pub fn requiredScratch(raw_len: usize) lz4.CompressError!usize {
 /// scratch buffer must be at least `requiredScratch(source.memory.len)` bytes.
 /// It must not overlap the source memory. On success, the returned value aliases
 /// the source's resident mapping and owns only its exact-sized `encoded`
-/// allocation.
+/// allocation. The allocator and its backing state must remain valid until
+/// `deinit` is called.
 ///
 /// Returns null if retaining the compressed representation would not use less
 /// memory than the resident representation. An `OutputTooSmall` result from
@@ -119,6 +127,7 @@ pub fn init(
     return .{
         .page = source.*,
         .encoded = try alloc.dupe(u8, scratch[0..encoded_len]),
+        .alloc = alloc,
     };
 }
 
@@ -139,8 +148,8 @@ pub fn restore(self: *const Page) lz4.DecompressError!TerminalPage {
 ///
 /// This intentionally does not free `page.memory`. The PageList node which
 /// supplied the source page continues to own that pool or heap allocation.
-pub fn deinit(self: *Page, alloc: Allocator) void {
-    alloc.free(self.encoded);
+pub fn deinit(self: *Page) void {
+    self.alloc.free(self.encoded);
     self.* = undefined;
 }
 
@@ -194,7 +203,7 @@ test "compressed Page retained mapping round trip" {
         scratch,
         &table,
     )).?;
-    defer compressed.deinit(testing.allocator);
+    defer compressed.deinit();
 
     try testing.expectEqual(memory_ptr, compressed.page.memory.ptr);
     try testing.expectEqual(memory_len, compressed.page.memory.len);
@@ -317,7 +326,7 @@ test "compressed Page can retry after malformed encoded data" {
         scratch,
         &table,
     )).?;
-    defer compressed.deinit(testing.allocator);
+    defer compressed.deinit();
 
     const full_encoded = compressed.encoded;
     const first_byte = full_encoded[0];

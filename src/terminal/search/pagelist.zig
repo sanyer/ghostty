@@ -56,8 +56,8 @@ pub const PageListSearch = struct {
         // be moved somewhere safe.
         const pin = try list.trackPin(.{
             .node = start,
-            .y = start.data.size.rows - 1,
-            .x = start.data.size.cols - 1,
+            .y = start.rows() - 1,
+            .x = start.cols() - 1,
         });
         errdefer list.untrackPin(pin);
 
@@ -190,7 +190,7 @@ test "feed multiple pages with matches" {
     defer s.deinit();
 
     // Fill up first page
-    const first_page_rows = t.screens.active.pages.pages.first.?.data.capacity.rows;
+    const first_page_rows = t.screens.active.pages.pages.first.?.capacity().rows;
     for (0..first_page_rows - 1) |_| s.nextSlice("\r\n");
     s.nextSlice("Fizz");
     try testing.expect(t.screens.active.pages.pages.first == t.screens.active.pages.pages.last);
@@ -234,7 +234,7 @@ test "feed multiple pages no matches" {
     defer s.deinit();
 
     // Fill up first page
-    const first_page_rows = t.screens.active.pages.pages.first.?.data.capacity.rows;
+    const first_page_rows = t.screens.active.pages.pages.first.?.capacity().rows;
     for (0..first_page_rows - 1) |_| s.nextSlice("\r\n");
     s.nextSlice("Hello");
 
@@ -272,7 +272,7 @@ test "feed iteratively through multiple matches" {
     var s = t.vtStream();
     defer s.deinit();
 
-    const first_page_rows = t.screens.active.pages.pages.first.?.data.capacity.rows;
+    const first_page_rows = t.screens.active.pages.pages.first.?.capacity().rows;
 
     // Fill first page with a match at the end
     for (0..first_page_rows - 1) |_| s.nextSlice("\r\n");
@@ -313,7 +313,7 @@ test "feed with match spanning page boundary" {
     var s = t.vtStream();
     defer s.deinit();
 
-    const first_page_rows = t.screens.active.pages.pages.first.?.data.capacity.rows;
+    const first_page_rows = t.screens.active.pages.pages.first.?.capacity().rows;
 
     // Fill first page ending with "Te"
     for (0..first_page_rows - 1) |_| s.nextSlice("\r\n");
@@ -367,7 +367,7 @@ test "feed with match spanning page boundary with newline" {
     var s = t.vtStream();
     defer s.deinit();
 
-    const first_page_rows = t.screens.active.pages.pages.first.?.data.capacity.rows;
+    const first_page_rows = t.screens.active.pages.pages.first.?.capacity().rows;
 
     // Fill first page ending with "Te"
     for (0..first_page_rows - 1) |_| s.nextSlice("\r\n");
@@ -404,14 +404,14 @@ test "feed with pruned page" {
 
     // Grow to capacity
     const page1_node = p.pages.last.?;
-    const page1 = page1_node.data;
+    const page1 = page1_node.page();
     for (0..page1.capacity.rows - page1.size.rows) |_| {
         try testing.expect(try p.grow() == null);
     }
 
     // Grow and allocate one more page. Then fill that page up.
     const page2_node = (try p.grow()).?;
-    const page2 = page2_node.data;
+    const page2 = page2_node.page();
     for (0..page2.capacity.rows - page2.size.rows) |_| {
         try testing.expect(try p.grow() == null);
     }
