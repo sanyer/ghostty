@@ -85,6 +85,7 @@ test {
     _ = @import("bitmap_allocator.zig");
     _ = @import("compress.zig");
     _ = @import("hash_map.zig");
+    _ = @import("mem.zig");
     _ = @import("ref_counted_set.zig");
     _ = @import("size.zig");
 }

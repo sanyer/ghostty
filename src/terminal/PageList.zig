@@ -14,6 +14,7 @@ const DoublyLinkedList = @import("../datastruct/main.zig").IntrusiveDoublyLinked
 const color = @import("color.zig");
 const highlight = @import("highlight.zig");
 const kitty = @import("kitty.zig");
+const terminal_mem = @import("mem.zig");
 const point = @import("point.zig");
 const pagepkg = @import("page.zig");
 const stylepkg = @import("style.zig");
@@ -481,7 +482,7 @@ fn initPages(
         const page_buf = if (pooled) buf: {
             try tw.check(.page_buf_std);
             const buf = try pool.pages.create();
-            recommitPoolItem(buf);
+            terminal_mem.recommit(buf);
             break :buf buf;
         } else buf: {
             try tw.check(.page_buf_non_std);
@@ -3487,7 +3488,7 @@ inline fn createPageExt(
     // dispenses. Otherwise, we use the heap allocator to allocate.
     const page_buf = if (pooled) buf: {
         const buf = try pool.pages.create();
-        recommitPoolItem(buf);
+        terminal_mem.recommit(buf);
         break :buf buf;
     } else try page_alloc.alignedAlloc(
         u8,
@@ -3565,7 +3566,7 @@ fn destroyNodeExt(
             // supported) so it can be reused.
             const item: *align(std.heap.page_size_min) [std_size]u8 =
                 @ptrCast(@alignCast(page.memory.ptr));
-            decommitPoolItem(item, page.memory.len);
+            _ = terminal_mem.decommit(.zero, item, page.memory.len);
             pool.pages.destroy(item);
         },
 
@@ -3576,100 +3577,6 @@ fn destroyNodeExt(
     }
 
     pool.nodes.destroy(node);
-}
-
-/// Zero a pool item buffer that is about to be returned to the pool
-/// free list and, where supported, tell the OS it can reclaim the
-/// backing memory while the buffer sits unused. Without the decommit,
-/// a pool that shrinks (scrollback clears, pruning churn, resets)
-/// retains its high-water RSS forever, since MemoryPool free lists
-/// never return memory to the OS.
-///
-/// dirty_len is the length of the page that lived in this item, which
-/// may be smaller than the item; bytes beyond it are already zero.
-///
-/// The invariant required for page reuse (see createPageExt): after
-/// this call the entire item reads back as zeroes. The pool writes its
-/// free list node into the first pointer-size bytes afterwards, which
-/// is safe because page initialization always overwrites them (see the
-/// comptime assert in Page).
-fn decommitPoolItem(
-    item: *align(std.heap.page_size_min) [std_size]u8,
-    dirty_len: usize,
-) void {
-    // In test builds the buffer comes from std.testing.allocator, not
-    // the OS page allocator, so madvise is neither safe nor meaningful.
-    if (comptime builtin.is_test) {
-        @memset(item[0..dirty_len], 0);
-        return;
-    }
-
-    // MADV_DONTNEED on a private anonymous mapping immediately
-    // reclaims the pages and guarantees they read back zero-filled
-    // on the next access, so we can skip the memset entirely.
-    //
-    // We use MADV_DONTNEED rather than MADV_FREE deliberately:
-    // MADV_FREE doesn't reduce RSS until memory pressure (invisible
-    // to users watching memory usage) and doesn't guarantee zeroes
-    // on the next read. MADV_DONTNEED's synchronous TLB-shootdown
-    // cost only matters at allocator-level call frequency; page
-    // destroys here are rare (clears, reflow, capacity changes), and
-    // the hottest reuse path (grow's prune-reuse) doesn't go through
-    // this function at all.
-    if (comptime builtin.os.tag == .linux) {
-        if (std.posix.madvise(
-            item,
-            std_size,
-            std.posix.MADV.DONTNEED,
-        )) |_| return else |err| {
-            log.warn("madvise(DONTNEED) failed err={}", .{err});
-            // Fall through to the memset below.
-        }
-    }
-
-    // On Darwin we zero in place and then mark the memory as
-    // reusable, which removes it from the process footprint until
-    // it is touched again. Contents of reusable memory are either
-    // preserved (our zeroes) or reclaimed and zero-filled on the
-    // next access, so the invariant holds either way. The reuse
-    // side calls MADV_FREE_REUSE to fix up footprint accounting
-    // (see recommitPoolItem).
-    if (comptime builtin.os.tag.isDarwin()) {
-        @memset(item[0..dirty_len], 0);
-        std.posix.madvise(
-            item,
-            std_size,
-            std.posix.MADV.FREE_REUSABLE,
-        ) catch {
-            // Best-effort: plain MADV_FREE reclaims under memory
-            // pressure only and needs no reuse pairing.
-            std.posix.madvise(
-                item,
-                std_size,
-                std.posix.MADV.FREE,
-            ) catch {};
-        };
-        return;
-    }
-
-    @memset(item[0..dirty_len], 0);
-}
-
-/// The counterpart to decommitPoolItem for buffers handed back out by
-/// the pool. Only Darwin requires this: MADV_FREE_REUSE re-accounts
-/// previously reusable memory to the process footprint. Without it the
-/// memory still works (touching reusable pages revives them) but
-/// footprint reporting can undercount. Harmless on buffers that were
-/// never marked reusable (fresh or preheated items).
-fn recommitPoolItem(item: *align(std.heap.page_size_min) [std_size]u8) void {
-    if (comptime builtin.is_test) return;
-    if (comptime builtin.os.tag.isDarwin()) {
-        std.posix.madvise(
-            item,
-            std_size,
-            std.posix.MADV.FREE_REUSE,
-        ) catch {};
-    }
 }
 
 /// Fast-path function to erase exactly 1 row. Erasing means that the row
@@ -14442,34 +14349,6 @@ test "PageList compact oversized page" {
             );
         }
     }
-}
-
-test "PageList decommitPoolItem zeroes the dirty region" {
-    const testing = std.testing;
-    const alloc = testing.allocator;
-
-    // Note: in test builds decommitPoolItem always takes the memset
-    // path; the madvise-based paths rely on kernel zero-fill semantics
-    // that unit tests cannot exercise (see decommitPoolItem).
-    const buf = try alloc.alignedAlloc(
-        u8,
-        .fromByteUnits(std.heap.page_size_min),
-        std_size,
-    );
-    defer alloc.free(buf);
-    const item: *align(std.heap.page_size_min) [std_size]u8 = @ptrCast(buf.ptr);
-
-    // Fully dirty item.
-    @memset(item, 0xAA);
-    decommitPoolItem(item, std_size);
-    try testing.expect(std.mem.allEqual(u8, item, 0));
-
-    // Partially dirty item: an item that hosted a page smaller than
-    // the item is only dirty up to the page length; the rest is zero
-    // by invariant and must remain zero.
-    @memset(item[0..1024], 0xAA);
-    decommitPoolItem(item, 1024);
-    try testing.expect(std.mem.allEqual(u8, item, 0));
 }
 
 test "PageList destroyed pool page reuse is zeroed" {
