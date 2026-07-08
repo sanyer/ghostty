@@ -21,6 +21,51 @@ pub const DecommitMode = enum {
     strict,
 };
 
+/// Return whether this target can reclaim physical memory for `mode` while
+/// retaining the mapping's virtual address range.
+///
+/// Test builds support both modes because `decommit` simulates reclamation by
+/// clearing the supplied range. Runtime reclamation is intentionally limited
+/// to 64-bit Linux and Darwin. Other targets must leave strict callers' memory
+/// resident; zero mode still provides its documented memset fallback through
+/// `decommit` even when this function returns false.
+pub inline fn canReclaim(comptime mode: DecommitMode) bool {
+    // Both modes use the same retained-mapping primitives. Keeping the switch
+    // exhaustive makes additions to DecommitMode choose target support
+    // explicitly rather than inheriting it accidentally.
+    return switch (mode) {
+        .zero, .strict => supported: {
+            // Tests never call into the OS because their allocator ranges can
+            // share mappings with unrelated allocations. `decommit` simulates
+            // successful reclamation by zeroing the requested range instead,
+            // so both modes are always available to tests on every target.
+            if (builtin.is_test) break :supported true;
+
+            // Compression currently retains complete page mappings for its
+            // lifetime. Limit the initial runtime support to 64-bit address
+            // spaces where that virtual-memory cost is negligible and where
+            // the retained-mapping behavior has been validated.
+            if (builtin.target.ptrBitWidth() != 64) break :supported false;
+
+            // Linux provides MADV_DONTNEED, which immediately discards pages
+            // from a private anonymous mapping and faults them back as zeroes.
+            // Zig reaches this through the raw syscall path without libc.
+            if (builtin.target.os.tag == .linux) break :supported true;
+
+            // Darwin provides the paired MADV_FREE_REUSABLE/FREE_REUSE
+            // operations used below. Darwin requires libc independently of
+            // this feature, so using its madvise entry point adds no new
+            // dependency to libghostty-vt.
+            if (builtin.target.os.tag.isDarwin()) break :supported true;
+
+            // Other targets have no retained-mapping reclamation contract in
+            // this module. Zero mode can still clear through its memset
+            // fallback, but strict callers must leave their mapping resident.
+            break :supported false;
+        },
+    };
+}
+
 /// Discard physical pages while retaining a mapping's virtual address range.
 ///
 /// The complete mapping must be page-aligned and a multiple of the minimum
@@ -168,4 +213,10 @@ test "strict decommit retains the mapping for recommit" {
     recommit(memory);
     @memset(memory, 0xBB);
     try testing.expect(std.mem.allEqual(u8, memory, 0xBB));
+}
+
+test "test builds can reclaim retained mappings" {
+    const testing = std.testing;
+    try testing.expect(canReclaim(.zero));
+    try testing.expect(canReclaim(.strict));
 }

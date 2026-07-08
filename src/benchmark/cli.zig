@@ -9,6 +9,7 @@ pub const Action = enum {
     @"codepoint-width",
     @"grapheme-break",
     @"page-compression",
+    @"scrollback-compression",
     @"screen-clone",
     @"terminal-parser",
     @"terminal-stream",
@@ -27,6 +28,7 @@ pub const Action = enum {
         return switch (action) {
             .@"screen-clone" => @import("ScreenClone.zig"),
             .@"page-compression" => @import("PageCompression.zig"),
+            .@"scrollback-compression" => @import("ScrollbackCompression.zig"),
             .@"terminal-stream" => @import("TerminalStream.zig"),
             .@"codepoint-width" => @import("CodepointWidth.zig"),
             .@"grapheme-break" => @import("GraphemeBreak.zig"),
