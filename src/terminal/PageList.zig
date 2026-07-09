@@ -913,7 +913,7 @@ pub fn deinit(self: *PageList) void {
 pub fn reset(self: *PageList) void {
     defer self.assertIntegrity();
 
-    // Reset always resets our compression state since we have new pages.
+    // Reset discards all scrollback, so there is nothing left to compress.
     self.page_compression.reset();
 
     // Invalidate all external page refs to the previous list. The reset below
@@ -1219,6 +1219,7 @@ pub fn resize(self: *PageList, opts: Resize) Allocator.Error!void {
     // reschedule compression.
     // TODO(mitchellh): Deferred reflow on non-viewport/non-active pages.
     self.page_compression.reset();
+    self.page_compression.markDirty();
 
     if (comptime std.debug.runtime_safety) {
         // Resize does not work with 0 values, this should be protected
@@ -2796,8 +2797,10 @@ pub fn scroll(self: *PageList, behavior: Scroll) void {
     // Compression is deferred while viewing history. Restart traversal when
     // crossing that boundary so any pages accessed there are reconsidered.
     const was_active = self.viewport == .active;
-    defer if (was_active != (self.viewport == .active))
+    defer if (was_active != (self.viewport == .active)) {
         self.page_compression.reset();
+        if (self.viewport == .active) self.page_compression.markDirty();
+    };
 
     // Special case no-scrollback mode to never allow scrolling.
     if (self.explicit_max_size == 0) {
@@ -3429,6 +3432,9 @@ pub fn maxSize(self: *const PageList) usize {
 pub fn grow(self: *PageList) Allocator.Error!?*List.Node {
     defer self.assertIntegrity();
 
+    // Growing can move a complete page behind the active boundary.
+    self.page_compression.markDirty();
+
     const last = self.pages.last.?;
     if (last.capacity().rows > last.rows()) {
         // Fast path: we have capacity in the last page.
@@ -3859,24 +3865,39 @@ const CompressionScratch = union(enum) {
 /// pages. This converges after pages are restored between incremental steps
 /// without requiring consumers to maintain a separate attempt cursor.
 const IncrementalCompressionState = struct {
+    flags: packed struct {
+        // Set to true when incremental compression should be run. It
+        // isn't guaranteed that incremental compression would produce
+        // results but some work was done that may require compression.
+        dirty: bool = false,
+
+        /// Set after any page is compressed during the current traversal.
+        /// We always run incremental compression until we get a fully
+        /// no-compression pass (the verification pass). This lets us
+        /// recompress decompressed pages due to search, scrolling, etc.
+        did_compress: bool = false,
+
+        /// Set after a traversal first reaches the active boundary. When this
+        /// verification traversal reaches the boundary, `did_compress`
+        /// determines whether to restart once more or clear the dirty state.
+        verifying: bool = false,
+    } = .{},
+
     /// Serial of the last page inspected by the traversal. This is
     /// intentionally an implementation detail and is reset by PageList
-    /// operations which invalidate traversal progress.
+    /// operations which restart traversal progress.
     last_serial: ?u64 = null,
 
     /// First node serial which had not been allocated at the prior step. A
     /// node at or above this value before the saved marker requires a restart.
     next_serial: u64 = 0,
 
-    /// Whether this pass successfully compressed at least one page.
-    did_compress: bool = false,
+    /// Schedule compression without disturbing valid traversal progress.
+    fn markDirty(self: *IncrementalCompressionState) void {
+        self.flags.dirty = true;
+    }
 
-    /// Whether this pass is verifying that the prior pass reached a fixed
-    /// point. A verification pass which does work starts another verification
-    /// pass; a verification pass with no work lets compression become idle.
-    verifying: bool = false,
-
-    /// Restart the next step at the first page in the list.
+    /// Discard traversal state and leave no compression work pending.
     fn reset(self: *IncrementalCompressionState) void {
         self.* = .{};
     }
@@ -3921,11 +3942,11 @@ const compressPage_tw = tripwire.module(
 ///
 /// The mode specifies if this is an incremental or full compression.
 /// Compression is SLOW (relatively), so incremental compressions during
-/// idle periods are recommended. For incremental compressions, the result
-/// specifies whether to continue incremental compressing or to stop until
-/// an operation changes the state of the PageList (caller must determine
-/// this). Full compression always returns `complete`, indicating that it has
-/// no continuation to schedule rather than that every page was compressed.
+/// idle periods are recommended. For incremental compression, the result
+/// specifies whether to continue immediately. PageList tracks mutations which
+/// require a later pass in its compression state. Full compression always
+/// returns `complete`, indicating that it has no continuation to schedule
+/// rather than that every page was compressed.
 pub fn compress(
     self: *PageList,
     mode: enum { incremental, full },
@@ -3946,17 +3967,24 @@ pub fn compress(
 
 /// Perform one candidate-bounded incremental cold-history compression step.
 fn compressIncremental(self: *PageList) IncrementalCompressionResult {
+    const state = &self.page_compression;
+
     // If we can't reclaim virtual memory, compression is unsupported.
-    if (!terminal_mem.canReclaim(.strict)) return .unsupported;
+    if (!terminal_mem.canReclaim(.strict)) {
+        state.reset();
+        return .unsupported;
+    }
 
     // If the viewport isn't in the active area, we don't do any compression.
     // The user is likely scrolling and we don't want to cause a bunch of
     // compress/decompress churn. Just wait, they have to go back down
     // eventually, you'd think!
-    if (self.viewport != .active) return .deferred;
+    if (self.viewport != .active) {
+        state.reset();
+        return .deferred;
+    }
 
-    // Get our compression state
-    const state = &self.page_compression;
+    if (!state.flags.dirty) return .complete;
 
     // Find the node following the exact continuation marker within the cold
     // prefix. A missing marker means the list changed between steps, so begin
@@ -3999,7 +4027,7 @@ fn compressIncremental(self: *PageList) IncrementalCompressionResult {
 
         // Compression is substantially more expensive even if it fails.
         // So we just try it.
-        if (self.compressPage(current)) state.did_compress = true;
+        if (self.compressPage(current)) state.flags.did_compress = true;
 
         // Breaking skips the while loop's continuation expression, so advance
         // explicitly before checking whether we reached the active boundary.
@@ -4013,8 +4041,11 @@ fn compressIncremental(self: *PageList) IncrementalCompressionResult {
     // We reached our active node. So we're done, except that we always
     // do one pass after the first success so we can recompress nodes that
     // were possibly decompressed (e.g. by search, inspector, whatever).
-    if (!state.verifying or state.did_compress) {
-        state.* = .{ .verifying = true };
+    if (!state.flags.verifying or state.flags.did_compress) {
+        state.* = .{ .flags = .{
+            .dirty = true,
+            .verifying = true,
+        } };
         return .pending;
     }
 
@@ -6382,14 +6413,17 @@ test "PageList incremental compression defers and completes" {
     var s = try init(testing.allocator, 80, 24, null);
     defer s.deinit();
     try s.growColdPagesForTest(1);
+    try testing.expect(s.page_compression.flags.dirty);
 
     s.scroll(.top);
+    try testing.expect(!s.page_compression.flags.dirty);
     const deferred = s.compress(.incremental);
     try testing.expectEqual(IncrementalCompressionResult.deferred, deferred);
     const cold = s.pages.first.?;
     try testing.expect(!cold.isCompressed());
 
     s.scroll(.active);
+    try testing.expect(s.page_compression.flags.dirty);
     const pending = s.compress(.incremental);
     try testing.expectEqual(IncrementalCompressionResult.pending, pending);
     try testing.expect(cold.isCompressed());
@@ -6399,11 +6433,14 @@ test "PageList incremental compression defers and completes" {
     const complete = s.compress(.incremental);
     try testing.expectEqual(IncrementalCompressionResult.complete, complete);
     try testing.expectEqual(IncrementalCompressionState{}, s.page_compression);
+    try testing.expect(!s.page_compression.flags.dirty);
 
-    // Completed state is fresh, so a later request naturally starts at the
-    // oldest page and recompresses restored content.
+    // Resetting and marking the state dirty begins at the oldest page and
+    // recompresses restored content.
     _ = cold.page();
     try testing.expect(!cold.isCompressed());
+    s.page_compression.reset();
+    s.page_compression.markDirty();
     const reconsidered = s.compress(.incremental);
     try testing.expectEqual(IncrementalCompressionResult.pending, reconsidered);
     try testing.expect(cold.isCompressed());
@@ -6420,10 +6457,13 @@ test "PageList owns incremental compression state" {
     defer s.deinit();
 
     const dirty: IncrementalCompressionState = .{
+        .flags = .{
+            .dirty = true,
+            .did_compress = true,
+            .verifying = true,
+        },
         .last_serial = 42,
         .next_serial = 43,
-        .did_compress = true,
-        .verifying = true,
     };
 
     s.page_compression = dirty;
@@ -6436,11 +6476,17 @@ test "PageList owns incremental compression state" {
     s.scroll(.top);
     try testing.expectEqual(dirty, s.page_compression);
     s.scroll(.active);
-    try testing.expectEqual(IncrementalCompressionState{}, s.page_compression);
+    try testing.expectEqual(
+        IncrementalCompressionState{ .flags = .{ .dirty = true } },
+        s.page_compression,
+    );
 
     s.page_compression = dirty;
     try s.resize(.{ .cols = 80, .rows = 24 });
-    try testing.expectEqual(IncrementalCompressionState{}, s.page_compression);
+    try testing.expectEqual(
+        IncrementalCompressionState{ .flags = .{ .dirty = true } },
+        s.page_compression,
+    );
 
     s.page_compression = dirty;
     s.reset();
@@ -6474,6 +6520,8 @@ test "PageList incremental compression bounds inspected pages" {
     // Precompress every candidate so the incremental pass exercises its
     // metadata-only skip budget without stopping at a resident attempt.
     _ = s.compress(.full);
+    s.page_compression.reset();
+    s.page_compression.markDirty();
     try testing.expectEqual(
         incremental_compression_max_inspected + 1,
         s.memoryStats().compressed_pages,
@@ -6492,7 +6540,7 @@ test "PageList incremental compression bounds inspected pages" {
 
     const second = s.compress(.incremental);
     try testing.expectEqual(IncrementalCompressionResult.pending, second);
-    try testing.expect(s.page_compression.verifying);
+    try testing.expect(s.page_compression.flags.verifying);
     try testing.expect(s.page_compression.last_serial == null);
 
     // The verification pass is bounded independently, too.
@@ -6732,6 +6780,8 @@ test "PageList incremental compression keeps progress after tail growth" {
     defer s.deinit();
     try s.growColdPagesForTest(incremental_compression_max_inspected + 1);
     _ = s.compress(.full);
+    s.page_compression.reset();
+    s.page_compression.markDirty();
 
     var expected_last = s.pages.first.?;
     for (1..incremental_compression_max_inspected) |_|
@@ -6750,7 +6800,7 @@ test "PageList incremental compression keeps progress after tail growth" {
     while (s.page_serial == next_serial) _ = try s.grow();
     const continued = s.compress(.incremental);
     try testing.expectEqual(IncrementalCompressionResult.pending, continued);
-    try testing.expect(s.page_compression.verifying);
+    try testing.expect(s.page_compression.flags.verifying);
 }
 
 test "PageList memory stats do not restore compressed pages" {

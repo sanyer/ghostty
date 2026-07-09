@@ -28,8 +28,10 @@ const mouse = @import("mouse.zig");
 const Stream = @import("stream_terminal.zig").Stream;
 
 const size = @import("size.zig");
+const terminal_mem = @import("mem.zig");
 const pagepkg = @import("page.zig");
 const style = @import("style.zig");
+const PageList = @import("PageList.zig");
 const Screen = @import("Screen.zig");
 const ScreenSet = @import("ScreenSet.zig");
 const Page = pagepkg.Page;
@@ -2291,6 +2293,52 @@ pub fn scrollViewport(self: *Terminal, behavior: ScrollViewport) void {
         .delta => |delta| .{ .delta_row = delta },
         .row => |row| .{ .row = row },
     });
+}
+
+/// Return whether a compression pass is worth running again.
+///
+/// When this returns true, callers should schedule a `compress`
+/// call at some point. We recommend doing incremental compression because
+/// compression is CPU heavy and stalls IO processing (due to the terminal
+/// being blocked). See `compress` for more details.
+///
+/// It is up to the terminal what it decides to compress, but currently
+/// we compress cold (non-viewed, non-editable) scrollback history on
+/// the primary screen.
+///
+/// Note that compression requires specific system features, namely
+/// the ability to retain virtual memory allocations while discarding their
+/// physical memory backings. If the system libghostty is running on
+/// doesn't support that this will always return false and compression
+/// does nothing.
+pub inline fn compressionRequired(self: *const Terminal) bool {
+    if (comptime !terminal_mem.canReclaim(.strict)) return false;
+    return self.screens.get(.primary).?.pages.page_compression.flags.dirty;
+}
+
+/// Compress cold memory to save resident memory space.
+///
+/// This can be done in two modes: incremental or full. A full compression
+/// does a full pass compressing everything it can before returning. This
+/// is not recommended for interactive terminals because compression is
+/// relatively slow and with large scrollbacks this can cause stalls.
+///
+/// Incremental compression bounds itself on how much data it can look
+/// up to compress and how much compression work it does before returning.
+/// It is stateful (we maintain the state) and the return value tells callers
+/// whether they should continue calling it in the future.
+///
+/// Callers should schedule compression when it doesn't impact user
+/// experience, for example during idle times.
+pub fn compress(
+    self: *Terminal,
+    mode: enum { incremental, full },
+) PageList.IncrementalCompressionResult {
+    const pages = &self.screens.get(.primary).?.pages;
+    return switch (mode) {
+        .incremental => pages.compress(.incremental),
+        .full => pages.compress(.full),
+    };
 }
 
 /// To be called before shifting a row (as in insertLines and deleteLines)
