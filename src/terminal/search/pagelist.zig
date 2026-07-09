@@ -3,6 +3,7 @@ const Allocator = std.mem.Allocator;
 const testing = std.testing;
 const terminal = @import("../main.zig");
 const point = terminal.point;
+const size = terminal.size;
 const FlattenedHighlight = @import("../highlight.zig").Flattened;
 const Page = terminal.Page;
 const PageList = terminal.PageList;
@@ -121,7 +122,7 @@ pub const PageListSearch = struct {
         // get our desired amount of data.
         var node_: ?*PageList.List.Node = self.pin.node.prev;
         while (node_) |node| : (node_ = node.prev) {
-            rem -|= try self.window.append(node);
+            rem -|= (try self.window.append(node)).content_len;
 
             // Move our tracked pin to the new node.
             self.pin.node = node;
@@ -357,6 +358,76 @@ test "feed with match spanning page boundary" {
 
     // No more pages
     try testing.expect(!try search.feed());
+}
+
+test "compressed history match spanning page boundary remains compressed" {
+    const alloc = testing.allocator;
+    var t: Terminal = try .init(alloc, .{
+        .cols = 80,
+        .rows = 24,
+        .max_scrollback = 10 * 1024 * 1024,
+    });
+    defer t.deinit(alloc);
+
+    var stream = t.vtStream();
+    defer stream.deinit();
+
+    const pages = &t.screens.active.pages;
+    const first = pages.pages.first.?;
+    const first_page_rows = first.capacity().rows;
+
+    // Put half the needle on either side of a soft-wrapped page boundary.
+    for (0..first_page_rows - 1) |_| stream.nextSlice("\r\n");
+    for (0..pages.cols - 2) |_| stream.nextSlice("x");
+    stream.nextSlice("Test");
+    const second = first.next.?;
+    try testing.expectEqual(second, pages.pages.last.?);
+
+    // Move both matching pages completely into history. The third page holds
+    // the active area, making the first two eligible for compression.
+    while (pages.pages.last.? == second) stream.nextSlice("\r\n");
+    for (0..pages.rows) |_| stream.nextSlice("\r\n");
+    try testing.expect(pages.getTopLeft(.active).node != second);
+
+    _ = pages.compress(.full);
+    try testing.expectEqual(PageList.List.Node.Storage.compressed, first.storage());
+    try testing.expectEqual(PageList.List.Node.Storage.compressed, second.storage());
+    const compressed = pages.memoryStats();
+    try testing.expect(compressed.compressed_pages >= 2);
+
+    var search: PageListSearch = try .init(
+        alloc,
+        "Test",
+        pages,
+        pages.pages.last.?,
+    );
+    defer search.deinit();
+
+    // Drain and feed incrementally until the boundary match is available. The
+    // exact number of feeds depends on how much blank-page text the formatter
+    // trims, so bound progress by the number of pages rather than encoding
+    // that implementation detail in the test.
+    var found: ?FlattenedHighlight = null;
+    for (0..pages.totalPages() + 1) |_| {
+        if (search.next()) |match| {
+            found = match;
+            break;
+        }
+        if (!try search.feed()) break;
+    }
+    try testing.expect(found != null);
+
+    const match = found.?.untracked();
+    try testing.expectEqual(first, match.start.node);
+    try testing.expectEqual(second, match.end.node);
+    try testing.expectEqual(@as(size.CellCountInt, pages.cols - 2), match.start.x);
+    try testing.expectEqual(@as(size.CellCountInt, 1), match.end.x);
+
+    // Search owns formatted text and coordinate maps, not page snapshots. The
+    // original raw mappings therefore remain discarded after matching.
+    try testing.expectEqual(compressed, pages.memoryStats());
+    try testing.expectEqual(PageList.List.Node.Storage.compressed, first.storage());
+    try testing.expectEqual(PageList.List.Node.Storage.compressed, second.storage());
 }
 
 test "feed with match spanning page boundary with newline" {
