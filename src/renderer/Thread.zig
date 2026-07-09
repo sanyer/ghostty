@@ -10,6 +10,7 @@ const internal_os = @import("../os/main.zig");
 const rendererpkg = @import("../renderer.zig");
 const apprt = @import("../apprt.zig");
 const configpkg = @import("../config.zig");
+const terminalpkg = @import("../terminal/main.zig");
 const BlockingQueue = @import("../datastruct/main.zig").BlockingQueue;
 const App = @import("../App.zig");
 
@@ -33,91 +34,6 @@ const must_draw_from_app_thread =
 /// hardcoded with a capacity. We can make this a comptime parameter in
 /// the future if we want it configurable.
 pub const Mailbox = BlockingQueue(rendererpkg.Message, 64);
-
-/// Schedules incremental terminal compression after renderer activity stops.
-///
-/// This owns all renderer-specific compression state. The terminal decides
-/// whether compression is required and performs the actual work; the renderer
-/// only provides idle scheduling and avoids waiting for the terminal lock.
-const Compression = struct {
-    const idle_interval = 250;
-    const step_interval = 1;
-
-    timer: xev.Timer,
-    completion: xev.Completion = .{},
-    reset_completion: xev.Completion = .{},
-
-    fn init() !Compression {
-        return .{ .timer = try xev.Timer.init() };
-    }
-
-    fn deinit(self: *Compression) void {
-        self.timer.deinit();
-    }
-
-    /// Start or postpone compression after a renderer wake.
-    fn wake(self: *Compression, thread: *Thread) void {
-        // An active timer already proves work was pending. Otherwise consult
-        // the terminal, without waiting if rendering or parsing holds its lock.
-        if (self.completion.state() != .active) {
-            if (thread.state.mutex.tryLock()) {
-                defer thread.state.mutex.unlock();
-                if (!thread.state.terminal.compressionRequired()) return;
-            }
-        }
-
-        self.schedule(thread, idle_interval);
-    }
-
-    /// Start the one-shot timer, or move its deadline if it is already active.
-    fn schedule(self: *Compression, thread: *Thread, delay_ms: u64) void {
-        self.timer.reset(
-            &thread.loop,
-            &self.completion,
-            &self.reset_completion,
-            delay_ms,
-            Thread,
-            thread,
-            timerCallback,
-        );
-    }
-
-    fn timerCallback(
-        thread_: ?*Thread,
-        _: *xev.Loop,
-        _: *xev.Completion,
-        result: xev.Timer.RunError!void,
-    ) xev.CallbackAction {
-        _ = result catch |err| switch (err) {
-            error.Canceled => return .disarm,
-            else => {
-                log.warn("error in compression timer err={}", .{err});
-                return .disarm;
-            },
-        };
-
-        const thread = thread_ orelse return .disarm;
-        const self = &thread.compression;
-
-        if (step(thread.state)) |delay| self.schedule(thread, delay);
-        return .disarm;
-    }
-
-    /// Try one bounded step without waiting for the terminal lock. The return
-    /// value is the delay before another attempt, or null when work is done.
-    fn step(state: *rendererpkg.State) ?u64 {
-        if (!state.mutex.tryLock()) return idle_interval;
-        defer state.mutex.unlock();
-
-        return switch (state.terminal.compress(.incremental)) {
-            .pending => step_interval,
-            .unsupported,
-            .deferred,
-            .complete,
-            => null,
-        };
-    }
-};
 
 /// Allocator used for some state
 alloc: std.mem.Allocator,
@@ -158,7 +74,7 @@ cursor_c: xev.Completion = .{},
 cursor_c_cancel: xev.Completion = .{},
 
 /// Incremental scrollback compression scheduling.
-compression: Compression,
+compression: Compression = undefined,
 
 /// The surface we're rendering to.
 surface: *apprt.Surface,
@@ -246,14 +162,11 @@ pub fn init(
     var cursor_timer = try xev.Timer.init();
     errdefer cursor_timer.deinit();
 
-    var compression = try Compression.init();
-    errdefer compression.deinit();
-
     // The mailbox for messaging this thread
     var mailbox = try Mailbox.create(alloc);
     errdefer mailbox.destroy(alloc);
 
-    return .{
+    var result: Thread = .{
         .alloc = alloc,
         .config = .init(config),
         .loop = loop,
@@ -263,13 +176,20 @@ pub fn init(
         .draw_h = draw_h,
         .draw_now = draw_now,
         .cursor_h = cursor_timer,
-        .compression = compression,
         .surface = surface,
         .renderer = renderer_impl,
         .state = state,
         .mailbox = mailbox,
         .app_mailbox = app_mailbox,
     };
+
+    // Only enable compression if we have it enabled... save some
+    // minor resources.
+    if (comptime terminalpkg.compression_enabled) {
+        result.compression = try .init();
+    }
+
+    return result;
 }
 
 /// Clean up the thread. This is only safe to call once the thread
@@ -281,7 +201,8 @@ pub fn deinit(self: *Thread) void {
     self.draw_h.deinit();
     self.draw_now.deinit();
     self.cursor_h.deinit();
-    self.compression.deinit();
+    if (comptime terminalpkg.compression_enabled)
+        self.compression.deinit();
     self.loop.deinit();
 
     // Nothing can possibly access the mailbox anymore, destroy it.
@@ -821,62 +742,102 @@ fn cursorBlinkInterval() u64 {
     return CURSOR_BLINK_INTERVAL;
 }
 
-test "compression timer advances primary history" {
-    const testing = std.testing;
-    const terminalpkg = @import("../terminal/main.zig");
+/// Schedules incremental terminal compression after renderer activity stops.
+///
+/// This owns all renderer-specific compression state. The terminal decides
+/// when compression-relevant activity changes and performs the actual work;
+/// the renderer only provides idle scheduling and avoids waiting for the
+/// terminal lock.
+const Compression = struct {
+    const idle_interval = 250;
+    const step_interval = 1;
 
-    var terminal = try terminalpkg.Terminal.init(testing.allocator, .{
-        .cols = 80,
-        .rows = 24,
-        .max_scrollback = 10 * 1024 * 1024,
-    });
-    defer terminal.deinit(testing.allocator);
+    timer: xev.Timer,
+    completion: xev.Completion = .{},
+    reset_completion: xev.Completion = .{},
+    activity: ?u64 = null,
 
-    const primary = terminal.screens.get(.primary).?;
-    primary.cursorAbsolute(0, primary.pages.rows - 1);
-    while (primary.pages.pages.first.? ==
-        primary.pages.getTopLeft(.active).node)
-    {
-        try primary.cursorDownScroll();
+    fn init() !Compression {
+        return .{ .timer = try xev.Timer.init() };
     }
 
-    // Compression always targets primary history, even while an alternate
-    // screen is active.
-    _ = try terminal.screens.getInit(testing.allocator, .alternate, .{
-        .cols = 80,
-        .rows = 24,
-        .max_scrollback = 0,
-    });
-    terminal.screens.switchTo(.alternate);
+    fn deinit(self: *Compression) void {
+        self.timer.deinit();
+    }
 
-    var mutex: std.Thread.Mutex = .{};
-    var state: rendererpkg.State = .{
-        .mutex = &mutex,
-        .terminal = &terminal,
-    };
-    try testing.expect(terminal.compressionRequired());
+    /// Start or postpone compression after a renderer wake.
+    fn wake(self: *Compression, thread: *Thread) void {
+        // If we have no compression then don't do anything.
+        if (comptime !terminalpkg.compression_enabled) return;
 
-    // Contention postpones background work instead of blocking output.
-    mutex.lock();
-    try testing.expectEqual(
-        @as(?u64, Compression.idle_interval),
-        Compression.step(&state),
-    );
-    mutex.unlock();
+        // PageList activity, rather than a generic renderer wake, restarts the
+        // idle interval. In particular, the inspector wakes the renderer every
+        // frame without changing terminal contents and must not starve this
+        // timer indefinitely.
+        if (thread.state.mutex.tryLock()) {
+            defer thread.state.mutex.unlock();
+            const activity = thread.state.terminal.compressionActivity();
+            if (self.activity == activity) return;
+            self.activity = activity;
+        }
 
-    try testing.expectEqual(
-        @as(?u64, Compression.step_interval),
-        Compression.step(&state),
-    );
-    try testing.expectEqual(
-        @as(usize, 1),
-        primary.pages.memoryStats().compressed_pages,
-    );
+        // Contention may mean parsing is active. Scheduling is a harmless
+        // false positive when no compression work is actually pending.
+        self.schedule(thread, idle_interval);
+    }
 
-    // The no-work verification pass completes and leaves the timer disarmed.
-    try testing.expectEqual(
-        @as(?u64, null),
-        Compression.step(&state),
-    );
-    try testing.expect(!terminal.compressionRequired());
-}
+    /// Start the one-shot timer, or move its deadline if it is already active.
+    fn schedule(self: *Compression, thread: *Thread, delay_ms: u64) void {
+        self.timer.reset(
+            &thread.loop,
+            &self.completion,
+            &self.reset_completion,
+            delay_ms,
+            Thread,
+            thread,
+            timerCallback,
+        );
+    }
+
+    fn timerCallback(
+        thread_: ?*Thread,
+        _: *xev.Loop,
+        _: *xev.Completion,
+        result: xev.Timer.RunError!void,
+    ) xev.CallbackAction {
+        _ = result catch |err| switch (err) {
+            error.Canceled => return .disarm,
+            else => {
+                log.warn("error in compression timer err={}", .{err});
+                return .disarm;
+            },
+        };
+
+        const thread = thread_ orelse return .disarm;
+        const self = &thread.compression;
+
+        if (self.step(thread.state)) |delay| self.schedule(thread, delay);
+        return .disarm;
+    }
+
+    /// Try one bounded step without waiting for the terminal lock. The return
+    /// value is the delay before another attempt, or null when work is done.
+    fn step(self: *Compression, state: *rendererpkg.State) ?u64 {
+        if (!state.mutex.tryLock()) return idle_interval;
+        defer state.mutex.unlock();
+
+        const activity = state.terminal.compressionActivity();
+        if (self.activity != activity) {
+            self.activity = activity;
+            return idle_interval;
+        }
+
+        return switch (state.terminal.compress(.incremental)) {
+            .pending => step_interval,
+            .unsupported,
+            .deferred,
+            .complete,
+            => null,
+        };
+    }
+};

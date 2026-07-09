@@ -28,7 +28,6 @@ const mouse = @import("mouse.zig");
 const Stream = @import("stream_terminal.zig").Stream;
 
 const size = @import("size.zig");
-const terminal_mem = @import("mem.zig");
 const pagepkg = @import("page.zig");
 const style = @import("style.zig");
 const PageList = @import("PageList.zig");
@@ -2295,12 +2294,11 @@ pub fn scrollViewport(self: *Terminal, behavior: ScrollViewport) void {
     });
 }
 
-/// Return whether a compression pass is worth running again.
+/// Return the current compression activity value.
 ///
-/// When this returns true, callers should schedule a `compress`
-/// call at some point. We recommend doing incremental compression because
-/// compression is CPU heavy and stalls IO processing (due to the terminal
-/// being blocked). See `compress` for more details.
+/// Callers should schedule a `compress` call whenever this value changes. The
+/// direction of the change has no meaning; this is an opaque change token
+/// rather than a monotonic sequence exposed by Terminal.
 ///
 /// It is up to the terminal what it decides to compress, but currently
 /// we compress cold (non-viewed, non-editable) scrollback history on
@@ -2308,12 +2306,12 @@ pub fn scrollViewport(self: *Terminal, behavior: ScrollViewport) void {
 ///
 /// Note that compression requires specific system features, namely
 /// the ability to retain virtual memory allocations while discarding their
-/// physical memory backings. If the system libghostty is running on
-/// doesn't support that this will always return false and compression
-/// does nothing.
-pub inline fn compressionRequired(self: *const Terminal) bool {
-    if (comptime !terminal_mem.canReclaim(.strict)) return false;
-    return self.screens.get(.primary).?.pages.page_compression.flags.dirty;
+/// physical memory backings. Callers must still use `compress` to determine
+/// whether compression is supported on the current target.
+pub fn compressionActivity(self: *const Terminal) u64 {
+    const state = &self.screens.get(.primary).?.pages.page_compression;
+    // For now we don't use the extra 16 bits.
+    return @as(u64, state.activity_serial);
 }
 
 /// Compress cold memory to save resident memory space.
