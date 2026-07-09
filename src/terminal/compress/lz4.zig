@@ -37,6 +37,8 @@
 //! Format reference:
 //! https://github.com/lz4/lz4/blob/dev/doc/lz4_Block_format.md
 const std = @import("std");
+const assert = std.debug.assert;
+const testing = std.testing;
 
 /// Maximum input accepted by the reference LZ4 block API. Keeping the same
 /// limit means `compressBound` fits in the integer sizes used by LZ4 callers
@@ -125,93 +127,101 @@ pub fn compress(
     // positions to the end of that match.
     var op: usize = 0;
     var anchor: usize = 0;
-    var ip: usize = 0;
-    var search_attempts: usize = 0;
 
     // LZ4's format leaves the final five input bytes as literals and starts
     // the final match at least twelve bytes before the end. This is not
     // required by our safe decoder, but makes blocks compatible with fast
-    // decoders that rely on the standard format restrictions.
-    const search_end = if (input.len >= match_find_limit)
-        input.len - match_find_limit
-    else
-        0;
-
-    while (input.len >= match_find_limit and ip <= search_end) {
-        // Hash the next four bytes and replace the table entry immediately.
-        // Hash collisions are expected, so equality is checked below before
-        // accepting the saved position as a match.
-        const sequence = readU32(input, ip);
-        const hash = hashSequence(sequence);
-        const candidates = table[hash];
-        rememberPosition(table, hash, ip);
-
-        const match_pos_ = candidatePosition(ip, @truncate(candidates)) orelse
-            candidatePosition(ip, @truncate(candidates >> 16));
-        if (match_pos_ == null) {
-            advanceSearch(&ip, anchor, &search_attempts);
-            continue;
-        }
-
-        var match_pos = match_pos_.?;
-
-        if (readU32(input, match_pos) != sequence) {
-            const older = candidatePosition(
-                ip,
-                @truncate(candidates >> 16),
-            );
-            if (older == null or
-                readU32(input, older.?) != sequence or
-                input[older.? + min_match] != input[ip + min_match])
-            {
-                advanceSearch(&ip, anchor, &search_attempts);
-                continue;
-            }
-            match_pos = older.?;
-        }
-
-        // Pull the match backwards into the current literal run. This is
-        // particularly helpful around aligned cell records. As with forward
-        // extension, compare words before locating the first differing byte.
-        const match_begin = matchBegin(input, ip, match_pos, anchor);
-        ip = match_begin.position;
-        match_pos = match_begin.candidate;
-
-        // We already compared the first four bytes. Continue up to the point
-        // where the required last five literals begin. `matchEnd` compares a
-        // machine word at a time before locating the first differing byte.
+    // decoders that rely on the standard format restrictions. Inputs too
+    // short for any match are emitted below as one literal-only sequence.
+    if (input.len >= match_find_limit) {
+        const search_end = input.len - match_find_limit;
         const match_end_limit = input.len - last_literals;
-        const match_end = matchEnd(
-            input,
-            ip + min_match,
-            match_pos + min_match,
-            match_end_limit,
-        );
+        var ip: usize = 0;
+        var search_attempts: usize = 0;
 
-        try emitSequence(
-            output,
-            &op,
-            input[anchor..ip],
-            @intCast(ip - match_pos),
-            match_end - ip,
-        );
+        search: while (ip <= search_end) {
+            // Hash the next four bytes and replace the table entry
+            // immediately. Hash collisions are expected, so equality is
+            // checked below before accepting a saved position as a match.
+            const sequence = readU32(input, ip);
+            const hash = hashSequence(sequence);
+            const candidates = table[hash];
+            rememberPosition(table, hash, ip);
 
-        // The main loop jumps over the matched bytes rather than hashing every
-        // position within them. Seed one position near the end so an adjacent
-        // repeated record can still refer back into this match. The next loop
-        // iteration will then seed `match_end` normally.
-        if (match_end >= 2 and match_end - 2 + min_match <= input.len) {
-            const seed = match_end - 2;
-            rememberPosition(
-                table,
-                hashSequence(readU32(input, seed)),
-                seed,
+            var match_pos = candidatePosition(ip, @truncate(candidates)) orelse
+                candidatePosition(ip, @truncate(candidates >> 16)) orelse
+                {
+                    advanceSearch(&ip, anchor, &search_attempts);
+                    continue :search;
+                };
+
+            if (readU32(input, match_pos) != sequence) {
+                // The nearest candidate collided. Fall back to the older
+                // one, which must additionally match one byte beyond the
+                // minimum so collision-prone minimum-length matches from
+                // the stale half are not emitted.
+                match_pos = older: {
+                    if (candidatePosition(
+                        ip,
+                        @truncate(candidates >> 16),
+                    )) |older| {
+                        if (readU32(input, older) == sequence and
+                            input[older + min_match] == input[ip + min_match])
+                        {
+                            break :older older;
+                        }
+                    }
+
+                    advanceSearch(&ip, anchor, &search_attempts);
+                    continue :search;
+                };
+            }
+
+            // Pull the match backwards into the current literal run. This is
+            // particularly helpful around aligned cell records. As with
+            // forward extension, compare words before locating the first
+            // differing byte.
+            const match_begin = matchBegin(input, ip, match_pos, anchor);
+            ip = match_begin.position;
+            match_pos = match_begin.candidate;
+
+            // We already compared the first four bytes. Continue up to the
+            // point where the required last five literals begin. `matchEnd`
+            // compares a machine word at a time before locating the first
+            // differing byte.
+            const match_end = matchEnd(
+                input,
+                ip + min_match,
+                match_pos + min_match,
+                match_end_limit,
             );
-        }
 
-        ip = match_end;
-        anchor = ip;
-        search_attempts = 0;
+            try emitSequence(
+                output,
+                &op,
+                input[anchor..ip],
+                @intCast(ip - match_pos),
+                match_end - ip,
+            );
+
+            // The main loop jumps over the matched bytes rather than hashing
+            // every position within them. Seed one position near the end so
+            // an adjacent repeated record can still refer back into this
+            // match. The next loop iteration will then seed `match_end`
+            // normally.
+            if (match_end >= 2 and match_end - 2 + min_match <= input.len) {
+                const seed = match_end - 2;
+                rememberPosition(
+                    table,
+                    hashSequence(readU32(input, seed)),
+                    seed,
+                );
+            }
+
+            ip = match_end;
+            anchor = ip;
+            search_attempts = 0;
+        }
     }
 
     // Whatever remains after the last match is the terminal literal-only
@@ -229,6 +239,17 @@ pub fn compress(
 pub fn decompress(input: []const u8, output: []u8) DecompressError!usize {
     // `ip` and `op` always identify the next unread input byte and the next
     // unwritten output byte respectively.
+    //
+    // The decoder is written around one observation: almost every sequence
+    // in real blocks has a short literal run and a short match. Both fast
+    // paths below copy a fixed number of bytes blindly and let the length
+    // arithmetic sort out how many of them were meaningful. Writing past a
+    // run's logical end is safe within the output buffer because decoding
+    // is strictly in order: every byte past `op` is either rewritten by a
+    // later copy before anything can read it, or lies beyond the block's
+    // final length and is never part of the result. The margin conditions
+    // on the fast paths also subsume the exact bounds checks they replace,
+    // which keeps decoding of malformed blocks memory-safe.
     var ip: usize = 0;
     var op: usize = 0;
 
@@ -245,13 +266,28 @@ pub fn decompress(input: []const u8, output: []u8) DecompressError!usize {
         ip += 1;
 
         // The high nibble and any extension bytes describe the literal run.
-        // Bounds are checked before slicing so malformed blocks never cause a
-        // partial read or write.
-        const literal_len = try decodeLength(input, &ip, token >> 4);
-        if (literal_len > input.len - ip) return error.TruncatedInput;
-        if (literal_len > output.len - op) return error.OutputTooSmall;
+        // The literals are copied as a side effect of computing the length.
+        const literal_len: usize = len: {
+            const nibble: usize = token >> 4;
+            if (nibble != 15 and
+                @min(input.len - ip, output.len - op) >= 16)
+            {
+                // A run below the extension threshold is at most 14 bytes,
+                // so with a 16-byte margin on both buffers one wide copy
+                // covers it.
+                copyIntAt(u128, output, op, input, ip);
+                break :len nibble;
+            }
 
-        copyLiterals(input, ip, output, op, literal_len);
+            // Extended or margin-poor runs take the checked path. Bounds are
+            // verified before copying so malformed blocks never cause a
+            // partial read or write.
+            const len = try decodeLength(input, &ip, nibble);
+            if (len > input.len - ip) return error.TruncatedInput;
+            if (len > output.len - op) return error.OutputTooSmall;
+            @memcpy(output[op..][0..len], input[ip..][0..len]);
+            break :len len;
+        };
         ip += literal_len;
         op += literal_len;
 
@@ -263,13 +299,29 @@ pub fn decompress(input: []const u8, output: []u8) DecompressError!usize {
         }
 
         if (input.len - ip < 2) return error.TruncatedInput;
-        const offset = std.mem.readInt(u16, input[ip..][0..2], .little);
+        const offset = readIntAt(u16, input, ip);
         ip += 2;
         if (offset == 0 or offset > op) return error.InvalidOffset;
 
         // The token stores the match length minus the four-byte minimum. As
         // with literals, a low nibble of 15 is extended by following bytes.
-        const encoded_match_len = try decodeLength(input, &ip, token & 0x0F);
+        const match_nibble: usize = token & 0x0F;
+
+        // A match whose length fits its nibble spans at most 18 bytes, so
+        // three blind copies always cover it. They are overlap-safe when the
+        // offset is at least a word: each load lies a full word behind the
+        // store which could observe it, so repeating patterns propagate
+        // correctly.
+        if (match_nibble != 15 and offset >= 8 and output.len - op >= 18) {
+            const match = op - offset;
+            copyIntAt(u64, output, op, output, match);
+            copyIntAt(u64, output, op + 8, output, match + 8);
+            copyIntAt(u16, output, op + 16, output, match + 16);
+            op += match_nibble + min_match;
+            continue;
+        }
+
+        const encoded_match_len = try decodeLength(input, &ip, match_nibble);
         const match_len = std.math.add(
             usize,
             encoded_match_len,
@@ -278,8 +330,8 @@ pub fn decompress(input: []const u8, output: []u8) DecompressError!usize {
         if (match_len > output.len - op) return error.OutputTooSmall;
 
         // Match copies may overlap, so this cannot always be one memcpy.
-        // `copyMatch` uses word copies where the offset permits them and
-        // expands the common one-, two-, and four-byte repeating patterns.
+        // `copyMatch` expands the common small repeating periods into wide
+        // stores and uses word copies for larger offsets.
         copyMatch(output, op, offset, match_len);
         op += match_len;
     }
@@ -298,8 +350,8 @@ fn emitSequence(
     offset: u16,
     match_len: usize,
 ) CompressError!void {
-    std.debug.assert(match_len >= min_match);
-    std.debug.assert(offset > 0);
+    assert(match_len >= min_match);
+    assert(offset > 0);
 
     const encoded_match_len = match_len - min_match;
 
@@ -325,7 +377,7 @@ fn emitSequence(
 
     // Match length extensions follow the offset because this is where the
     // decoder expects them in an LZ4 sequence.
-    std.mem.writeInt(u16, output[op.*..][0..2], offset, .little);
+    writeIntAt(u16, output, op.*, offset);
     op.* += 2;
     if (encoded_match_len >= 15)
         writeLength(output, op, encoded_match_len - 15);
@@ -378,7 +430,7 @@ fn writeLength(output: []u8, op: *usize, length_: usize) void {
 fn decodeLength(
     input: []const u8,
     ip: *usize,
-    nibble: u8,
+    nibble: usize,
 ) DecompressError!usize {
     var length: usize = nibble;
     if (nibble != 15) return length;
@@ -549,129 +601,69 @@ fn matchEnd(
     return position;
 }
 
-/// Copy one literal run. Most non-final sequences contain only a handful of
-/// literals. When both buffers have eight accessible bytes, one fixed-width
-/// copy is cheaper than a variable-size memcpy; bytes beyond the logical run
-/// are overwritten immediately by the match. Final literals use the exact
-/// copy because the encoded block ends directly after them.
-fn copyLiterals(
-    input: []const u8,
-    ip: usize,
-    output: []u8,
-    op: usize,
-    literal_len: usize,
-) void {
-    if (literal_len == 0) return;
-
-    if (literal_len <= @sizeOf(u64) and
-        input.len - ip >= @sizeOf(u64) and
-        output.len - op >= @sizeOf(u64))
-    {
-        copyIntAt(u64, output, op, input, ip);
-        return;
-    }
-
-    @memcpy(output[op..][0..literal_len], input[ip..][0..literal_len]);
-}
-
 /// Copy one decoded match from `offset` bytes behind `op`.
 ///
-/// Offsets of at least eight can be copied one word at a time even when the
-/// complete match overlaps: every individual load still precedes its store by
-/// a full word. One-, two-, and four-byte periods are expanded into a repeated
-/// word. Other small offsets retain the required byte-wise propagation.
-fn copyMatch(output: []u8, op: usize, offset: usize, match_len: usize) void {
-    const match_pos = op - offset;
-    const destination = output[op..][0..match_len];
-    const can_overcopy = output.len - op - match_len >= 3;
+/// The caller has validated that the match fits: `op + match_len` never
+/// exceeds `output.len`. Wide copies may write a few scratch bytes past the
+/// match's logical end; as described in `decompress`, that is safe anywhere
+/// the write stays inside the output buffer. Every path therefore bounds its
+/// wide stores by both the match end and the buffer end, and the bytewise
+/// loop at the bottom finishes whatever remains.
+fn copyMatch(output: []u8, op_: usize, offset: usize, match_len: usize) void {
+    var op = op_;
+    const end = op_ + match_len;
 
-    if (offset >= @sizeOf(u64)) {
-        var copied: usize = 0;
-        while (match_len - copied >= @sizeOf(u64)) {
-            copyIntAt(
-                u64,
-                output,
-                op + copied,
-                output,
-                match_pos + copied,
-            );
-            copied += @sizeOf(u64);
-        }
-
-        if (copied < match_len and can_overcopy) {
-            const remaining = match_len - copied;
-            if (remaining <= @sizeOf(u32)) {
-                copyIntAt(
-                    u32,
-                    output,
-                    op + copied,
-                    output,
-                    match_pos + copied,
-                );
-            } else {
-                copyIntAt(
-                    u64,
-                    output,
-                    op + copied,
-                    output,
-                    match_pos + copied,
-                );
-            }
-        } else {
-            while (copied < match_len) : (copied += 1)
-                destination[copied] = output[match_pos + copied];
-        }
+    // A source which ends behind the copy can never overlap it. Long
+    // distant matches are common in structured pages (repeated rows and
+    // whole blank regions), and one exact memcpy moves them in cache-line
+    // units. Shorter matches are not worth the call overhead.
+    if (offset >= match_len and match_len >= 64) {
+        @memcpy(
+            output[op..][0..match_len],
+            output[op - offset ..][0..match_len],
+        );
         return;
     }
 
-    if (offset == 1 or offset == 2 or offset == 4) {
-        const pattern: u64 = switch (offset) {
-            1 => @as(u64, output[match_pos]) * 0x0101_0101_0101_0101,
-            2 => @as(u64, readIntAt(u16, output, match_pos)) *
-                0x0001_0001_0001_0001,
-            4 => @as(u64, readIntAt(u32, output, match_pos)) *
-                0x0000_0001_0000_0001,
-            else => unreachable,
-        };
+    switch (offset) {
+        // A period which divides the word size expands into one repeated
+        // pattern word. Long runs (blank lines, repeated cells) then become
+        // independent stores, with no load waiting on a preceding store.
+        // Stores advance by whole words from `op`, which preserves the
+        // pattern's phase.
+        1, 2, 4, 8 => {
+            const pattern: u64 = switch (offset) {
+                1 => @as(u64, output[op - 1]) * 0x0101_0101_0101_0101,
+                2 => @as(u64, readIntAt(u16, output, op - 2)) *
+                    0x0001_0001_0001_0001,
+                4 => @as(u64, readIntAt(u32, output, op - 4)) *
+                    0x0000_0001_0000_0001,
+                8 => readIntAt(u64, output, op - 8),
+                else => unreachable,
+            };
 
-        var copied: usize = 0;
-        while (match_len - copied >= @sizeOf(u64)) {
-            writeIntAt(u64, output, op + copied, pattern);
-            copied += @sizeOf(u64);
-        }
+            const limit = @min(end, output.len -| 7);
+            while (op < limit) : (op += 8)
+                writeIntAt(u64, output, op, pattern);
+        },
 
-        if (copied < match_len and can_overcopy) {
-            const remaining = match_len - copied;
-            if (remaining <= @sizeOf(u32)) {
-                writeIntAt(u32, output, op + copied, @truncate(pattern));
-            } else {
-                writeIntAt(u64, output, op + copied, pattern);
-            }
-        } else {
-            while (copied < match_len) : (copied += 1) {
-                destination[copied] = @truncate(pattern >> @intCast(
-                    (copied % @sizeOf(u64)) * 8,
-                ));
-            }
-        }
-        return;
+        // Wide copies are overlap-safe for the remaining offsets of at
+        // least a copy unit: each load lies a full unit behind the store
+        // which could observe it. Offsets 3, 5, 6, and 7 fall through to
+        // the bytewise loop; they are rare in real data and word tricks
+        // for them cost more in complexity than they return.
+        else => if (offset >= 16) {
+            const limit = @min(end, output.len -| 15);
+            while (op < limit) : (op += 16)
+                copyIntAt(u128, output, op, output, op - offset);
+        } else if (offset >= 8) {
+            const limit = @min(end, output.len -| 7);
+            while (op < limit) : (op += 8)
+                copyIntAt(u64, output, op, output, op - offset);
+        },
     }
 
-    if (offset >= @sizeOf(u32) and can_overcopy) {
-        var copied: usize = 0;
-        while (copied < match_len) : (copied += @sizeOf(u32)) {
-            copyIntAt(
-                u32,
-                output,
-                op + copied,
-                output,
-                match_pos + copied,
-            );
-        }
-        return;
-    }
-
-    for (0..match_len) |i| destination[i] = output[match_pos + i];
+    while (op < end) : (op += 1) output[op] = output[op - offset];
 }
 
 /// Map a four-byte input sequence to its scratch-table slot.
@@ -681,7 +673,6 @@ inline fn hashSequence(sequence: u32) usize {
 
 /// Shared round-trip assertion used by the corpus-style tests below.
 fn expectRoundTrip(input: []const u8) !void {
-    const testing = std.testing;
     const bound = try compressBound(input.len);
     const encoded = try testing.allocator.alloc(u8, bound);
     defer testing.allocator.free(encoded);
@@ -698,15 +689,12 @@ fn expectRoundTrip(input: []const u8) !void {
 }
 
 test "compressBound" {
-    const testing = std.testing;
     try testing.expectEqual(@as(usize, 16), try compressBound(0));
     try testing.expectEqual(@as(usize, 272), try compressBound(255));
     try testing.expectError(error.InputTooLarge, compressBound(max_input_size + 1));
 }
 
 test "literal-only compatibility vectors" {
-    const testing = std.testing;
-
     var empty: [0]u8 = .{};
     try testing.expectEqual(@as(usize, 0), try decompress(&.{0}, &empty));
 
@@ -727,7 +715,6 @@ test "literal-only compatibility vectors" {
 }
 
 test "overlapping match compatibility vector" {
-    const testing = std.testing;
     // One literal 'a', followed by a four-byte match at distance one.
     var output: [5]u8 = undefined;
     try testing.expectEqual(@as(usize, 5), try decompress(
@@ -738,7 +725,6 @@ test "overlapping match compatibility vector" {
 }
 
 test "extended overlapping match compatibility vector" {
-    const testing = std.testing;
     // One literal followed by a 274-byte match. The match extension is
     // encoded as 255 + 0 after the low token nibble's initial 15 bytes.
     var output: [275]u8 = undefined;
@@ -750,7 +736,6 @@ test "extended overlapping match compatibility vector" {
 }
 
 test "short offset compatibility vectors" {
-    const testing = std.testing;
 
     // These blocks end immediately after their match. Besides covering the
     // repeating-pattern paths, they verify that the decoder uses exact copies
@@ -775,7 +760,6 @@ test "short offset compatibility vectors" {
 }
 
 test "bounded wild copies are overwritten by final literals" {
-    const testing = std.testing;
 
     // The first sequence's nine-byte match leaves the five final literals
     // required by the LZ4 block format. Its logical one-byte tail is copied as
@@ -807,7 +791,6 @@ test "bounded wild copies are overwritten by final literals" {
 }
 
 test "maximum match offset compatibility vector" {
-    const testing = std.testing;
     const literal_len = std.math.maxInt(u16);
     const extension_len = (literal_len - 15) / 255 + 1;
     const encoded = try testing.allocator.alloc(
@@ -834,7 +817,6 @@ test "maximum match offset compatibility vector" {
 }
 
 test "round trips boundary-sized inputs" {
-    const testing = std.testing;
     const lengths = [_]usize{
         0,   1,      3,      4,      5,   12,  15,  16,  19,
         20,  254,    255,    256,    269, 270, 271, 510, 511,
@@ -850,7 +832,6 @@ test "round trips boundary-sized inputs" {
 }
 
 test "round trips compressible page-sized inputs" {
-    const testing = std.testing;
     const page_len = 400 * 1024;
 
     const zeros = try testing.allocator.alloc(u8, page_len);
@@ -869,7 +850,6 @@ test "round trips compressible page-sized inputs" {
 }
 
 test "round trips deterministic random inputs" {
-    const testing = std.testing;
     var prng = std.Random.DefaultPrng.init(0x4C5A_3401);
     const random = prng.random();
 
@@ -883,7 +863,6 @@ test "round trips deterministic random inputs" {
 }
 
 test "compress reports short output" {
-    const testing = std.testing;
     const input = "a terminal page needs enough output space";
     var table: HashTable = undefined;
     var output: [4]u8 = undefined;
@@ -894,7 +873,6 @@ test "compress reports short output" {
 }
 
 test "decompress rejects malformed blocks" {
-    const testing = std.testing;
     var output: [32]u8 = undefined;
 
     try testing.expectError(error.TruncatedInput, decompress(&.{0xF0}, &output));
@@ -908,11 +886,6 @@ test "decompress rejects malformed blocks" {
     try testing.expectError(error.OutputSizeMismatch, decompress(&.{0}, output[0..1]));
 }
 
-test "fuzz decompressor safety" {
-    return std.testing.fuzz({}, fuzzDecompress, .{});
-}
-
-fn fuzzDecompress(_: void, input: []const u8) !void {
-    var output: [4096]u8 = undefined;
-    _ = decompress(input, &output) catch {};
+test {
+    _ = @import("lz4_differential.zig");
 }
