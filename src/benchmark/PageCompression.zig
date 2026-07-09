@@ -4,7 +4,8 @@
 //! This benchmark is intentionally independent of terminal page ownership and
 //! lifecycle. It treats its input as opaque bytes and calls only the standalone
 //! LZ4 block codec. In particular, it does not compress pages owned by a live
-//! terminal and is not evidence that compression is enabled in production.
+//! terminal or measure the scheduling and state transitions used by automatic
+//! scrollback compression.
 //!
 //! ## Input
 //!

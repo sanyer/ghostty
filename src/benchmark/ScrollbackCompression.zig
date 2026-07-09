@@ -38,9 +38,10 @@
 //!
 //! A fully historical page is a node strictly before the node containing the
 //! top of the active area. The boundary node is deliberately excluded because
-//! it can contain both history and active rows. Compression is currently an
-//! on-demand PageList operation only; this benchmark does not enable it in
-//! normal terminal execution.
+//! it can contain both history and active rows. Normal terminal execution
+//! compresses these pages incrementally after output becomes idle. The
+//! benchmark invokes PageList operations directly so its timed regions exclude
+//! the production scheduler's idle delay and renderer-thread coordination.
 //!
 //! ## Examples
 //!

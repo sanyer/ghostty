@@ -1,11 +1,23 @@
 const std = @import("std");
 const cimgui = @import("dcimgui");
 const terminal = @import("../../terminal/main.zig");
+const pagepkg = @import("../../terminal/page.zig");
 const stylepkg = @import("../../terminal/style.zig");
 const widgets = @import("../widgets.zig");
 const units = @import("../units.zig");
 
 const PageList = terminal.PageList;
+
+/// Cell pointers resolved against a Node.PreservedPage rather than the
+/// PageList node.
+/// Omitting the node makes it impossible for inspector helpers to
+/// accidentally restore the original compressed page.
+const InspectedCell = struct {
+    row: *pagepkg.Row,
+    cell: *pagepkg.Cell,
+    row_idx: terminal.size.CellCountInt,
+    col_idx: terminal.size.CellCountInt,
+};
 
 /// PageList inspector widget.
 pub const Inspector = struct {
@@ -82,11 +94,18 @@ pub const Inspector = struct {
                 })) continue;
                 defer cimgui.c.ImGui_TreePop();
 
-                // Opening a compressed entry is an explicit request for its
-                // contents, so restoration is appropriate here. Collapsed
-                // entries use only metadata and remain compressed.
-                const page = resident orelse page_node.page();
-                widgets.page.inspector(page);
+                // Decode compressed contents into a temporary page. The
+                // original node stays compressed while its entry is open.
+                var preserved = page_node.pagePreservingState(
+                    std.heap.page_allocator,
+                ) catch {
+                    cimgui.c.ImGui_TextDisabled(
+                        "(unable to copy compressed page)",
+                    );
+                    continue;
+                };
+                defer preserved.deinit();
+                widgets.page.inspector(preserved.page());
             }
         }
     }
@@ -627,16 +646,35 @@ pub const CellChooser = struct {
             .history => terminal.Point{ .history = self.lookup_coord },
         };
 
-        const cell = pages.getCell(pt) orelse {
+        const pin = pages.pin(pt) orelse {
             cimgui.c.ImGui_TextDisabled("(cell out of range)");
             return;
         };
 
-        self.cell_info.draw(cell, pt);
+        // Cell pointers must come from the same page whose auxiliary tables
+        // we inspect. For compressed nodes this is an independent preserved
+        // page, leaving the PageList node compressed across inspector frames.
+        var preserved = pin.node.pagePreservingState(
+            std.heap.page_allocator,
+        ) catch {
+            cimgui.c.ImGui_TextDisabled("(unable to copy compressed page)");
+            return;
+        };
+        defer preserved.deinit();
+
+        const page = preserved.page();
+        const rac = page.getRowAndCell(pin.x, pin.y);
+        const cell: InspectedCell = .{
+            .row = rac.row,
+            .cell = rac.cell,
+            .row_idx = pin.y,
+            .col_idx = pin.x,
+        };
+
+        self.cell_info.draw(cell, pt, page);
 
         if (cell.cell.style_id != stylepkg.default_id) {
             cimgui.c.ImGui_SeparatorText("Style");
-            const page = cell.node.page();
             const style = page.styles.get(
                 page.memory,
                 cell.cell.style_id,
@@ -646,12 +684,12 @@ pub const CellChooser = struct {
 
         if (cell.cell.hyperlink) {
             cimgui.c.ImGui_SeparatorText("Hyperlink");
-            hyperlinkTable(cell);
+            hyperlinkTable(cell, page);
         }
 
         if (cell.cell.hasGrapheme()) {
             cimgui.c.ImGui_SeparatorText("Grapheme");
-            graphemeTable(cell);
+            graphemeTable(cell, page);
         }
     }
 };
@@ -665,7 +703,7 @@ fn maxCoord(
     return br_point.coord();
 }
 
-fn hyperlinkTable(cell: PageList.Cell) void {
+fn hyperlinkTable(cell: InspectedCell, page: *const terminal.Page) void {
     if (!cimgui.c.ImGui_BeginTable(
         "cell_hyperlink",
         2,
@@ -673,7 +711,6 @@ fn hyperlinkTable(cell: PageList.Cell) void {
     )) return;
     defer cimgui.c.ImGui_EndTable();
 
-    const page = cell.node.page();
     const link_id = page.lookupHyperlink(cell.cell) orelse {
         cimgui.c.ImGui_TableNextRow();
         _ = cimgui.c.ImGui_TableSetColumnIndex(0);
@@ -720,7 +757,7 @@ fn hyperlinkTable(cell: PageList.Cell) void {
     cimgui.c.ImGui_Text("%d", refs);
 }
 
-fn graphemeTable(cell: PageList.Cell) void {
+fn graphemeTable(cell: InspectedCell, page: *const terminal.Page) void {
     if (!cimgui.c.ImGui_BeginTable(
         "cell_grapheme",
         2,
@@ -728,7 +765,6 @@ fn graphemeTable(cell: PageList.Cell) void {
     )) return;
     defer cimgui.c.ImGui_EndTable();
 
-    const page = cell.node.page();
     const cps = page.lookupGrapheme(cell.cell) orelse {
         cimgui.c.ImGui_TableNextRow();
         _ = cimgui.c.ImGui_TableSetColumnIndex(0);
@@ -768,8 +804,9 @@ pub const CellInfo = struct {
 
     pub fn draw(
         _: *const CellInfo,
-        cell: PageList.Cell,
+        cell: InspectedCell,
         point: terminal.Point,
+        page: *const terminal.Page,
     ) void {
         if (!cimgui.c.ImGui_BeginTable(
             "cell_info",
@@ -835,7 +872,7 @@ pub const CellInfo = struct {
             _ = cimgui.c.ImGui_TableSetColumnIndex(2);
             if (cimgui.c.ImGui_BeginListBox("##cell_grapheme", .{ .x = 0, .y = 0 })) {
                 defer cimgui.c.ImGui_EndListBox();
-                if (cell.node.page().lookupGrapheme(cell.cell)) |cps| {
+                if (page.lookupGrapheme(cell.cell)) |cps| {
                     var buf: [96]u8 = undefined;
                     for (cps) |cp| {
                         const label = std.fmt.bufPrintZ(&buf, "U+{X}", .{cp}) catch "U+?";
@@ -933,7 +970,7 @@ pub const CellInfo = struct {
             widgets.helpMarker("OSC8 hyperlink ID associated with this cell.");
             _ = cimgui.c.ImGui_TableSetColumnIndex(2);
 
-            const link_id = cell.node.page().lookupHyperlink(cell.cell) orelse 0;
+            const link_id = page.lookupHyperlink(cell.cell) orelse 0;
             cimgui.c.ImGui_Text("id=%d", link_id);
         }
     }
