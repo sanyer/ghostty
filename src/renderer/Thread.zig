@@ -792,10 +792,17 @@ const Compression = struct {
             const activity = thread.state.terminal.compressionActivity();
             if (self.activity == activity) return;
             self.activity = activity;
+        } else if (self.completion.state() == .active) {
+            // Contention doesn't prove that compression-relevant activity
+            // changed. Keep an existing deadline so frequent inspector frames
+            // cannot postpone compression forever. The timer rechecks both the
+            // activity token and lock availability before doing any work.
+            return;
         }
 
         // Contention may mean parsing is active. Scheduling is a harmless
-        // false positive when no compression work is actually pending.
+        // false positive when no compression work is actually pending, but is
+        // necessary when no timer is already active.
         self.schedule(thread, idle_interval);
     }
 
