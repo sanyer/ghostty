@@ -1376,8 +1376,8 @@ input: RepeatableReadableIO = .{},
 /// Scrollback is stored in memory and allocated lazily up to this limit, so
 /// setting a very large limit does not immediately consume that amount of
 /// memory. On supported systems, Ghostty attempts to compress fully historical
-/// pages while the terminal is idle. This can reduce physical memory usage,
-/// depending on the contents of the scrollback.
+/// pages which are not currently visible while the terminal is idle. This can
+/// reduce physical memory usage, depending on the contents of the scrollback.
 ///
 /// This limit always measures the uncompressed logical size of the terminal
 /// pages. Compression does not allow Ghostty to retain more history than the

@@ -2316,10 +2316,10 @@ pub fn compressionActivity(self: *const Terminal) u64 {
 
 /// Compress cold memory to save resident memory space.
 ///
-/// This can be done in two modes: incremental or full. A full compression
-/// does a full pass compressing everything it can before returning. This
-/// is not recommended for interactive terminals because compression is
-/// relatively slow and with large scrollbacks this can cause stalls.
+/// Full compression does a full pass compressing everything it can before
+/// returning. This is not recommended for interactive terminals because
+/// compression is relatively slow and with large scrollbacks this can cause
+/// stalls.
 ///
 /// Incremental compression bounds itself on how much data it can look
 /// up to compress and how much compression work it does before returning.

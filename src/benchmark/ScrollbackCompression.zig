@@ -26,7 +26,7 @@
 //!   the common process and setup baseline for the other modes.
 //! * `compress` times one complete `compress` invocation.
 //! * `incremental` reaches the same final representation through
-//!   `compress(.incremental)`. It drains the candidate-bounded steps and final
+//!   `compress(.drain)`. It drains the candidate-bounded steps and final
 //!   no-work verification pass in the timed region, making cursor and repeated
 //!   traversal overhead directly comparable with `compress`.
 //! * `restore` compresses cold history during setup, outside the timed region,
@@ -38,10 +38,12 @@
 //!
 //! A fully historical page is a node strictly before the node containing the
 //! top of the active area. The boundary node is deliberately excluded because
-//! it can contain both history and active rows. Normal terminal execution
-//! compresses these pages incrementally after output becomes idle. The
-//! benchmark invokes PageList operations directly so its timed regions exclude
-//! the production scheduler's idle delay and renderer-thread coordination.
+//! it can contain both history and active rows. Pages intersecting the current
+//! viewport are also excluded so visible contents remain resident. Normal
+//! terminal execution compresses eligible pages incrementally after activity
+//! becomes idle. The benchmark invokes PageList operations directly so its
+//! timed regions exclude the production scheduler's idle delay and
+//! renderer-thread coordination.
 //!
 //! ## Examples
 //!
@@ -218,25 +220,8 @@ fn stepCompress(ptr: *anyopaque) Benchmark.Error!void {
 
 fn stepIncremental(ptr: *anyopaque) Benchmark.Error!void {
     const self: *ScrollbackCompression = @ptrCast(@alignCast(ptr));
-    self.drainIncrementalCompression();
+    _ = self.pages().compress(.drain);
     std.mem.doNotOptimizeAway(&self.terminal);
-}
-
-/// Drain incremental compression through its no-work verification pass.
-///
-/// Each PageList step has a bounded candidate-inspection budget. The benchmark
-/// loops until no more immediate work is available so its timed result can be
-/// compared with the existing monolithic `compress` mode.
-fn drainIncrementalCompression(self: *ScrollbackCompression) void {
-    while (true) {
-        switch (self.pages().compress(.incremental)) {
-            .pending => continue,
-            .unsupported,
-            .deferred,
-            .complete,
-            => return,
-        }
-    }
 }
 
 fn stepRestore(ptr: *anyopaque) Benchmark.Error!void {
@@ -345,7 +330,7 @@ test "ScrollbackCompression drains incremental compression steps" {
     defer stream.deinit();
     for (0..256) |_| stream.nextSlice("aaaa\r\n");
 
-    impl.drainIncrementalCompression();
+    _ = impl.pages().compress(.drain);
     const incremental = impl.pages().memoryStats();
     try testing.expect(incremental.compressed_pages > 0);
 

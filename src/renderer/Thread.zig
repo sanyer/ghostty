@@ -835,7 +835,6 @@ const Compression = struct {
         return switch (state.terminal.compress(.incremental)) {
             .pending => step_interval,
             .unsupported,
-            .deferred,
             .complete,
             => null,
         };
