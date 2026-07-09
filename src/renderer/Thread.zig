@@ -115,10 +115,12 @@ flags: packed struct {
 
 pub const DerivedConfig = struct {
     custom_shader_animation: configpkg.CustomShaderAnimation,
+    scrollback_compression: bool,
 
     pub fn init(config: *const configpkg.Config) DerivedConfig {
         return .{
             .custom_shader_animation = config.@"custom-shader-animation",
+            .scrollback_compression = config.@"scrollback-compression",
         };
     }
 };
@@ -506,6 +508,16 @@ fn drainMailbox(self: *Thread) !void {
 }
 
 fn changeConfig(self: *Thread, config: *const DerivedConfig) !void {
+    // A newly enabled scheduler must reconsider existing history even when no
+    // terminal activity occurred while compression was disabled.
+    if (comptime terminalpkg.compression_enabled) {
+        if (!self.config.scrollback_compression and
+            config.scrollback_compression)
+        {
+            self.compression.activity = null;
+        }
+    }
+
     self.config = config.*;
 }
 
@@ -769,6 +781,7 @@ const Compression = struct {
     fn wake(self: *Compression, thread: *Thread) void {
         // If we have no compression then don't do anything.
         if (comptime !terminalpkg.compression_enabled) return;
+        if (!thread.config.scrollback_compression) return;
 
         // PageList activity, rather than a generic renderer wake, restarts the
         // idle interval. In particular, the inspector wakes the renderer every
@@ -816,13 +829,16 @@ const Compression = struct {
         const thread = thread_ orelse return .disarm;
         const self = &thread.compression;
 
-        if (self.step(thread.state)) |delay| self.schedule(thread, delay);
+        if (self.step(thread)) |delay| self.schedule(thread, delay);
         return .disarm;
     }
 
     /// Try one bounded step without waiting for the terminal lock. The return
     /// value is the delay before another attempt, or null when work is done.
-    fn step(self: *Compression, state: *rendererpkg.State) ?u64 {
+    fn step(self: *Compression, thread: *Thread) ?u64 {
+        if (!thread.config.scrollback_compression) return null;
+
+        const state = thread.state;
         if (!state.mutex.tryLock()) return idle_interval;
         defer state.mutex.unlock();
 
