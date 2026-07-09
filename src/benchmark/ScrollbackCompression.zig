@@ -25,10 +25,10 @@
 //! * `noop` parses the corpus but performs no timed PageList operation. This is
 //!   the common process and setup baseline for the other modes.
 //! * `compress` times one complete `compress` invocation.
-//! * `incremental` performs the same complete pass through
-//!   `compressIncremental`. It drains the candidate-bounded steps in the timed
-//!   region, making the cursor and repeated traversal overhead directly
-//!   comparable with `compress`.
+//! * `incremental` reaches the same final representation through
+//!   `compress(.incremental)`. It drains the candidate-bounded steps and final
+//!   no-work verification pass in the timed region, making cursor and repeated
+//!   traversal overhead directly comparable with `compress`.
 //! * `restore` compresses cold history during setup, outside the timed region,
 //!   then visits every fully historical node through `Node.page`. That public
 //!   content-access boundary transparently restores compressed nodes.
@@ -76,9 +76,6 @@ const log = std.log.scoped(.@"scrollback-compression-bench");
 
 opts: Options,
 terminal: Terminal,
-
-/// Cursor state used by incremental mode between candidate-bounded steps.
-incremental_state: PageList.IncrementalCompressionState = .{},
 
 pub const Options = struct {
     /// Set by the shared CLI parser so the `data` string remains valid for the
@@ -167,7 +164,6 @@ pub fn benchmark(self: *ScrollbackCompression) Benchmark {
 fn setup(ptr: *anyopaque) Benchmark.Error!void {
     const self: *ScrollbackCompression = @ptrCast(@alignCast(ptr));
     self.terminal.fullReset();
-    self.incremental_state.reset();
 
     self.loadCorpus() catch |err| {
         log.warn("failed to prepare scrollback compression benchmark err={}", .{err});
@@ -175,7 +171,7 @@ fn setup(ptr: *anyopaque) Benchmark.Error!void {
     };
 
     if (self.opts.mode == .restore) {
-        self.pages().compress();
+        _ = self.pages().compress(.full);
     }
 }
 
@@ -215,27 +211,24 @@ fn stepNoop(ptr: *anyopaque) Benchmark.Error!void {
 
 fn stepCompress(ptr: *anyopaque) Benchmark.Error!void {
     const self: *ScrollbackCompression = @ptrCast(@alignCast(ptr));
-    self.pages().compress();
+    _ = self.pages().compress(.full);
     std.mem.doNotOptimizeAway(&self.terminal);
 }
 
 fn stepIncremental(ptr: *anyopaque) Benchmark.Error!void {
     const self: *ScrollbackCompression = @ptrCast(@alignCast(ptr));
     self.drainIncrementalCompression();
-    std.mem.doNotOptimizeAway(&self.incremental_state);
     std.mem.doNotOptimizeAway(&self.terminal);
 }
 
-/// Drain one complete resumable compression pass.
+/// Drain incremental compression through its no-work verification pass.
 ///
 /// Each PageList step has a bounded candidate-inspection budget. The benchmark
 /// loops until no more immediate work is available so its timed result can be
 /// compared with the existing monolithic `compress` mode.
 fn drainIncrementalCompression(self: *ScrollbackCompression) void {
     while (true) {
-        switch (self.pages().compressIncremental(
-            &self.incremental_state,
-        )) {
+        switch (self.pages().compress(.incremental)) {
             .pending => continue,
             .unsupported,
             .deferred,
@@ -271,7 +264,7 @@ fn visitColdPages(self: *ScrollbackCompression) usize {
 
 fn stepReport(ptr: *anyopaque) Benchmark.Error!void {
     const self: *ScrollbackCompression = @ptrCast(@alignCast(ptr));
-    self.pages().compress();
+    _ = self.pages().compress(.full);
     const memory = self.pages().memoryStats();
 
     std.debug.print(
@@ -321,7 +314,7 @@ test "ScrollbackCompression restores cold terminal pages" {
     defer stream.deinit();
     for (0..256) |_| stream.nextSlice("aaaa\r\n");
 
-    impl.pages().compress();
+    _ = impl.pages().compress(.full);
     const compressed = impl.pages().memoryStats();
     try testing.expect(compressed.compressed_pages > 0);
     try testing.expect(impl.visitColdPages() >= compressed.compressed_pages);
@@ -329,7 +322,7 @@ test "ScrollbackCompression restores cold terminal pages" {
     // Restored historical pages are resident and therefore eligible for a
     // later explicit pass. This also verifies that the benchmark traversal
     // went through Node.page rather than merely inspecting page metadata.
-    impl.pages().compress();
+    _ = impl.pages().compress(.full);
     const recompressed = impl.pages().memoryStats();
     try testing.expectEqual(
         compressed.compressed_pages,
@@ -351,7 +344,6 @@ test "ScrollbackCompression drains incremental compression steps" {
     defer stream.deinit();
     for (0..256) |_| stream.nextSlice("aaaa\r\n");
 
-    impl.incremental_state.reset();
     impl.drainIncrementalCompression();
     const incremental = impl.pages().memoryStats();
     try testing.expect(incremental.compressed_pages > 0);
@@ -359,7 +351,7 @@ test "ScrollbackCompression drains incremental compression steps" {
     // Restore the same pages and compare against the monolithic operation.
     // Both paths should produce the same final storage representation.
     _ = impl.visitColdPages();
-    impl.pages().compress();
+    _ = impl.pages().compress(.full);
     const monolithic = impl.pages().memoryStats();
     try testing.expectEqual(monolithic, incremental);
 }

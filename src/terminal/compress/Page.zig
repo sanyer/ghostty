@@ -131,6 +131,15 @@ pub fn init(
     };
 }
 
+/// Free the encoded block.
+///
+/// This intentionally does not free `page.memory`. The PageList node which
+/// supplied the source page continues to own that pool or heap allocation.
+pub fn deinit(self: *Page) void {
+    self.alloc.free(self.encoded);
+    self.* = undefined;
+}
+
 /// Restore the embedded terminal page into its retained resident mapping.
 ///
 /// The caller must recommit `page.memory` before calling this on platforms
@@ -144,13 +153,25 @@ pub fn restore(self: *const Page) lz4.DecompressError!TerminalPage {
     return result;
 }
 
-/// Free the encoded block.
+/// Clone this page into caller-owned memory without restoring its mapping.
 ///
-/// This intentionally does not free `page.memory`. The PageList node which
-/// supplied the source page continues to own that pool or heap allocation.
-pub fn deinit(self: *Page) void {
-    self.alloc.free(self.encoded);
-    self.* = undefined;
+/// `memory` must be at least as large as the retained page mapping. Decoding
+/// writes only to that buffer, so both the discarded contents of `page.memory`
+/// and this value's encoded representation remain unchanged. The returned Page
+/// borrows `memory`; the caller must keep it alive for the Page's lifetime and
+/// release it directly rather than calling `TerminalPage.deinit`.
+pub fn cloneBuf(
+    self: *const Page,
+    memory: []align(std.heap.page_size_min) u8,
+) lz4.DecompressError!TerminalPage {
+    assert(memory.len >= self.page.memory.len);
+
+    // Page internals are offsets into the backing buffer, so all metadata can
+    // be copied verbatim when paired with an equally laid-out mapping.
+    var result = self.page;
+    result.memory = memory[0..self.page.memory.len];
+    _ = try lz4.decompress(self.encoded, result.memory);
+    return result;
 }
 
 test "compressed Page retained mapping round trip" {
@@ -208,10 +229,30 @@ test "compressed Page retained mapping round trip" {
     try testing.expectEqual(memory_ptr, compressed.page.memory.ptr);
     try testing.expectEqual(memory_len, compressed.page.memory.len);
     try testing.expect(compressed.encoded.len < resident.memory.len);
+    const expected_encoded = try testing.allocator.dupe(u8, compressed.encoded);
+    defer testing.allocator.free(expected_encoded);
 
     // Virtual-memory operations belong to PageList, so clearing the contents
     // models a successful decommit: none of the resident bytes remain.
     @memset(resident.memory, 0);
+
+    // A clone decodes into independent storage for read-only consumers which
+    // must not change the compressed representation. In particular, it does
+    // not recommit or overwrite the retained source mapping.
+    const clone_memory = try testing.allocator.alignedAlloc(
+        u8,
+        .fromByteUnits(std.heap.page_size_min),
+        resident.memory.len,
+    );
+    defer testing.allocator.free(clone_memory);
+    const cloned = try compressed.cloneBuf(clone_memory);
+    try testing.expect(cloned.memory.ptr != memory_ptr);
+    try testing.expect(std.mem.allEqual(u8, resident.memory, 0));
+    try testing.expectEqualSlices(u8, expected_encoded, compressed.encoded);
+    try testing.expectEqualSlices(u8, expected, cloned.memory);
+    try testing.expectEqual(resident.size, cloned.size);
+    try testing.expect(cloned.dirty);
+    try cloned.verifyIntegrity(testing.allocator);
 
     const restored = try compressed.restore();
     try testing.expectEqual(memory_ptr, restored.memory.ptr);
@@ -336,6 +377,17 @@ test "compressed Page can retry after malformed encoded data" {
     }
     compressed.encoded = full_encoded[0..1];
     compressed.encoded[0] = 0xF0;
+
+    const clone_memory = try testing.allocator.alignedAlloc(
+        u8,
+        .fromByteUnits(std.heap.page_size_min),
+        resident.memory.len,
+    );
+    defer testing.allocator.free(clone_memory);
+    try testing.expectError(
+        error.TruncatedInput,
+        compressed.cloneBuf(clone_memory),
+    );
     try testing.expectError(error.TruncatedInput, compressed.restore());
 
     compressed.encoded = full_encoded;
