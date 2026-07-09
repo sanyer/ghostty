@@ -4005,9 +4005,9 @@ const compressPage_tw = tripwire.module(
 /// state.
 ///
 /// PageList tracks mutations which require a later incremental pass in its
-/// compression state. Full compression always returns `complete`, indicating
-/// that it has no continuation to schedule rather than that every page was
-/// compressed.
+/// compression state. On supported targets, full compression returns
+/// `complete`, indicating that it has no continuation to schedule rather than
+/// that every page was compressed.
 pub fn compress(
     self: *PageList,
     mode: enum { incremental, drain, full },
@@ -4020,6 +4020,13 @@ pub fn compress(
             .unsupported => break .unsupported,
         },
         .full => full: {
+            // Match incremental mode's unsupported result. Full compression
+            // has no useful work to perform without strict reclamation.
+            if (!terminal_mem.canReclaim(.strict)) {
+                self.page_compression.reset();
+                break :full .unsupported;
+            }
+
             self.compressFull();
 
             // Full compression has no continuation. Discard any partial
@@ -4107,10 +4114,6 @@ fn compressIncremental(self: *PageList) IncrementalCompressionResult {
 
 /// Compress every fully historical resident page which is currently cold.
 fn compressFull(self: *PageList) void {
-    // Avoid the codec, scratch allocation, and exact encoded allocation on a
-    // target where strict retained-mapping reclamation cannot succeed.
-    if (!terminal_mem.canReclaim(.strict)) return;
-
     var it: CompressionIterator = .init(self);
     while (it.next()) |node| {
 

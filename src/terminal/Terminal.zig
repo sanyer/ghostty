@@ -2314,6 +2314,25 @@ pub fn compressionActivity(self: *const Terminal) u64 {
     return @as(u64, state.activity_serial);
 }
 
+/// The amount of compression work performed by `compress` before returning.
+///
+/// The declaration order is part of the libghostty-vt C ABI. Removed values
+/// must leave a `null` hole so later values retain their integer values.
+pub const CompressionMode = lib.Enum(lib.target, &.{
+    "incremental",
+    "full",
+});
+
+/// The scheduling result of a `compress` call.
+///
+/// The declaration order is part of the libghostty-vt C ABI. Removed values
+/// must leave a `null` hole so later values retain their integer values.
+pub const CompressionResult = lib.Enum(lib.target, &.{
+    "unsupported",
+    "pending",
+    "complete",
+});
+
 /// Compress cold memory to save resident memory space.
 ///
 /// Full compression does a full pass compressing everything it can before
@@ -2330,12 +2349,18 @@ pub fn compressionActivity(self: *const Terminal) u64 {
 /// experience, for example during idle times.
 pub fn compress(
     self: *Terminal,
-    mode: enum { incremental, full },
-) PageList.IncrementalCompressionResult {
+    mode: CompressionMode,
+) CompressionResult {
     const pages = &self.screens.get(.primary).?.pages;
-    return switch (mode) {
+    const result = switch (mode) {
         .incremental => pages.compress(.incremental),
         .full => pages.compress(.full),
+    };
+
+    return switch (result) {
+        .unsupported => .unsupported,
+        .pending => .pending,
+        .complete => .complete,
     };
 }
 
