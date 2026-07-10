@@ -24,6 +24,7 @@ const grid_ref_tracked_c = @import("grid_ref_tracked.zig");
 const selection_c = @import("selection.zig");
 const style_c = @import("style.zig");
 const color = @import("../color.zig");
+const clipboard = @import("../clipboard.zig");
 const Result = @import("result.zig").Result;
 
 const Handler = @import("../stream_terminal.zig").Handler;
@@ -40,6 +41,24 @@ const TerminalWrapper = struct {
     tracked_grid_refs: std.AutoArrayHashMapUnmanaged(*grid_ref_tracked_c.TrackedGridRef, void) = .{},
 };
 
+/// A single MIME representation in a clipboard write.
+///
+/// C: GhosttyClipboardContent
+pub const ClipboardContent = extern struct {
+    mime: lib.String,
+    data: lib.String,
+};
+
+/// A protocol-neutral request to replace or clear clipboard contents.
+///
+/// C: GhosttyClipboardWrite
+pub const ClipboardWrite = extern struct {
+    size: usize,
+    location: clipboard.Location,
+    contents: ?[*]const ClipboardContent,
+    contents_len: usize,
+};
+
 /// C callback state for terminal effects. Trampolines are always
 /// installed on the stream handler; they check these fields and
 /// no-op when the corresponding callback is null.
@@ -54,7 +73,7 @@ const Effects = struct {
     title_changed: ?TitleChangedFn = null,
     pwd_changed: ?PwdChangedFn = null,
     size_cb: ?SizeFn = null,
-    clipboard_set: ?ClipboardSetFn = null,
+    clipboard_write: ?ClipboardWriteFn = null,
 
     /// Scratch buffer for DA1 feature codes. The device attributes
     /// trampoline converts C feature codes into this buffer and returns
@@ -85,10 +104,9 @@ const Effects = struct {
     /// (len=0) causes the default "libghostty" to be reported.
     pub const XtversionFn = *const fn (Terminal, ?*anyopaque) callconv(lib.calling_conv) lib.String;
 
-    /// C function pointer type for the clipboard_set callback. The kind
-    /// byte identifies the OSC 52 target selection and the data is the
-    /// base64-encoded payload exactly as received.
-    pub const ClipboardSetFn = *const fn (Terminal, ?*anyopaque, u8, [*]const u8, usize) callconv(lib.calling_conv) void;
+    /// C function pointer type for the clipboard_write callback. The request
+    /// and its contents are borrowed and only valid for the callback duration.
+    pub const ClipboardWriteFn = *const fn (Terminal, ?*anyopaque, *const ClipboardWrite) callconv(lib.calling_conv) clipboard.WriteResult;
 
     /// C function pointer type for the title_changed callback.
     pub const TitleChangedFn = *const fn (Terminal, ?*anyopaque) callconv(lib.calling_conv) void;
@@ -144,11 +162,42 @@ const Effects = struct {
         func(@ptrCast(wrapper), wrapper.effects.userdata);
     }
 
-    fn clipboardSetTrampoline(handler: *Handler, kind: u8, data: []const u8) void {
+    fn clipboardWriteTrampoline(handler: *Handler, write: clipboard.Write) clipboard.WriteResult {
         const stream_ptr: *Stream = @fieldParentPtr("handler", handler);
         const wrapper: *TerminalWrapper = @fieldParentPtr("stream", stream_ptr);
-        const func = wrapper.effects.clipboard_set orelse return;
-        func(@ptrCast(wrapper), wrapper.effects.userdata, kind, data.ptr, data.len);
+        const func = wrapper.effects.clipboard_write orelse return .unsupported;
+
+        // Most protocols currently produce one representation, so keep that
+        // path allocation-free while supporting arbitrary multi-MIME writes.
+        var stack_contents: [4]ClipboardContent = undefined;
+        const contents: []ClipboardContent = if (write.contents.len <= stack_contents.len)
+            stack_contents[0..write.contents.len]
+        else
+            wrapper.terminal.gpa().alloc(ClipboardContent, write.contents.len) catch
+                return .io_error;
+        defer if (write.contents.len > stack_contents.len)
+            wrapper.terminal.gpa().free(contents);
+
+        for (contents, write.contents) |*c_content, content| {
+            c_content.* = .{
+                .mime = .{
+                    .ptr = content.mime.ptr,
+                    .len = content.mime.len,
+                },
+                .data = .{
+                    .ptr = content.data.ptr,
+                    .len = content.data.len,
+                },
+            };
+        }
+
+        const request: ClipboardWrite = .{
+            .size = @sizeOf(ClipboardWrite),
+            .location = write.location,
+            .contents = if (contents.len > 0) contents.ptr else null,
+            .contents_len = contents.len,
+        };
+        return func(@ptrCast(wrapper), wrapper.effects.userdata, &request);
     }
 
     fn colorSchemeTrampoline(handler: *Handler) ?device_status.ColorScheme {
@@ -309,7 +358,7 @@ fn new_(
         .title_changed = &Effects.titleChangedTrampoline,
         .pwd_changed = &Effects.pwdChangedTrampoline,
         .size = &Effects.sizeTrampoline,
-        .clipboard_set = &Effects.clipboardSetTrampoline,
+        .clipboard_write = &Effects.clipboardWriteTrampoline,
     };
 
     wrapper.* = .{
@@ -357,7 +406,7 @@ pub const Option = enum(c_int) {
     default_cursor_blink = 23,
     glyph_protocol = 24,
     pwd_changed = 25,
-    clipboard_set = 26,
+    clipboard_write = 26,
 
     /// Input type expected for setting the option.
     pub fn InType(comptime self: Option) type {
@@ -372,7 +421,7 @@ pub const Option = enum(c_int) {
             .title_changed => ?Effects.TitleChangedFn,
             .pwd_changed => ?Effects.PwdChangedFn,
             .size_cb => ?Effects.SizeFn,
-            .clipboard_set => ?Effects.ClipboardSetFn,
+            .clipboard_write => ?Effects.ClipboardWriteFn,
             .title, .pwd => ?*const lib.String,
             .color_foreground, .color_background, .color_cursor => ?*const color.RGB.C,
             .color_palette => ?*const color.PaletteC,
@@ -429,7 +478,7 @@ fn setTyped(
         .title_changed => wrapper.effects.title_changed = value,
         .pwd_changed => wrapper.effects.pwd_changed = value,
         .size_cb => wrapper.effects.size_cb = value,
-        .clipboard_set => wrapper.effects.clipboard_set = value,
+        .clipboard_write => wrapper.effects.clipboard_write = value,
         .title => {
             const str = if (value) |v| v.ptr[0..v.len] else "";
             wrapper.terminal.setTitle(str) catch return .out_of_memory;
@@ -2438,7 +2487,7 @@ test "set pwd_changed callback" {
     try testing.expectEqualStrings("file:///home/user", zigTerminal(t).?.getPwd().?);
 }
 
-test "set clipboard_set callback" {
+test "set clipboard_write callback" {
     var t: Terminal = null;
     try testing.expectEqual(Result.success, new(
         &lib.alloc.test_allocator,
@@ -2453,47 +2502,147 @@ test "set clipboard_set callback" {
 
     const S = struct {
         var count: usize = 0;
+        var last_terminal: Terminal = null;
         var last_userdata: ?*anyopaque = null;
-        var last_kind: u8 = 0;
-        var last_data: [64]u8 = undefined;
-        var last_len: usize = 0;
+        var last_size: usize = 0;
+        var last_location: clipboard.Location = .standard;
+        var last_contents_null: bool = false;
+        var last_contents_len: usize = 0;
+        var last_mimes: [8][64]u8 = undefined;
+        var last_mime_lens: [8]usize = @splat(0);
+        var last_data: [8][64]u8 = undefined;
+        var last_data_lens: [8]usize = @splat(0);
+        var next_result: clipboard.WriteResult = .success;
 
-        fn clipboardSet(
-            _: Terminal,
+        fn clipboardWrite(
+            terminal_: Terminal,
             ud: ?*anyopaque,
-            kind: u8,
-            data: [*]const u8,
-            len: usize,
-        ) callconv(lib.calling_conv) void {
+            request: *const ClipboardWrite,
+        ) callconv(lib.calling_conv) clipboard.WriteResult {
             count += 1;
+            last_terminal = terminal_;
             last_userdata = ud;
-            last_kind = kind;
-            last_len = @min(len, last_data.len);
-            @memcpy(last_data[0..last_len], data[0..last_len]);
+            last_size = request.size;
+            last_location = request.location;
+            last_contents_null = request.contents == null;
+            last_contents_len = request.contents_len;
+
+            if (request.contents) |ptr| {
+                for (ptr[0..@min(request.contents_len, last_mimes.len)], 0..) |content, i| {
+                    last_mime_lens[i] = @min(content.mime.len, last_mimes[i].len);
+                    @memcpy(
+                        last_mimes[i][0..last_mime_lens[i]],
+                        content.mime.ptr[0..last_mime_lens[i]],
+                    );
+
+                    last_data_lens[i] = @min(content.data.len, last_data[i].len);
+                    @memcpy(
+                        last_data[i][0..last_data_lens[i]],
+                        content.data.ptr[0..last_data_lens[i]],
+                    );
+                }
+            }
+
+            return next_result;
         }
     };
     S.count = 0;
+    S.last_terminal = null;
     S.last_userdata = null;
+    S.next_result = .denied;
 
     var sentinel: u8 = 88;
     try testing.expectEqual(Result.success, set(t, .userdata, @ptrCast(&sentinel)));
-    try testing.expectEqual(Result.success, set(t, .clipboard_set, @ptrCast(&S.clipboardSet)));
+    try testing.expectEqual(Result.success, set(t, .clipboard_write, @ptrCast(&S.clipboardWrite)));
 
-    // OSC 52 ; c ; base64("hello") ST — clipboard write
-    const seq1 = "\x1B]52;c;aGVsbG8=\x1B\\";
-    vt_write(t, seq1, seq1.len);
+    // Split OSC 52 write whose decoded payload contains an embedded NUL.
+    const seq1_a = "\x1B]52;c;aGVs";
+    const seq1_b = "bG8Ad29ybGQ=\x1B\\";
+    vt_write(t, seq1_a, seq1_a.len);
+    vt_write(t, seq1_b, seq1_b.len);
     try testing.expectEqual(@as(usize, 1), S.count);
+    try testing.expectEqual(t, S.last_terminal);
     try testing.expectEqual(@as(?*anyopaque, @ptrCast(&sentinel)), S.last_userdata);
-    try testing.expectEqual(@as(u8, 'c'), S.last_kind);
-    try testing.expectEqualStrings("aGVsbG8=", S.last_data[0..S.last_len]);
+    try testing.expectEqual(@sizeOf(ClipboardWrite), S.last_size);
+    try testing.expectEqual(clipboard.Location.standard, S.last_location);
+    try testing.expect(!S.last_contents_null);
+    try testing.expectEqual(@as(usize, 1), S.last_contents_len);
+    try testing.expectEqualStrings("text/plain", S.last_mimes[0][0..S.last_mime_lens[0]]);
+    try testing.expectEqualSlices(u8, "hello\x00world", S.last_data[0][0..S.last_data_lens[0]]);
 
-    // OSC 52 read requests ("?") must never reach the callback.
-    const seq2 = "\x1B]52;c;?\x1B\\";
-    vt_write(t, seq2, seq2.len);
-    try testing.expectEqual(@as(usize, 1), S.count);
+    // OSC 52 destinations are normalized rather than exposed as wire bytes.
+    const location_cases = [_]struct {
+        selector: u8,
+        expected: clipboard.Location,
+    }{
+        .{ .selector = 's', .expected = .selection },
+        .{ .selector = 'p', .expected = .primary },
+        .{ .selector = 'q', .expected = .standard },
+    };
+    for (location_cases) |case| {
+        const seq = [_]u8{ '\x1B', ']', '5', '2', ';', case.selector, ';', 'e', 'A', '=', '=', '\x1B', '\\' };
+        vt_write(t, &seq, seq.len);
+        try testing.expectEqual(case.expected, S.last_location);
+    }
+    try testing.expectEqual(@as(usize, 4), S.count);
+
+    // An empty content list is a clear and retains a null descriptor pointer.
+    const clear = "\x1B]52;s;\x1B\\";
+    vt_write(t, clear, clear.len);
+    try testing.expectEqual(@as(usize, 5), S.count);
+    try testing.expectEqual(clipboard.Location.selection, S.last_location);
+    try testing.expect(S.last_contents_null);
+    try testing.expectEqual(@as(usize, 0), S.last_contents_len);
+
+    // Read requests and malformed base64 must never reach the callback.
+    const read = "\x1B]52;c;?\x1B\\";
+    vt_write(t, read, read.len);
+    const malformed = "\x1B]52;c;%%%\x1B\\";
+    vt_write(t, malformed, malformed.len);
+    try testing.expectEqual(@as(usize, 5), S.count);
+
+    // iTerm2 Copy reaches the same normalized callback.
+    const iterm = "\x1B]1337;Copy=:aVRlcm0=\x1B\\";
+    vt_write(t, iterm, iterm.len);
+    try testing.expectEqual(@as(usize, 6), S.count);
+    try testing.expectEqual(clipboard.Location.standard, S.last_location);
+    try testing.expectEqualStrings("text/plain", S.last_mimes[0][0..S.last_mime_lens[0]]);
+    try testing.expectEqualStrings("iTerm", S.last_data[0][0..S.last_data_lens[0]]);
+
+    // Every representation is converted, and callback results propagate
+    // through the C trampoline for protocols that can acknowledge writes.
+    const internal_contents = [_]clipboard.Content{
+        .{ .mime = "text/plain", .data = "plain" },
+        .{ .mime = "application/octet-stream", .data = "a\x00b" },
+        .{ .mime = "text/html", .data = "<b>plain</b>" },
+        .{ .mime = "text/rtf", .data = "{\\rtf1 plain}" },
+        .{ .mime = "image/png", .data = "\x89PNG" },
+    };
+    S.next_result = .busy;
+    const handler = &t.?.stream.handler;
+    const write_result = handler.effects.clipboard_write.?(handler, .{
+        .location = .primary,
+        .contents = &internal_contents,
+    });
+    try testing.expectEqual(clipboard.WriteResult.busy, write_result);
+    try testing.expectEqual(@as(usize, 7), S.count);
+    try testing.expectEqual(@as(usize, 5), S.last_contents_len);
+    try testing.expectEqualStrings(
+        "application/octet-stream",
+        S.last_mimes[1][0..S.last_mime_lens[1]],
+    );
+    try testing.expectEqualSlices(u8, "a\x00b", S.last_data[1][0..S.last_data_lens[1]]);
+    try testing.expectEqualStrings("image/png", S.last_mimes[4][0..S.last_mime_lens[4]]);
+    try testing.expectEqualSlices(u8, "\x89PNG", S.last_data[4][0..S.last_data_lens[4]]);
+
+    // Removing the callback takes effect immediately.
+    try testing.expectEqual(Result.success, set(t, .clipboard_write, null));
+    const after_remove = "\x1B]52;c;eA==\x1B\\";
+    vt_write(t, after_remove, after_remove.len);
+    try testing.expectEqual(@as(usize, 7), S.count);
 }
 
-test "clipboard_set without callback is silent" {
+test "clipboard_write without callback is unsupported and silent" {
     var t: Terminal = null;
     try testing.expectEqual(Result.success, new(
         &lib.alloc.test_allocator,
@@ -2509,6 +2658,13 @@ test "clipboard_set without callback is silent" {
     // OSC 52 without a callback should not crash
     const seq = "\x1B]52;c;aGVsbG8=\x1B\\";
     vt_write(t, seq, seq.len);
+
+    const handler = &t.?.stream.handler;
+    const result = handler.effects.clipboard_write.?(handler, .{
+        .location = .standard,
+        .contents = &.{.{ .mime = "text/plain", .data = "hello" }},
+    });
+    try testing.expectEqual(clipboard.WriteResult.unsupported, result);
 }
 
 test "pwd_changed without callback is silent" {
