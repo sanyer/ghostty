@@ -2429,6 +2429,21 @@ fn rowWillBeShifted(
     }
 }
 
+/// Renew every live page generation in an inclusive range before a full-width
+/// line operation moves logical rows between their coordinates.
+fn invalidateFullWidthRowRange(
+    self: *Terminal,
+    first: *PageList.List.Node,
+    last: *PageList.List.Node,
+) void {
+    var node = first;
+    while (true) : (node = node.next.?) {
+        // Full-width line movement remaps cached row coordinates in this page.
+        self.screens.active.pages.invalidateNodeLayout(node);
+        if (node == last) break;
+    }
+}
+
 // TODO(qwerasd): `insertLines` and `deleteLines` are 99% identical,
 // the majority of their logic can (and should) be abstracted in to
 // a single shared helper function, probably on `Screen` not here.
@@ -2503,6 +2518,12 @@ pub fn insertLines(self: *Terminal, count: usize) void {
         @panic("insertLines trackPin OOM");
     };
     defer self.screens.active.pages.untrackPin(cur_p);
+
+    // Partial-width margins edit cells in stable rows; full-width moves rows.
+    if (!left_right) self.invalidateFullWidthRowRange(
+        self.screens.active.cursor.page_pin.node,
+        cur_p.node,
+    );
 
     // Our current y position relative to the cursor
     var y: usize = rem;
@@ -2698,6 +2719,12 @@ pub fn deleteLines(self: *Terminal, count: usize) void {
         @panic("deleteLines trackPin OOM");
     };
     defer self.screens.active.pages.untrackPin(cur_p);
+
+    // Partial-width margins edit cells in stable rows; full-width moves rows.
+    if (!left_right) self.invalidateFullWidthRowRange(
+        cur_p.node,
+        cur_p.down(rem - 1).?.node,
+    );
 
     // Our current y position relative to the cursor
     var y: usize = 0;
@@ -6867,8 +6894,11 @@ test "Terminal: insertLines simple" {
     try t.printString("GHI");
     t.setCursorPos(2, 2);
 
+    const node = t.screens.active.cursor.page_pin.node;
+    const serial = node.serial;
     t.clearDirty();
     t.insertLines(1);
+    try testing.expect(!t.screens.active.pages.nodeIsValid(node, serial));
 
     try testing.expect(!t.isDirty(.{ .active = .{ .x = 0, .y = 0 } }));
     try testing.expect(t.isDirty(.{ .active = .{ .x = 0, .y = 1 } }));
@@ -7046,11 +7076,15 @@ test "Terminal: insertLines across page boundary marks all shifted rows dirty" {
     try t.printString("5EEEE");
 
     // Verify we now have a second page
-    try testing.expect(first_page.next != null);
+    const second_page = first_page.next.?;
+    const first_serial = first_page.serial;
+    const second_serial = second_page.serial;
 
     t.setCursorPos(1, 1);
     t.clearDirty();
     t.insertLines(1);
+    try testing.expect(!t.screens.active.pages.nodeIsValid(first_page, first_serial));
+    try testing.expect(!t.screens.active.pages.nodeIsValid(second_page, second_serial));
 
     try testing.expect(t.isDirty(.{ .active = .{ .x = 0, .y = 0 } }));
     try testing.expect(t.isDirty(.{ .active = .{ .x = 0, .y = 1 } }));
@@ -9754,8 +9788,11 @@ test "Terminal: deleteLines simple" {
     try t.printString("GHI");
     t.setCursorPos(2, 2);
 
+    const node = t.screens.active.cursor.page_pin.node;
+    const serial = node.serial;
     t.clearDirty();
     t.deleteLines(1);
+    try testing.expect(!t.screens.active.pages.nodeIsValid(node, serial));
 
     try testing.expect(!t.isDirty(.{ .active = .{ .x = 0, .y = 0 } }));
     try testing.expect(t.isDirty(.{ .active = .{ .x = 0, .y = 1 } }));
@@ -9837,11 +9874,15 @@ test "Terminal: deleteLines across page boundary marks all shifted rows dirty" {
     try t.printString("5EEEE");
 
     // Verify we now have a second page
-    try testing.expect(first_page.next != null);
+    const second_page = first_page.next.?;
+    const first_serial = first_page.serial;
+    const second_serial = second_page.serial;
 
     t.setCursorPos(1, 1);
     t.clearDirty();
     t.deleteLines(1);
+    try testing.expect(!t.screens.active.pages.nodeIsValid(first_page, first_serial));
+    try testing.expect(!t.screens.active.pages.nodeIsValid(second_page, second_serial));
 
     try testing.expect(t.isDirty(.{ .active = .{ .x = 0, .y = 0 } }));
     try testing.expect(t.isDirty(.{ .active = .{ .x = 0, .y = 1 } }));
