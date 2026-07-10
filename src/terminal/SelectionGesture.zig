@@ -388,8 +388,8 @@ pub fn drag(
         .cell => dragSelection(
             click_pin.*,
             d.pin,
-            @intFromFloat(@max(0, self.left_click_xpos)),
-            @intFromFloat(@max(0, d.xpos)),
+            pixelFromFloat(self.left_click_xpos),
+            pixelFromFloat(d.xpos),
             d.rectangle,
             d.geometry,
         ),
@@ -676,6 +676,19 @@ fn timeSince(time: Time, prev_time: Time) ?u64 {
     return time.since(prev_time);
 }
 
+/// Convert a caller-provided floating-point position to a pixel coordinate.
+/// Negative and NaN values clamp to the origin, matching the drag behavior
+/// outside the left edge of the surface.
+fn pixelFromFloat(value: f64) u32 {
+    if (std.math.isNan(value) or value <= 0) return 0;
+
+    // @intFromFloat requires a value representable by the destination type.
+    // Saturate first so positive infinity and oversized coordinates are safe.
+    const max: f64 = @floatFromInt(std.math.maxInt(u32));
+    if (value >= max) return std.math.maxInt(u32);
+    return @intFromFloat(value);
+}
+
 fn pressSelection(
     self: *const SelectionGesture,
     screen: *Screen,
@@ -720,6 +733,8 @@ fn dragSelection(
     // Rectangular selections are handled similarly, except that
     // entire columns are considered rather than individual cells.
 
+    if (geometry.columns == 0 or geometry.cell_width == 0) return null;
+
     // We only include cells in the selection if the threshold point lies
     // between the start and end points of the selection. A threshold of
     // 60% of the cell width was chosen empirically because it felt good.
@@ -728,7 +743,12 @@ fn dragSelection(
     ));
 
     // We use this to clamp the pixel positions below.
-    const max_x = geometry.columns * geometry.cell_width - 1;
+    const pixel_span = std.math.mul(
+        u32,
+        geometry.columns,
+        geometry.cell_width,
+    ) catch std.math.maxInt(u32);
+    const max_x = pixel_span - 1;
 
     // We need to know how far across in the cell the drag pos is, so
     // we subtract the padding and then take it modulo the cell width.
@@ -1547,6 +1567,58 @@ test "SelectionGesture drag returns selection and records autoscroll" {
 
     _ = gesture.drag(&t, testDrag(&t, 3, 1, 39, 100));
     try testing.expectEqual(.down, gesture.left_drag_autoscroll);
+}
+
+test "SelectionGesture drag clamps unrepresentable positions" {
+    var t = try Terminal.init(testing.allocator, .{ .cols = 5, .rows = 5 });
+    defer t.deinit(testing.allocator);
+
+    var gesture: SelectionGesture = .init;
+    defer gesture.deinit(&t);
+
+    var press_event = testPress(&t, 1, 1, try std.time.Instant.now());
+    press_event.xpos = 10;
+    _ = try gesture.press(&t, press_event);
+
+    const positive = gesture.drag(
+        &t,
+        testDrag(&t, 1, 1, std.math.inf(f64), 50),
+    ).?;
+    try testing.expect((testPin(&t, 1, 1)).eql(positive.start()));
+    try testing.expect((testPin(&t, 1, 1)).eql(positive.end()));
+
+    try testing.expectEqual(null, gesture.drag(
+        &t,
+        testDrag(&t, 1, 1, std.math.nan(f64), 50),
+    ));
+}
+
+test "SelectionGesture drag saturates overflowing geometry" {
+    var t = try Terminal.init(testing.allocator, .{ .cols = 5, .rows = 5 });
+    defer t.deinit(testing.allocator);
+
+    var gesture: SelectionGesture = .init;
+    defer gesture.deinit(&t);
+
+    _ = try gesture.press(&t, testPress(&t, 1, 1, try std.time.Instant.now()));
+    var drag_event = testDrag(&t, 1, 1, 10, 50);
+    drag_event.geometry.columns = std.math.maxInt(u32);
+    drag_event.geometry.cell_width = std.math.maxInt(u32);
+    try testing.expectEqual(null, gesture.drag(&t, drag_event));
+}
+
+test "SelectionGesture drag rejects empty geometry" {
+    var t = try Terminal.init(testing.allocator, .{ .cols = 5, .rows = 5 });
+    defer t.deinit(testing.allocator);
+
+    var gesture: SelectionGesture = .init;
+    defer gesture.deinit(&t);
+
+    _ = try gesture.press(&t, testPress(&t, 1, 1, try std.time.Instant.now()));
+    var drag_event = testDrag(&t, 1, 1, 10, 50);
+    drag_event.geometry.columns = 0;
+    drag_event.geometry.cell_width = 0;
+    try testing.expectEqual(null, gesture.drag(&t, drag_event));
 }
 
 test "SelectionGesture release clears autoscroll and records drag" {
