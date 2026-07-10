@@ -2907,6 +2907,8 @@ pub fn scroll(self: *PageList, behavior: Scroll) void {
         },
         .delta_prompt => |n| self.scrollPrompt(n),
         .delta_row => |n| delta_row: {
+            const amount: usize = @abs(n);
+
             switch (self.viewport) {
                 // If we're at the top and we're scrolling backwards,
                 // we don't have to do anything, because there's nowhere to go.
@@ -2923,11 +2925,11 @@ pub fn scroll(self: *PageList, behavior: Scroll) void {
                 .pin => switch (std.math.order(n, 0)) {
                     .eq => break :delta_row,
 
-                    .lt => switch (self.viewport_pin.upOverflow(@intCast(-n))) {
+                    .lt => switch (self.viewport_pin.upOverflow(amount)) {
                         .offset => |new_pin| {
                             self.viewport_pin.* = new_pin;
                             if (self.viewport_pin_row_offset) |*v| {
-                                v.* -= @as(usize, @intCast(-n));
+                                v.* -= amount;
                             }
                             break :delta_row;
                         },
@@ -2939,7 +2941,7 @@ pub fn scroll(self: *PageList, behavior: Scroll) void {
                         },
                     },
 
-                    .gt => switch (self.viewport_pin.downOverflow(@intCast(n))) {
+                    .gt => switch (self.viewport_pin.downOverflow(amount)) {
                         // If we offset its a valid pin but we still have to
                         // check if we're in the active area.
                         .offset => |new_pin| {
@@ -2948,7 +2950,7 @@ pub fn scroll(self: *PageList, behavior: Scroll) void {
                             } else {
                                 self.viewport_pin.* = new_pin;
                                 if (self.viewport_pin_row_offset) |*v| {
-                                    v.* += @intCast(n);
+                                    v.* += amount;
                                 }
                             }
                             break :delta_row;
@@ -2966,10 +2968,10 @@ pub fn scroll(self: *PageList, behavior: Scroll) void {
             // Slow path: we have to calculate the new pin by moving
             // from our viewport.
             const top = self.getTopLeft(.viewport);
-            const p: Pin = if (n < 0) switch (top.upOverflow(@intCast(-n))) {
+            const p: Pin = if (n < 0) switch (top.upOverflow(amount)) {
                 .offset => |v| v,
                 .overflow => |v| v.end,
-            } else switch (top.downOverflow(@intCast(n))) {
+            } else switch (top.downOverflow(amount)) {
                 .offset => |v| v,
                 .overflow => |v| v.end,
             };
@@ -3007,7 +3009,7 @@ pub fn scroll(self: *PageList, behavior: Scroll) void {
 fn scrollPrompt(self: *PageList, delta: isize) void {
     // If we aren't jumping any prompts then we don't need to do anything.
     if (delta == 0) return;
-    const delta_start: usize = @intCast(if (delta > 0) delta else -delta);
+    const delta_start: usize = @abs(delta);
     var delta_rem: usize = delta_start;
 
     // We start at the row before or after our viewport depending on the
@@ -4737,6 +4739,9 @@ pub fn pin(self: *const PageList, pt: point.Point) ?Pin {
 
     // Grab the top left and move to the point.
     var p = self.getTopLeft(pt).down(pt.coord().y) orelse return null;
+    // Incomplete reflow can leave a page narrower than the desired width.
+    // Never manufacture an out-of-bounds pin for that page.
+    if (x >= p.node.cols()) return null;
     p.x = x;
     return p;
 }
@@ -4796,6 +4801,24 @@ pub fn pinIsValid(self: *const PageList, p: Pin) bool {
     return false;
 }
 
+/// Returns whether a node pointer and serial still identify the same page in
+/// this list. The node pointer is only compared and is safe even if the node
+/// has been destroyed or reused since the serial was captured.
+pub fn nodeIsValid(
+    self: *const PageList,
+    target: *List.Node,
+    serial: u64,
+) bool {
+    if (serial < self.page_serial_min) return false;
+
+    var it = self.pages.first;
+    while (it) |node| : (it = node.next) {
+        if (node == target) return node.serial == serial;
+    }
+
+    return false;
+}
+
 /// Returns the viewport for the given pin, preferring to pin to
 /// "active" if the pin is within the active area.
 fn pinIsActive(self: *const PageList, p: Pin) bool {
@@ -4844,15 +4867,23 @@ pub fn pointFromPin(self: *const PageList, tag: point.Tag, p: Pin) ?point.Point 
         if (tl.y > p.y) return null;
         coord.y = p.y - tl.y;
     } else {
-        coord.y += tl.node.rows() - tl.y;
+        coord.y = std.math.add(
+            u32,
+            coord.y,
+            tl.node.rows() - tl.y,
+        ) catch return null;
         var node_ = tl.node.next;
         while (node_) |node| : (node_ = node.next) {
             if (node == p.node) {
-                coord.y += p.y;
+                coord.y = std.math.add(u32, coord.y, p.y) catch return null;
                 break;
             }
 
-            coord.y += node.rows();
+            coord.y = std.math.add(
+                u32,
+                coord.y,
+                node.rows(),
+            ) catch return null;
         } else {
             // We never saw our node, meaning we're outside the range.
             return null;
@@ -5577,18 +5608,15 @@ pub const PageIterator = struct {
 
             .count => |*limit| count: {
                 assert(limit.* > 0); // should be handled already
-                const len = @min(row.node.rows() - row.y, limit.*);
-                if (len > limit.*) {
-                    self.row = row.down(len);
-                    limit.* -= len;
-                } else {
-                    self.row = null;
-                }
+                const available: usize = row.node.rows() - row.y;
+                const len = @min(available, limit.*);
+                limit.* -= len;
+                self.row = if (limit.* > 0) row.down(len) else null;
 
                 break :count .{
                     .node = row.node,
                     .start = row.y,
-                    .end = row.y + len,
+                    .end = @intCast(@as(usize, row.y) + len),
                 };
             },
 
@@ -5646,18 +5674,15 @@ pub const PageIterator = struct {
 
             .count => |*limit| count: {
                 assert(limit.* > 0); // should be handled already
-                const len = @min(row.y, limit.*);
-                if (len > limit.*) {
-                    self.row = row.up(len);
-                    limit.* -= len;
-                } else {
-                    self.row = null;
-                }
+                const available: usize = @as(usize, row.y) + 1;
+                const len = @min(available, limit.*);
+                limit.* -= len;
+                self.row = if (limit.* > 0) row.up(len) else null;
 
                 break :count .{
                     .node = row.node,
-                    .start = row.y - len,
-                    .end = row.y - 1,
+                    .start = @intCast(available - len),
+                    .end = @intCast(available),
                 };
             },
 
@@ -6243,26 +6268,18 @@ pub const Pin = struct {
     ///
     /// TODO: Unit tests.
     pub fn leftWrap(self: Pin, n: usize) ?Pin {
-        // NOTE: This assumes that all pages have the same width, which may
-        //       be violated under certain circumstances by incomplete reflow.
-        const cols = self.node.cols();
-        const remaining_in_row = self.x;
-
-        if (n <= remaining_in_row) return self.left(n);
-
-        const extra_after_remaining = n - remaining_in_row;
-        const rows_off = 1 + (extra_after_remaining - 1) / cols;
-
-        switch (self.upOverflow(rows_off)) {
-            .offset => |v| {
-                var result = v;
-                result.x = @intCast(
-                    cols - 1 - (extra_after_remaining - 1) % cols,
-                );
-                return result;
-            },
-            .overflow => return null,
+        var result = self;
+        var remaining = n;
+        while (remaining > result.x) {
+            remaining -= @as(usize, result.x) + 1;
+            result = result.up(1) orelse return null;
+            // Crossing a row boundary lands on that destination row's final
+            // cell, whose width may differ from ours during reflow.
+            result.x = result.node.cols() - 1;
         }
+
+        result.x -= @intCast(remaining);
+        return result;
     }
 
     /// Move the pin right n cells, wrapping to the next row as needed.
@@ -6271,23 +6288,18 @@ pub const Pin = struct {
     ///
     /// TODO: Unit tests.
     pub fn rightWrap(self: Pin, n: usize) ?Pin {
-        // NOTE: This assumes that all pages have the same width, which may
-        //       be violated under certain circumstances by incomplete reflow.
-        const cols = self.node.cols();
-        const remaining_in_row = cols - self.x - 1;
-
-        if (n <= remaining_in_row) return self.right(n);
-
-        const extra_after_remaining = n - remaining_in_row;
-        const rows_off = 1 + (extra_after_remaining - 1) / cols;
-
-        switch (self.downOverflow(rows_off)) {
-            .offset => |v| {
-                var result = v;
-                result.x = @intCast((extra_after_remaining - 1) % cols);
+        var result = self;
+        var remaining = n;
+        while (true) {
+            const row_remaining = result.node.cols() - result.x - 1;
+            if (remaining <= row_remaining) {
+                result.x += @intCast(remaining);
                 return result;
-            },
-            .overflow => return null,
+            }
+
+            remaining -= @as(usize, row_remaining) + 1;
+            result = result.down(1) orelse return null;
+            result.x = 0;
         }
     }
 
@@ -6335,7 +6347,7 @@ pub const Pin = struct {
                 .end = .{
                     .node = node,
                     .y = node.rows() - 1,
-                    .x = self.x,
+                    .x = @min(self.x, node.cols() - 1),
                 },
                 .remaining = n_left,
             } };
@@ -6343,7 +6355,7 @@ pub const Pin = struct {
                 .node = node,
                 .y = std.math.cast(size.CellCountInt, n_left - 1) orelse
                     std.math.maxInt(size.CellCountInt),
-                .x = self.x,
+                .x = @min(self.x, node.cols() - 1),
             } };
             n_left -= node.rows();
         }
@@ -6371,19 +6383,110 @@ pub const Pin = struct {
         var n_left: usize = n - self.y;
         while (true) {
             node = node.prev orelse return .{ .overflow = .{
-                .end = .{ .node = node, .y = 0, .x = self.x },
+                .end = .{
+                    .node = node,
+                    .y = 0,
+                    .x = @min(self.x, node.cols() - 1),
+                },
                 .remaining = n_left,
             } };
             if (n_left <= node.rows()) return .{ .offset = .{
                 .node = node,
                 .y = std.math.cast(size.CellCountInt, node.rows() - n_left) orelse
                     std.math.maxInt(size.CellCountInt),
-                .x = self.x,
+                .x = @min(self.x, node.cols() - 1),
             } };
             n_left -= node.rows();
         }
     }
 };
+
+fn mixedWidthPinListForTest(alloc: Allocator) !PageList {
+    var result = try init(alloc, 2, 1, null);
+    errdefer result.deinit();
+
+    // This deliberately constructs a layout that normal PageList operations
+    // do not expose yet. Keep integrity checks paused through deinit so the
+    // fixture can exercise mixed-width traversal in isolation.
+    result.pauseIntegrityChecks(true);
+
+    inline for (.{ 4, 3 }) |cols| {
+        const node = try result.createPage(.{ .cap = .{
+            .cols = cols,
+            .rows = 1,
+        } });
+        node.page().size.rows = 1;
+        result.pages.append(node);
+        result.total_rows += 1;
+    }
+
+    // Desired geometry is wider than the first and last stored pages.
+    result.cols = 4;
+    return result;
+}
+
+test "PageList Pin row movement clamps across mixed-width pages" {
+    const testing = std.testing;
+
+    var s = try mixedWidthPinListForTest(testing.allocator);
+    defer s.deinit();
+
+    const first = s.pages.first.?;
+    const second = first.next.?;
+    const third = second.next.?;
+
+    try testing.expect((Pin{ .node = third, .x = 2 }).eql(
+        (Pin{ .node = second, .x = 3 }).down(1).?,
+    ));
+    try testing.expect((Pin{ .node = first, .x = 1 }).eql(
+        (Pin{ .node = second, .x = 3 }).up(1).?,
+    ));
+
+    switch ((Pin{ .node = second, .x = 3 }).downOverflow(10)) {
+        .offset => try testing.expect(false),
+        .overflow => |overflow| try testing.expect(
+            (Pin{ .node = third, .x = 2 }).eql(overflow.end),
+        ),
+    }
+    switch ((Pin{ .node = second, .x = 3 }).upOverflow(10)) {
+        .offset => try testing.expect(false),
+        .overflow => |overflow| try testing.expect(
+            (Pin{ .node = first, .x = 1 }).eql(overflow.end),
+        ),
+    }
+}
+
+test "PageList Pin wrapping crosses mixed-width pages" {
+    const testing = std.testing;
+
+    var s = try mixedWidthPinListForTest(testing.allocator);
+    defer s.deinit();
+
+    const first = s.pages.first.?;
+    const second = first.next.?;
+    const third = second.next.?;
+
+    try testing.expect((Pin{ .node = third, .x = 2 }).eql(
+        (Pin{ .node = first, .x = 1 }).rightWrap(7).?,
+    ));
+    try testing.expect((Pin{ .node = second, .x = 0 }).eql(
+        (Pin{ .node = third, .x = 2 }).leftWrap(6).?,
+    ));
+    try testing.expect((Pin{ .node = first }).leftWrap(1) == null);
+    try testing.expect((Pin{ .node = third, .x = 2 }).rightWrap(1) == null);
+}
+
+test "PageList Pin rejects columns beyond mixed-width page bounds" {
+    const testing = std.testing;
+
+    var s = try mixedWidthPinListForTest(testing.allocator);
+    defer s.deinit();
+
+    try testing.expect(s.pin(.{ .screen = .{ .x = 1, .y = 0 } }) != null);
+    try testing.expect(s.pin(.{ .screen = .{ .x = 2, .y = 0 } }) == null);
+    try testing.expect(s.pin(.{ .screen = .{ .x = 3, .y = 1 } }) != null);
+    try testing.expect(s.pin(.{ .screen = .{ .x = 3, .y = 2 } }) == null);
+}
 
 pub const Cell = struct {
     node: *List.Node,
@@ -6419,7 +6522,7 @@ pub const Cell = struct {
     /// this file then consider a different approach and ask yourself very
     /// carefully if you really need this.
     pub fn screenPoint(self: Cell) point.Point {
-        var y: size.CellCountInt = self.row_idx;
+        var y: u32 = self.row_idx;
         var node_ = self.node;
         while (node_.prev) |node| {
             y += node.rows();
@@ -7802,6 +7905,44 @@ test "PageList pointFromPin traverse pages" {
         }) == null);
     }
 }
+
+test "PageList pointFromPin rejects overflowing screen coordinate" {
+    const testing = std.testing;
+
+    // Use maximum-height metadata-only pages to model a valid scrollback just
+    // beyond the u32 coordinate range without allocating their backing cells.
+    const page_count = 65_539;
+    const rows_per_page = std.math.maxInt(size.CellCountInt);
+    const nodes = try testing.allocator.alloc(Node, page_count);
+    defer testing.allocator.free(nodes);
+
+    for (nodes, 0..) |*node, i| {
+        node.* = .{
+            .prev = if (i > 0) &nodes[i - 1] else null,
+            .next = if (i + 1 < nodes.len) &nodes[i + 1] else null,
+            .data = .{ .resident = undefined },
+            .serial = @intCast(i),
+            .owned = .heap,
+        };
+        node.data.resident.size = .{
+            .cols = 1,
+            .rows = rows_per_page,
+        };
+    }
+
+    var s: PageList = undefined;
+    s.pages = .{
+        .first = &nodes[0],
+        .last = &nodes[nodes.len - 1],
+    };
+
+    try testing.expect(s.pointFromPin(.screen, .{
+        .node = &nodes[nodes.len - 1],
+        .y = 0,
+        .x = 0,
+    }) == null);
+}
+
 test "PageList active after grow" {
     const testing = std.testing;
     const alloc = testing.allocator;
@@ -8130,6 +8271,20 @@ test "PageList scroll delta row back overflow" {
         .offset = 0,
         .len = s.rows,
     }, s.scrollbar());
+}
+
+test "PageList scroll minimum row delta" {
+    const testing = std.testing;
+
+    var s = try init(testing.allocator, 10, 3, null);
+    defer s.deinit();
+
+    // Create one row of history so scrolling all the way back has an
+    // observable result.
+    try s.growRows(1);
+    s.scroll(.{ .delta_row = std.math.minInt(isize) });
+
+    try testing.expectEqual(Viewport.top, s.viewport);
 }
 
 test "PageList scroll delta row forward" {
@@ -8817,6 +8972,16 @@ test "PageList: jump zero prompts" {
     }, s.scrollbar());
 }
 
+test "PageList: jump minimum prompt delta" {
+    const testing = std.testing;
+
+    var s = try init(testing.allocator, 10, 3, null);
+    defer s.deinit();
+
+    s.scroll(.{ .delta_prompt = std.math.minInt(isize) });
+    try testing.expectEqual(Viewport.active, s.viewport);
+}
+
 test "Screen: jump back one prompt" {
     const testing = std.testing;
     const alloc = testing.allocator;
@@ -8983,6 +9148,47 @@ test "PageList grow allocate" {
             .y = last.capacity.rows,
         } }, cell.screenPoint());
     }
+}
+
+test "PageList Cell screenPoint supports long scrollback" {
+    const testing = std.testing;
+
+    // A modest number of full-size page nodes is enough to exceed the u16
+    // row range without allocating any page backing memory. screenPoint only
+    // reads the linked metadata while calculating the absolute coordinate.
+    const page_count = 307;
+    const rows_per_page = std_capacity.rows;
+    const nodes = try testing.allocator.alloc(Node, page_count);
+    defer testing.allocator.free(nodes);
+
+    for (nodes, 0..) |*node, i| {
+        node.* = .{
+            .prev = if (i > 0) &nodes[i - 1] else null,
+            .next = if (i + 1 < nodes.len) &nodes[i + 1] else null,
+            .data = .{ .resident = undefined },
+            .serial = @intCast(i),
+            .owned = .heap,
+        };
+        node.data.resident.size = .{
+            .cols = 1,
+            .rows = rows_per_page,
+        };
+    }
+
+    const expected_y: u32 = (page_count - 1) * @as(u32, rows_per_page);
+    try testing.expect(expected_y > std.math.maxInt(size.CellCountInt));
+
+    const cell: Cell = .{
+        .node = &nodes[nodes.len - 1],
+        .row = undefined,
+        .cell = undefined,
+        .row_idx = 0,
+        .col_idx = 0,
+    };
+    try testing.expectEqual(point.Point{ .screen = .{
+        .x = 0,
+        .y = expected_y,
+    } }, cell.screenPoint());
 }
 
 test "PageList grow prune scrollback" {
@@ -9868,6 +10074,76 @@ test "PageList pageIterator reverse history two pages" {
         try testing.expectEqual(active_tl.y, chunk.end);
     }
     try testing.expect(it.next() == null);
+}
+
+test "PageList PageIterator reverse count includes row zero" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s = try init(alloc, 2, 2, null);
+    defer s.deinit();
+
+    var it: PageIterator = .{
+        .row = s.getTopLeft(.screen),
+        .limit = .{ .count = 1 },
+        .direction = .left_up,
+    };
+    const chunk = it.next().?;
+    try testing.expectEqual(@as(size.CellCountInt, 0), chunk.start);
+    try testing.expectEqual(@as(size.CellCountInt, 1), chunk.end);
+    try testing.expect(it.next() == null);
+}
+
+test "PageList PageIterator count crosses page boundaries" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s = try init(alloc, 80, 24, null);
+    defer s.deinit();
+
+    const first = s.pages.first.?;
+    first.page().pauseIntegrityChecks(true);
+    while (first.rows() < first.capacity().rows) _ = try s.grow();
+    first.page().pauseIntegrityChecks(false);
+    const second = (try s.grow()).?;
+
+    var down: PageIterator = .{
+        .row = .{ .node = first, .y = first.rows() - 1 },
+        .limit = .{ .count = 2 },
+        .direction = .right_down,
+    };
+    {
+        const chunk = down.next().?;
+        try testing.expectEqual(first, chunk.node);
+        try testing.expectEqual(first.rows() - 1, chunk.start);
+        try testing.expectEqual(first.rows(), chunk.end);
+    }
+    {
+        const chunk = down.next().?;
+        try testing.expectEqual(second, chunk.node);
+        try testing.expectEqual(@as(size.CellCountInt, 0), chunk.start);
+        try testing.expectEqual(@as(size.CellCountInt, 1), chunk.end);
+    }
+    try testing.expect(down.next() == null);
+
+    var up: PageIterator = .{
+        .row = .{ .node = second },
+        .limit = .{ .count = 2 },
+        .direction = .left_up,
+    };
+    {
+        const chunk = up.next().?;
+        try testing.expectEqual(second, chunk.node);
+        try testing.expectEqual(@as(size.CellCountInt, 0), chunk.start);
+        try testing.expectEqual(@as(size.CellCountInt, 1), chunk.end);
+    }
+    {
+        const chunk = up.next().?;
+        try testing.expectEqual(first, chunk.node);
+        try testing.expectEqual(first.rows() - 1, chunk.start);
+        try testing.expectEqual(first.rows(), chunk.end);
+    }
+    try testing.expect(up.next() == null);
 }
 
 test "PageList cellIterator" {

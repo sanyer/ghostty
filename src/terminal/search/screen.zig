@@ -157,10 +157,29 @@ pub const ScreenSearch = struct {
     }
 
     pub fn deinit(self: *ScreenSearch) void {
+        self.deinitInternal(true);
+    }
+
+    /// Release owned search state after the underlying Screen has already
+    /// been destroyed. Tracked pins belonged to that Screen's PageList pool
+    /// and were freed with it, so only independently owned memory is freed.
+    pub fn deinitScreenInvalid(self: *ScreenSearch) void {
+        self.deinitInternal(false);
+    }
+
+    fn deinitInternal(self: *ScreenSearch, screen_valid: bool) void {
         const alloc = self.allocator();
         self.active.deinit();
-        if (self.history) |*h| h.deinit(self.screen);
-        if (self.selected) |*m| m.deinit(self.screen);
+        if (self.history) |*h| {
+            if (screen_valid) {
+                h.deinit(self.screen);
+            } else {
+                h.searcher.deinitListInvalid();
+            }
+        }
+        if (screen_valid) {
+            if (self.selected) |*m| m.deinit(self.screen);
+        }
         for (self.active_results.items) |*hl| hl.deinit(alloc);
         self.active_results.deinit(alloc);
         for (self.history_results.items) |*hl| hl.deinit(alloc);
@@ -327,20 +346,54 @@ pub const ScreenSearch = struct {
 
     fn pruneHistory(self: *ScreenSearch) void {
         // Go through our history results in order (newest to oldest) to find
-        // any result that contains an invalid serial. Prune up to that
-        // point.
-        for (0..self.history_results.items.len) |i| {
+        // any result that contains an invalid serial.
+        var i: usize = 0;
+        while (i < self.history_results.items.len) {
             const hl = &self.history_results.items[i];
-            const serials = hl.chunks.items(.serial);
+            const chunks = hl.chunks.slice();
+            const serials = chunks.items(.serial);
             const lowest = serials[0];
             if (lowest < self.screen.pages.page_serial_min) {
                 // Everything from here forward we assume is invalid because
                 // our history results only get older.
                 const alloc = self.allocator();
+                if (self.selected) |*m| {
+                    const first_pruned = self.active_results.items.len + i;
+                    if (m.idx >= first_pruned) {
+                        m.deinit(self.screen);
+                        self.selected = null;
+                    }
+                }
                 for (self.history_results.items[i..]) |*prune_hl| prune_hl.deinit(alloc);
                 self.history_results.shrinkAndFree(alloc, i);
                 return;
             }
+
+            // A page can also be replaced in place, such as by compaction.
+            // In that case its old serial remains above page_serial_min, so
+            // validate the captured pointer and serial against the live list.
+            const nodes = chunks.items(.node);
+            for (nodes, serials) |node, serial| {
+                if (!self.screen.pages.nodeIsValid(node, serial)) break;
+            } else {
+                i += 1;
+                continue;
+            }
+
+            // Only this result is known to be invalid. Older results may live
+            // on unrelated pages and remain usable, so remove it individually.
+            const result_idx = self.active_results.items.len + i;
+            if (self.selected) |*m| {
+                if (m.idx == result_idx) {
+                    m.deinit(self.screen);
+                    self.selected = null;
+                } else if (m.idx > result_idx) {
+                    m.idx -= 1;
+                }
+            }
+
+            var removed = self.history_results.orderedRemove(i);
+            removed.deinit(self.allocator());
         }
     }
 
@@ -1495,6 +1548,72 @@ test "select after all matches disappear drops the selection" {
     try testing.expect(search.selectedMatch() == null);
     try testing.expectEqual(0, search.active_results.items.len);
     try testing.expectEqual(0, search.history_results.items.len);
+}
+
+test "select after partial history erase drops a pruned selection" {
+    const alloc = testing.allocator;
+    var t: Terminal = try .init(alloc, .{
+        .cols = 10,
+        .rows = 2,
+        .max_scrollback = std.math.maxInt(usize),
+    });
+    defer t.deinit(alloc);
+    const list: *PageList = &t.screens.active.pages;
+
+    var stream = t.vtStream();
+    defer stream.deinit();
+
+    stream.nextSlice("error\r\n");
+    const first = list.pages.first.?;
+    while (list.totalPages() < 3) stream.nextSlice("\r\n");
+    const first_rows = first.rows();
+
+    var search: ScreenSearch = try .init(alloc, t.screens.active, "error");
+    defer search.deinit();
+    try search.searchAll();
+    try testing.expectEqual(0, search.active_results.items.len);
+    try testing.expectEqual(1, search.history_results.items.len);
+    try testing.expect(try search.select(.next));
+
+    list.eraseHistory(.{ .history = .{ .y = first_rows - 1 } });
+    try testing.expect(!search.selected.?.highlight.start.garbage);
+
+    try testing.expect(!try search.select(.next));
+    try testing.expect(search.selected == null);
+}
+
+test "select after history compaction ignores replaced results" {
+    const alloc = testing.allocator;
+    var t: Terminal = try .init(alloc, .{
+        .cols = 10,
+        .rows = 2,
+        .max_scrollback = std.math.maxInt(usize),
+    });
+    defer t.deinit(alloc);
+    const list: *PageList = &t.screens.active.pages;
+
+    var stream = t.vtStream();
+    defer stream.deinit();
+
+    stream.nextSlice("error\r\n");
+    const first = list.pages.first.?;
+    while (list.totalPages() < 3) stream.nextSlice("\r\n");
+    try list.split(.{
+        .node = first,
+        .y = first.rows() / 2,
+        .x = 0,
+    });
+
+    var search: ScreenSearch = try .init(alloc, t.screens.active, "error");
+    defer search.deinit();
+    try search.searchAll();
+    try testing.expectEqual(1, search.history_results.items.len);
+
+    const replacement = (try list.compact(first)).?;
+    try testing.expect(replacement != first);
+
+    try testing.expect(!try search.select(.next));
+    try testing.expect(search.selected == null);
 }
 
 test "screen search no scrollback has no history" {
