@@ -5608,18 +5608,15 @@ pub const PageIterator = struct {
 
             .count => |*limit| count: {
                 assert(limit.* > 0); // should be handled already
-                const len = @min(row.node.rows() - row.y, limit.*);
-                if (len > limit.*) {
-                    self.row = row.down(len);
-                    limit.* -= len;
-                } else {
-                    self.row = null;
-                }
+                const available: usize = row.node.rows() - row.y;
+                const len = @min(available, limit.*);
+                limit.* -= len;
+                self.row = if (limit.* > 0) row.down(len) else null;
 
                 break :count .{
                     .node = row.node,
                     .start = row.y,
-                    .end = row.y + len,
+                    .end = @intCast(@as(usize, row.y) + len),
                 };
             },
 
@@ -5677,18 +5674,15 @@ pub const PageIterator = struct {
 
             .count => |*limit| count: {
                 assert(limit.* > 0); // should be handled already
-                const len = @min(row.y, limit.*);
-                if (len > limit.*) {
-                    self.row = row.up(len);
-                    limit.* -= len;
-                } else {
-                    self.row = null;
-                }
+                const available: usize = @as(usize, row.y) + 1;
+                const len = @min(available, limit.*);
+                limit.* -= len;
+                self.row = if (limit.* > 0) row.up(len) else null;
 
                 break :count .{
                     .node = row.node,
-                    .start = row.y - len,
-                    .end = row.y - 1,
+                    .start = @intCast(available - len),
+                    .end = @intCast(available),
                 };
             },
 
@@ -10080,6 +10074,76 @@ test "PageList pageIterator reverse history two pages" {
         try testing.expectEqual(active_tl.y, chunk.end);
     }
     try testing.expect(it.next() == null);
+}
+
+test "PageList PageIterator reverse count includes row zero" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s = try init(alloc, 2, 2, null);
+    defer s.deinit();
+
+    var it: PageIterator = .{
+        .row = s.getTopLeft(.screen),
+        .limit = .{ .count = 1 },
+        .direction = .left_up,
+    };
+    const chunk = it.next().?;
+    try testing.expectEqual(@as(size.CellCountInt, 0), chunk.start);
+    try testing.expectEqual(@as(size.CellCountInt, 1), chunk.end);
+    try testing.expect(it.next() == null);
+}
+
+test "PageList PageIterator count crosses page boundaries" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s = try init(alloc, 80, 24, null);
+    defer s.deinit();
+
+    const first = s.pages.first.?;
+    first.page().pauseIntegrityChecks(true);
+    while (first.rows() < first.capacity().rows) _ = try s.grow();
+    first.page().pauseIntegrityChecks(false);
+    const second = (try s.grow()).?;
+
+    var down: PageIterator = .{
+        .row = .{ .node = first, .y = first.rows() - 1 },
+        .limit = .{ .count = 2 },
+        .direction = .right_down,
+    };
+    {
+        const chunk = down.next().?;
+        try testing.expectEqual(first, chunk.node);
+        try testing.expectEqual(first.rows() - 1, chunk.start);
+        try testing.expectEqual(first.rows(), chunk.end);
+    }
+    {
+        const chunk = down.next().?;
+        try testing.expectEqual(second, chunk.node);
+        try testing.expectEqual(@as(size.CellCountInt, 0), chunk.start);
+        try testing.expectEqual(@as(size.CellCountInt, 1), chunk.end);
+    }
+    try testing.expect(down.next() == null);
+
+    var up: PageIterator = .{
+        .row = .{ .node = second },
+        .limit = .{ .count = 2 },
+        .direction = .left_up,
+    };
+    {
+        const chunk = up.next().?;
+        try testing.expectEqual(second, chunk.node);
+        try testing.expectEqual(@as(size.CellCountInt, 0), chunk.start);
+        try testing.expectEqual(@as(size.CellCountInt, 1), chunk.end);
+    }
+    {
+        const chunk = up.next().?;
+        try testing.expectEqual(first, chunk.node);
+        try testing.expectEqual(first.rows() - 1, chunk.start);
+        try testing.expectEqual(first.rows(), chunk.end);
+    }
+    try testing.expect(up.next() == null);
 }
 
 test "PageList cellIterator" {
