@@ -3252,6 +3252,12 @@ pub fn split(
     // error handling. It is possible but we haven't written it.
     errdefer comptime unreachable;
 
+    // The source is about to describe a shorter row range. Renew its
+    // generation only after every failable step has succeeded so a failed
+    // split leaves existing references valid.
+    self.invalidateNodeLayout(original_node);
+    self.page_compression.markActivity();
+
     // Move any tracked pins from the copied rows
     for (self.tracked_pins.keys()) |tracked| {
         if (tracked.node.page() != page or
@@ -7051,6 +7057,35 @@ test "PageList partial erase restarts compression before continuation" {
         s.compress(.incremental),
     );
     try testing.expect(first.isCompressed());
+}
+
+test "PageList bounded pruning after split invalidation preserves live serials" {
+    const testing = std.testing;
+
+    var s = try init(
+        testing.allocator,
+        80,
+        24,
+        2 * PagePool.item_size,
+    );
+    defer s.deinit();
+
+    while (s.totalPages() < 2) _ = try s.grow();
+    const first = s.pages.first.?;
+    const old_serial = first.serial;
+    const activity = s.page_compression.activity_serial;
+
+    try s.split(.{
+        .node = first,
+        .y = first.rows() / 2,
+        .x = 0,
+    });
+    try testing.expect(!s.nodeIsValid(first, old_serial));
+    try testing.expect(activity != s.page_compression.activity_serial);
+
+    try s.fillLastPageForTest();
+    _ = try s.grow();
+    try s.expectLivePageSerialsValidForTest();
 }
 
 test "PageList repeated bounded pruning after split preserves live serials" {

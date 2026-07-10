@@ -1649,6 +1649,39 @@ test "select after partial history page erase ignores shifted results" {
     try testing.expect(search.selected == null);
 }
 
+test "select after history page split ignores moved results" {
+    const alloc = testing.allocator;
+    var t: Terminal = try .init(alloc, .{
+        .cols = 10,
+        .rows = 2,
+        .max_scrollback = std.math.maxInt(usize),
+    });
+    defer t.deinit(alloc);
+    const list: *PageList = &t.screens.active.pages;
+
+    var stream = t.vtStream();
+    defer stream.deinit();
+
+    const first = list.pages.first.?;
+    while (first.rows() < first.capacity().rows) stream.nextSlice("\r\n");
+    stream.nextSlice("error");
+    for (0..list.rows + 1) |_| stream.nextSlice("\r\n");
+
+    var search: ScreenSearch = try .init(alloc, t.screens.active, "error");
+    defer search.deinit();
+    try search.searchAll();
+    try testing.expectEqual(1, search.history_results.items.len);
+
+    try list.split(.{
+        .node = first,
+        .y = first.rows() / 2,
+        .x = 0,
+    });
+
+    try testing.expect(!try search.select(.next));
+    try testing.expect(search.selected == null);
+}
+
 test "screen search no scrollback has no history" {
     const alloc = testing.allocator;
     var t: Terminal = try .init(alloc, .{
