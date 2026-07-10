@@ -3556,11 +3556,18 @@ pub fn resize(
 
 /// Set the pwd for the terminal.
 pub fn setPwd(self: *Terminal, pwd: []const u8) !void {
-    self.pwd.clearRetainingCapacity();
-    if (pwd.len > 0) {
-        try self.pwd.appendSlice(self.gpa(), pwd);
-        try self.pwd.append(self.gpa(), 0);
+    if (pwd.len == 0) {
+        self.pwd.clearRetainingCapacity();
+        return;
     }
+
+    const capacity = std.math.add(usize, pwd.len, 1) catch
+        return error.OutOfMemory;
+    try self.pwd.ensureTotalCapacity(self.gpa(), capacity);
+
+    self.pwd.clearRetainingCapacity();
+    self.pwd.appendSliceAssumeCapacity(pwd);
+    self.pwd.appendAssumeCapacity(0);
 }
 
 /// Returns the pwd for the terminal, if any. The memory is owned by the
@@ -3568,6 +3575,18 @@ pub fn setPwd(self: *Terminal, pwd: []const u8) !void {
 pub fn getPwd(self: *const Terminal) ?[:0]const u8 {
     if (self.pwd.items.len == 0) return null;
     return self.pwd.items[0 .. self.pwd.items.len - 1 :0];
+}
+
+test "Terminal: setPwd preserves a sentinel on allocation failure" {
+    var failing = testing.FailingAllocator.init(testing.allocator, .{});
+    const alloc = failing.allocator();
+    var t = try init(alloc, .{ .cols = 5, .rows = 1 });
+    defer t.deinit(alloc);
+
+    try t.pwd.ensureTotalCapacityPrecise(alloc, 3);
+    failing.fail_index = failing.alloc_index;
+    try testing.expectError(error.OutOfMemory, t.setPwd("pwd"));
+    try testing.expect(t.getPwd() == null);
 }
 
 /// Set the title for the terminal, as set by escape sequences (e.g. OSC 0/2).
