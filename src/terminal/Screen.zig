@@ -2809,7 +2809,7 @@ pub fn selectLine(self: *const Screen, opts: SelectLine) ?Selection {
                 // so we scan forward to find where our content ends.
                 if (start_offset == 0 and cells[0].semantic_content != v) {
                     var prev = p.up(1).?;
-                    prev.x = p.node.cols() - 1;
+                    prev.x = prev.node.cols() - 1;
                     break :end_pin prev;
                 }
 
@@ -8816,6 +8816,37 @@ test "Screen: selectLine semantic boundary first cell of row" {
             .y = 1,
         } }, s.pages.pointFromPin(.active, sel.end()).?);
     }
+}
+
+test "Screen: selectLine semantic boundary across mixed-width pages" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s = try init(alloc, .{ .cols = 4, .rows = 2, .max_scrollback = 0 });
+    defer s.deinit();
+
+    s.cursorSetSemanticContent(.{ .input = .clear_explicit });
+    try s.testWriteString("ABCD");
+    s.cursorSetSemanticContent(.output);
+    try s.testWriteString("E");
+
+    const first = s.pages.pages.first.?;
+    try s.pages.split(.{ .node = first, .y = 1 });
+    const second = first.next.?;
+    first.page().size.cols = 2;
+    s.pages.pauseIntegrityChecks(true);
+    defer s.pages.pauseIntegrityChecks(false);
+
+    try testing.expectEqual(@as(size.CellCountInt, 2), first.cols());
+    try testing.expectEqual(@as(size.CellCountInt, 4), second.cols());
+
+    var sel = s.selectLine(.{ .pin = .{
+        .node = first,
+        .x = 1,
+    } }).?;
+    defer sel.deinit(&s);
+    try testing.expect((Pin{ .node = first, .x = 0 }).eql(sel.start()));
+    try testing.expect((Pin{ .node = first, .x = 1 }).eql(sel.end()));
 }
 
 test "Screen: selectLine semantic all same content" {
