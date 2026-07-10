@@ -352,10 +352,12 @@ pub const ScreenSearch = struct {
             const hl = &self.history_results.items[i];
             const chunks = hl.chunks.slice();
             const serials = chunks.items(.serial);
-            const lowest = serials[0];
-            if (lowest < self.screen.pages.page_serial_min) {
-                // Everything from here forward we assume is invalid because
-                // our history results only get older.
+            const first_serial = serials[0];
+            if (first_serial < self.screen.pages.page_serial_epoch) {
+                // Only a whole-list reset advances the epoch. Results are
+                // newest to oldest, so this result and the entire remaining
+                // suffix predate that reset. Drop them without scanning the
+                // live page list for every captured chunk.
                 const alloc = self.allocator();
                 if (self.selected) |*m| {
                     const first_pruned = self.active_results.items.len + i;
@@ -369,9 +371,9 @@ pub const ScreenSearch = struct {
                 return;
             }
 
-            // A page can also be replaced in place, such as by compaction.
-            // In that case its old serial remains above page_serial_min, so
-            // validate the captured pointer and serial against the live list.
+            // Ordinary pruning, layout changes, and replacements do not
+            // advance the epoch. Validate their pointer-plus-generation pairs
+            // against the live list.
             const nodes = chunks.items(.node);
             for (nodes, serials) |node, serial| {
                 if (!self.screen.pages.nodeIsValid(node, serial)) break;

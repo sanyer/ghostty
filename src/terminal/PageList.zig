@@ -379,16 +379,17 @@ pages: List,
 /// going to risk it.
 page_serial: u64,
 
-/// A conservative lower bound on live page generations. This is an epoch for
-/// whole-list invalidation, not the generation of the first page or the exact
-/// minimum live generation. Page generations are not monotonic in list order:
-/// replacement and split operations can put a fresh generation before older
-/// live pages.
+/// The first serial in the current whole-list validity epoch. Only `reset`
+/// advances this value, immediately before rebuilding every page. It is not
+/// the generation of the first page or the exact minimum live generation.
+/// Page generations are not monotonic in list order: replacement and split
+/// operations can put a fresh generation before older live pages.
 ///
-/// A generation below this value is definitely invalid. A generation at or
-/// above it is only potentially valid and must still be checked against the
-/// live list with `nodeIsValid` before its coordinates are used.
-page_serial_min: u64,
+/// A generation below this epoch is definitely invalid, allowing O(1)
+/// rejection in `nodeIsValid` and bulk removal of pre-reset search results.
+/// A generation at or above it is only potentially valid and must still be
+/// checked against the live list before its coordinates are used.
+page_serial_epoch: u64,
 
 /// Byte size of the raw backing mappings owned by active page nodes. This is
 /// logical scrollback accounting and does not change while a mapping is
@@ -660,7 +661,7 @@ pub fn init(
         .pool = pool,
         .pages = page_list,
         .page_serial = page_serial,
-        .page_serial_min = 0,
+        .page_serial_epoch = 0,
         .page_size = page_size,
         .explicit_max_size = max_size orelse std.math.maxInt(usize),
         .min_max_size = min_max_size,
@@ -817,12 +818,11 @@ fn verifyIntegrity(self: *const PageList) IntegrityError!void {
             actual_total += node.rows();
             node_ = node.next;
 
-            // While doing this traversal, verify no node has a serial
-            // number lower than our min.
-            if (node.serial < self.page_serial_min) {
+            // Every live node must belong to the current validity epoch.
+            if (node.serial < self.page_serial_epoch) {
                 log.warn(
-                    "PageList integrity violation: page serial too low serial={} min={}",
-                    .{ node.serial, self.page_serial_min },
+                    "PageList integrity violation: page serial predates epoch serial={} epoch={}",
+                    .{ node.serial, self.page_serial_epoch },
                 );
                 return IntegrityError.PageSerialInvalid;
             }
@@ -923,10 +923,10 @@ pub fn reset(self: *PageList) void {
     // Reset discards all scrollback, so there is nothing left to compress.
     self.page_compression.reset();
 
-    // Invalidate all external page refs to the previous list. The reset below
-    // rebuilds the page list from the pools, so old untracked refs must be
-    // rejected before any validation attempts to inspect their node pointers.
-    self.page_serial_min = self.page_serial;
+    // Begin a new whole-list validity epoch before rebuilding from the pools.
+    // Every old reference now has a serial below the epoch and can be rejected
+    // in O(1), even if the node pool later reuses its pointer address.
+    self.page_serial_epoch = self.page_serial;
 
     // We need enough pages/nodes to keep our active area. This should
     // never fail since we by definition have allocated a page already
@@ -1156,7 +1156,7 @@ pub fn clone(
         .pool = pool,
         .pages = page_list,
         .page_serial = page_serial,
-        .page_serial_min = 0,
+        .page_serial_epoch = 0,
         .page_size = page_size,
         .explicit_max_size = self.explicit_max_size,
         .min_max_size = self.min_max_size,
@@ -2752,6 +2752,7 @@ fn trimTrailingBlankRows(
         // no text we can also be sure it has no styling
         // so we don't need to worry about memory.
         if (row_pin.node.rows() > 1 and invalidated_node != row_pin.node) {
+            // Shrinking a retained page changes its valid row-coordinate range.
             self.invalidateNodeLayout(row_pin.node);
             invalidated_node = row_pin.node;
         }
@@ -3105,9 +3106,42 @@ pub fn scrollClear(self: *PageList) Allocator.Error!void {
     for (0..non_empty) |_| _ = try self.grow();
 }
 
-/// Renew a live node's generation before changing its coordinate layout in
-/// place. This invalidates external pointer-plus-generation references without
-/// changing the whole-list invalidation floor.
+/// Give a live node a new generation before changing its coordinate layout in
+/// place.
+///
+/// This must be called when a node remains at the same address and stays in the
+/// list, but a mutation changes which logical row a `(node, y)` coordinate
+/// identifies or whether that coordinate is still in range. Examples include
+/// rotating rows after an erase, truncating a page's row range, reinitializing
+/// the sole remaining page, or shortening the source page of a split. Without
+/// a new generation, a cached pointer, serial, and coordinate could still pass
+/// `nodeIsValid` while referring to a different row than it originally did.
+///
+/// The caller must pass a node which is currently live in this PageList. Call
+/// this at the point the operation commits to changing the layout and before
+/// the first such change. When an operation is intended to be atomic, finish
+/// its failable preparation first so a failed operation does not needlessly
+/// invalidate references. One call per affected node is sufficient when an
+/// operation performs several layout changes without exposing intermediate
+/// references.
+///
+/// This helper is only needed for in-place changes. Removing or replacing a
+/// node already invalidates old references through the live-list check in
+/// `nodeIsValid`, and newly allocated or reused nodes receive a fresh serial as
+/// part of their initialization. Ordinary cell or style changes which preserve
+/// the meaning of page coordinates do not require a new generation solely for
+/// that reason.
+///
+/// The only state changed here is `node.serial` and the next-generation counter
+/// `page_serial`. Consequently, every previously captured pointer-plus-serial
+/// pair for this node becomes invalid while new references can capture the new
+/// generation. This does not advance `page_serial_epoch`: only `reset` starts a
+/// new whole-list validity epoch.
+///
+/// This also does not mutate the page, update tracked pins or viewport state,
+/// adjust row or memory accounting, mark cells dirty, or notify incremental
+/// compression. The surrounding operation remains responsible for all such
+/// bookkeeping required by its layout change.
 fn invalidateNodeLayout(self: *PageList, node: *List.Node) void {
     node.serial = self.page_serial;
     self.page_serial += 1;
@@ -3258,9 +3292,7 @@ pub fn split(
     // error handling. It is possible but we haven't written it.
     errdefer comptime unreachable;
 
-    // The source is about to describe a shorter row range. Renew its
-    // generation only after every failable step has succeeded so a failed
-    // split leaves existing references valid.
+    // Failable split work is complete; shortening the source changes its row range.
     self.invalidateNodeLayout(original_node);
     self.page_compression.markActivity();
 
@@ -3564,9 +3596,10 @@ pub fn grow(self: *PageList) Allocator.Error!?*List.Node {
         self.pages.insertAfter(last, first);
         self.total_rows += 1;
 
-        // Reusing the node gives it a fresh generation. Do not advance
-        // page_serial_min here: generations are not monotonic in list order,
-        // so older live successors may have lower generations.
+        // Reusing the node gives it a fresh generation. Do not begin a new
+        // page_serial_epoch here: generations are not monotonic in list order,
+        // so older live successors may have lower generations. The epoch only
+        // advances when reset invalidates the entire list.
         first.serial = self.page_serial;
         self.page_serial += 1;
 
@@ -4298,11 +4331,15 @@ pub fn eraseRow(
     var page = node.page();
     var rows = page.rows.ptr(page.memory.ptr);
 
-    if (!self.pinIsActive(pn)) self.page_compression.markActivity();
+    // Erasing history may restore compressed pages. Mark unconditionally
+    // because incrementing the activity token is cheaper than locating the
+    // active boundary.
+    self.page_compression.markActivity();
 
     // In order to move the following rows up we rotate the rows array by 1.
     // The rotate operation turns e.g. [ 0 1 2 3 ] in to [ 1 2 3 0 ], which
     // works perfectly to move all of our elements where they belong.
+    // Rotating rows changes which logical row cached coordinates identify.
     self.invalidateNodeLayout(node);
     fastmem.rotateOnce(Row, rows[pn.y..node.rows()]);
 
@@ -4355,6 +4392,7 @@ pub fn eraseRow(
         page = next_page;
         rows = next_rows;
 
+        // Rotating this page moves every cached row coordinate up by one.
         self.invalidateNodeLayout(node);
         fastmem.rotateOnce(Row, rows[0..node.rows()]);
 
@@ -4404,12 +4442,16 @@ pub fn eraseRowBounded(
     var page = node.page();
     var rows = page.rows.ptr(page.memory.ptr);
 
-    if (!self.pinIsActive(pn)) self.page_compression.markActivity();
+    // Erasing history may restore compressed pages. Mark unconditionally
+    // because incrementing the activity token is cheaper than locating the
+    // active boundary.
+    self.page_compression.markActivity();
 
     // If the row limit is less than the remaining rows before the end of the
     // page, then we clear the row, rotate it to the end of the boundary limit
     // and update our pins.
     if (node.rows() - pn.y > limit) {
+        // Rotating this bounded region changes its cached row coordinates.
         self.invalidateNodeLayout(node);
         page.clearCells(&rows[pn.y], 0, node.cols());
         fastmem.rotateOnce(Row, rows[pn.y..][0 .. limit + 1]);
@@ -4453,6 +4495,7 @@ pub fn eraseRowBounded(
         return;
     }
 
+    // Rotating this suffix changes which logical row its coordinates identify.
     self.invalidateNodeLayout(node);
     fastmem.rotateOnce(Row, rows[pn.y..node.rows()]);
 
@@ -4514,6 +4557,7 @@ pub fn eraseRowBounded(
         // The logic here is very similar to the one before the loop.
         const shifted_limit = limit - shifted;
         if (node.rows() > shifted_limit) {
+            // Rotating this bounded prefix changes its cached row coordinates.
             self.invalidateNodeLayout(node);
             page.clearCells(&rows[0], 0, node.cols());
             fastmem.rotateOnce(Row, rows[0 .. shifted_limit + 1]);
@@ -4550,6 +4594,7 @@ pub fn eraseRowBounded(
             return;
         }
 
+        // Rotating the whole page moves every cached row coordinate up by one.
         self.invalidateNodeLayout(node);
         fastmem.rotateOnce(Row, rows[0..node.rows()]);
 
@@ -4639,6 +4684,7 @@ fn eraseRows(
             // page so to handle this we reinit this page, set it to zero
             // size which will let us grow our active area back.
             if (chunk.node.next == null and chunk.node.prev == null) {
+                // Reinitializing the sole page invalidates every coordinate in it.
                 self.invalidateNodeLayout(chunk.node);
                 const page = chunk.node.page();
                 erased += page.size.rows;
@@ -4652,8 +4698,7 @@ fn eraseRows(
             continue;
         }
 
-        // Moving the retained suffix changes the meaning and valid range of
-        // every captured row coordinate in this node.
+        // Moving the retained suffix changes every captured row coordinate.
         self.invalidateNodeLayout(chunk.node);
 
         // We are modifying our chunk so make sure it is in a good state.
@@ -4843,7 +4888,9 @@ pub fn nodeIsValid(
     target: *List.Node,
     serial: u64,
 ) bool {
-    if (serial < self.page_serial_min) return false;
+    // Reset invalidates the whole prior epoch, so reject those generations
+    // without scanning the live list.
+    if (serial < self.page_serial_epoch) return false;
 
     var it = self.pages.first;
     while (it) |node| : (it = node.next) {
@@ -6588,16 +6635,22 @@ fn growColdPagesForTest(self: *PageList, count: usize) !void {
     }
 }
 
+/// Fill the current tail page to capacity without allocating a successor.
+/// Capturing the tail before the loop makes this stop at the allocation
+/// boundary needed by bounded-pruning tests.
 fn fillLastPageForTest(self: *PageList) !void {
     const last = self.pages.last.?;
     while (last.rows() < last.capacity().rows) _ = try self.grow();
 }
 
+/// Verify every live page belongs to the current validity epoch, has an
+/// allocated generation below the next serial, and validates through the same
+/// pointer-plus-generation lookup used by external references.
 fn expectLivePageSerialsValidForTest(self: *const PageList) !void {
     const testing = std.testing;
     var node = self.pages.first;
     while (node) |live| : (node = live.next) {
-        try testing.expect(live.serial >= self.page_serial_min);
+        try testing.expect(live.serial >= self.page_serial_epoch);
         try testing.expect(live.serial < self.page_serial);
         try testing.expect(self.nodeIsValid(live, live.serial));
     }
@@ -7144,6 +7197,7 @@ test "PageList repeated bounded pruning after split preserves live serials" {
     );
     defer s.deinit();
 
+    const epoch = s.page_serial_epoch;
     while (s.totalPages() < 3) _ = try s.grow();
     const first = s.pages.first.?;
     try s.split(.{
@@ -7153,14 +7207,17 @@ test "PageList repeated bounded pruning after split preserves live serials" {
     });
 
     // The split target has a fresh serial but precedes older successor pages.
-    // Prune both the old source and then that target to exercise the serial
-    // floor after list order has become non-monotonic.
+    // Prune both the old source and then that target while verifying ordinary
+    // list mutation does not advance the whole-list validity epoch.
     for (0..2) |_| {
         while (s.pages.last.?.rows() < s.pages.last.?.capacity().rows) {
             _ = try s.grow();
         }
         _ = try s.grow();
 
+        // Ordinary pruning invalidates one generation at a time through live
+        // list validation; only reset may begin a new whole-list epoch.
+        try testing.expectEqual(epoch, s.page_serial_epoch);
         try s.expectLivePageSerialsValidForTest();
     }
 }
@@ -16143,7 +16200,7 @@ test "PageList reset invalidates stale untracked refs even if node memory is reu
     while (stale_len < stale_nodes.len and reused == null) {
         const old_node = s.pages.first.?;
         const old_serial = old_node.serial;
-        try testing.expect(old_serial >= s.page_serial_min);
+        try testing.expect(old_serial >= s.page_serial_epoch);
         try testing.expect(old_serial < s.page_serial);
         stale_nodes[stale_len] = old_node;
         stale_serials[stale_len] = old_serial;
@@ -16169,10 +16226,10 @@ test "PageList reset invalidates stale untracked refs even if node memory is reu
     // the stale generation before inspecting its pointer, even when that exact
     // address now belongs to a new live generation.
     try testing.expectEqual(old_node, new_node);
-    try testing.expect(old_serial < s.page_serial_min);
+    try testing.expect(old_serial < s.page_serial_epoch);
     try testing.expect(!s.nodeIsValid(old_node, old_serial));
     try testing.expect(s.nodeIsValid(new_node, new_serial));
-    try testing.expect(new_serial >= s.page_serial_min);
+    try testing.expect(new_serial >= s.page_serial_epoch);
     try testing.expect(new_serial < s.page_serial);
 }
 
