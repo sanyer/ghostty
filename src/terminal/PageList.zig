@@ -3179,6 +3179,7 @@ pub fn compact(self: *PageList, node: *List.Node) Allocator.Error!?*List.Node {
     self.pages.insertBefore(node, new_node);
     self.pages.remove(node);
     self.destroyNode(node);
+    self.page_compression.markActivity();
 
     new_page.assertIntegrity();
     return new_node;
@@ -3722,6 +3723,7 @@ pub fn increaseCapacity(
     self.pages.insertBefore(node, new_node);
     self.pages.remove(node);
     self.destroyNode(node);
+    self.page_compression.markActivity();
 
     new_page.assertIntegrity();
     return new_node;
@@ -6763,6 +6765,34 @@ test "PageList owns incremental compression state" {
         IncrementalCompressionState{},
         cloned.page_compression,
     );
+}
+
+test "PageList replacements preserve compression continuation and mark activity" {
+    const testing = std.testing;
+
+    var s = try init(testing.allocator, 80, 24, null);
+    defer s.deinit();
+
+    const state: IncrementalCompressionState = .{
+        .flags = .{ .verifying = true },
+        .activity_serial = 42,
+        .last_serial = 7,
+        .next_serial = 8,
+    };
+    const expected: IncrementalCompressionState = .{
+        .flags = .{ .verifying = true },
+        .activity_serial = 43,
+        .last_serial = 7,
+        .next_serial = 8,
+    };
+
+    s.page_compression = state;
+    const replacement = try s.increaseCapacity(s.pages.first.?, null);
+    try testing.expectEqual(expected, s.page_compression);
+
+    s.page_compression = state;
+    _ = (try s.compact(replacement)).?;
+    try testing.expectEqual(expected, s.page_compression);
 }
 
 test "PageList incremental compression bounds inspected pages" {
