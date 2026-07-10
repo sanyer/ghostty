@@ -1526,19 +1526,19 @@ pub fn clearRows(
 
     var it = self.pages.pageIterator(.right_down, tl, bl);
     while (it.next()) |chunk| {
+        const page = chunk.node.page();
         for (chunk.rows()) |*row| {
             const cells_offset = row.cells;
-            const cells_multi: [*]Cell = row.cells.ptr(chunk.node.page().memory);
-            const cells = cells_multi[0..self.pages.cols];
+            const cells = page.getCells(row);
 
             // Clear all cells
             if (protected) {
-                self.clearUnprotectedCells(chunk.node.page(), row, cells);
+                self.clearUnprotectedCells(page, row, cells);
                 // We need to preserve other row attributes since we only
                 // cleared unprotected cells.
                 row.cells = cells_offset;
             } else {
-                self.clearCells(chunk.node.page(), row, cells);
+                self.clearCells(page, row, cells);
                 row.* = .{ .cells = cells_offset };
             }
 
@@ -1589,7 +1589,7 @@ pub fn clearCells(
         // If we have no left/right scroll region we can be sure
         // that we've cleared all the graphemes, so we clear the
         // flag, otherwise we ask the page to update the flag.
-        if (cells.len == self.pages.cols) {
+        if (cells.len == page.size.cols) {
             row.grapheme = false;
         } else {
             page.updateRowGraphemeFlag(row);
@@ -1605,7 +1605,7 @@ pub fn clearCells(
         // If we have no left/right scroll region we can be sure
         // that we've cleared all the hyperlinks, so we clear the
         // flag, otherwise we ask the page to update the flag.
-        if (cells.len == self.pages.cols) {
+        if (cells.len == page.size.cols) {
             row.hyperlink = false;
         } else {
             page.updateRowHyperlinkFlag(row);
@@ -1633,7 +1633,7 @@ pub fn clearCells(
         // If we have no left/right scroll region we can be sure
         // that we've cleared all the styles, so we clear the
         // flag, otherwise we ask the page to update the flag.
-        if (cells.len == self.pages.cols) {
+        if (cells.len == page.size.cols) {
             row.styled = false;
         } else {
             page.updateRowStyledFlag(row);
@@ -1642,7 +1642,7 @@ pub fn clearCells(
 
     if (comptime build_options.kitty_graphics) {
         if (row.kitty_virtual_placeholder and
-            cells.len == self.pages.cols)
+            cells.len == page.size.cols)
         {
             for (cells) |c| {
                 if (c.codepoint() == kitty.graphics.unicode.placeholder) {
@@ -4106,6 +4106,26 @@ test "Screen clearCells empty range" {
     const row = s.cursor.page_row;
     const cells = page.getCells(row);
     s.clearCells(page, row, cells[0..0]);
+}
+
+test "Screen clearRows uses stored page width" {
+    const testing = std.testing;
+
+    var s = try Screen.init(testing.allocator, .{
+        .cols = 2,
+        .rows = 1,
+        .max_scrollback = 0,
+    });
+    defer s.deinit();
+
+    try s.testWriteString("AB");
+    const node = s.pages.pages.first.?;
+    s.pages.cols = 4;
+
+    s.clearRows(.{ .screen = .{} }, null, false);
+    const cells = node.page().getCells(&node.page().rows.ptr(node.page().memory)[0]);
+    try testing.expectEqual(@as(usize, 2), cells.len);
+    for (cells) |cell| try testing.expect(cell.isEmpty());
 }
 
 test "Screen clearRows protected" {
