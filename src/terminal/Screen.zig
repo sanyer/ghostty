@@ -960,8 +960,8 @@ pub fn cursorScrollAbove(self: *Screen) !void {
     //  lot cheaper in 99% of cases.
 
     const old_pin = self.cursor.page_pin.*;
-    if (try self.pages.grow()) |_| {
-        try self.cursorScrollAboveRotate();
+    if (try self.pages.grow()) |new_node| {
+        try self.cursorScrollAboveRotate(new_node);
     } else {
         // In this case, it means grow() didn't allocate a new page.
 
@@ -981,6 +981,8 @@ pub fn cursorScrollAbove(self: *Screen) !void {
             // Rotate the rows so that the newly created empty row is at the
             // beginning. e.g. [ 0 1 2 3 ] in to [ 3 0 1 2 ].
             var rows = page.rows.ptr(page.memory.ptr);
+            // Rotating this suffix changes which logical row its coordinates identify.
+            self.pages.invalidateNodeLayout(pin.node);
             fastmem.rotateOnceR(Row, rows[pin.y..page.size.rows]);
 
             // Mark the whole page as dirty.
@@ -1014,7 +1016,7 @@ pub fn cursorScrollAbove(self: *Screen) !void {
             //    1 |5E00000000| | 4
             //      +----------+ :
             //     +-------------+
-            try self.cursorScrollAboveRotate();
+            try self.cursorScrollAboveRotate(null);
         }
     }
 
@@ -1029,7 +1031,10 @@ pub fn cursorScrollAbove(self: *Screen) !void {
     }
 }
 
-fn cursorScrollAboveRotate(self: *Screen) !void {
+fn cursorScrollAboveRotate(
+    self: *Screen,
+    fresh_node: ?*PageList.List.Node,
+) !void {
     self.cursorChangePin(self.cursor.page_pin.down(1).?);
 
     // Go through each of the pages following our pin, shift all rows
@@ -1041,6 +1046,12 @@ fn cursorScrollAboveRotate(self: *Screen) !void {
         const cur_page = current.page();
         const prev_rows = prev_page.rows.ptr(prev_page.memory.ptr);
         const cur_rows = cur_page.rows.ptr(cur_page.memory.ptr);
+
+        // A newly allocated tail has no earlier references to invalidate.
+        if (fresh_node == null or current != fresh_node.?) {
+            // Rotating this page moves every cached row coordinate down by one.
+            self.pages.invalidateNodeLayout(current);
+        }
 
         // Rotate the pages down: [ 0 1 2 3 ] => [ 3 0 1 2 ]
         fastmem.rotateOnceR(Row, cur_rows[0..cur_page.size.rows]);
@@ -1061,6 +1072,8 @@ fn cursorScrollAboveRotate(self: *Screen) !void {
     assert(current == self.cursor.page_pin.node);
     const cur_page = current.page();
     const cur_rows = cur_page.rows.ptr(cur_page.memory.ptr);
+    // Rotating the cursor-page suffix changes its cached row coordinates.
+    self.pages.invalidateNodeLayout(current);
     fastmem.rotateOnceR(Row, cur_rows[self.cursor.page_pin.y..cur_page.size.rows]);
     self.clearCells(
         cur_page,
@@ -1145,6 +1158,8 @@ pub fn cursorScrollRegionUp(self: *Screen, limit: usize) !void {
 
     // Rotate the region rows so the now-blank top row moves to the
     // bottom (the cursor row) and everything else shifts up by one.
+    // Rotating the region changes which logical row its coordinates identify.
+    self.pages.invalidateNodeLayout(pin.node);
     fastmem.rotateOnce(Row, rows);
 
     // Mark the whole page as dirty.
@@ -4919,6 +4934,22 @@ test "Screen: cursorScrollRegionUp simple" {
     }
 }
 
+test "Screen: cursorScrollRegionUp renews page generation" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s = try init(alloc, .{ .cols = 5, .rows = 5, .max_scrollback = 0 });
+    defer s.deinit();
+    try s.testWriteString("1ABCD\n2EFGH\n3IJKL\n4MNOP\n5QRST");
+    s.cursorAbsolute(0, 2);
+
+    const node = s.cursor.page_pin.node;
+    const serial = node.serial;
+    try s.cursorScrollRegionUp(2);
+
+    try testing.expect(!s.pages.nodeIsValid(node, serial));
+}
+
 test "Screen: cursorScrollRegionUp moves selection" {
     const testing = std.testing;
     const alloc = testing.allocator;
@@ -5281,7 +5312,10 @@ test "Screen: scroll above same page" {
     //   +----------+ :
     //  +-------------+
 
+    const node = s.cursor.page_pin.node;
+    const serial = node.serial;
     try s.cursorScrollAbove();
+    try testing.expect(!s.pages.nodeIsValid(node, serial));
 
     //   +----------+ = PAGE 0
     // 0 |1ABCD00000|
@@ -5356,7 +5390,13 @@ test "Screen: scroll above same page but cursor on previous page" {
     //      +----------+ :
     //     +-------------+
 
+    const first_node = s.pages.pages.first.?;
+    const second_node = first_node.next.?;
+    const first_serial = first_node.serial;
+    const second_serial = second_node.serial;
     try s.cursorScrollAbove();
+    try testing.expect(!s.pages.nodeIsValid(first_node, first_serial));
+    try testing.expect(!s.pages.nodeIsValid(second_node, second_serial));
 
     //      +----------+ = PAGE 0
     //  ... :          :
@@ -5521,7 +5561,10 @@ test "Screen: scroll above creates new page" {
     // 4307 |3IJKL00000| | 2
     //      +----------+ :
     //     +-------------+
+    const node = s.pages.pages.first.?;
+    const serial = node.serial;
     try s.cursorScrollAbove();
+    try testing.expect(!s.pages.nodeIsValid(node, serial));
 
     //      +----------+ = PAGE 0
     //  ... :          :

@@ -3116,6 +3116,8 @@ pub fn scrollClear(self: *PageList) Allocator.Error!void {
 /// the sole remaining page, or shortening the source page of a split. Without
 /// a new generation, a cached pointer, serial, and coordinate could still pass
 /// `nodeIsValid` while referring to a different row than it originally did.
+/// Screen and Terminal fast paths which manipulate Page rows directly must use
+/// this because they bypass PageList's own row-mutation helpers.
 ///
 /// The caller must pass a node which is currently live in this PageList. Call
 /// this at the point the operation commits to changing the layout and before
@@ -3142,7 +3144,7 @@ pub fn scrollClear(self: *PageList) Allocator.Error!void {
 /// adjust row or memory accounting, mark cells dirty, or notify incremental
 /// compression. The surrounding operation remains responsible for all such
 /// bookkeeping required by its layout change.
-fn invalidateNodeLayout(self: *PageList, node: *List.Node) void {
+pub fn invalidateNodeLayout(self: *PageList, node: *List.Node) void {
     node.serial = self.page_serial;
     self.page_serial += 1;
 }
