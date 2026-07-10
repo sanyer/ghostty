@@ -126,6 +126,9 @@ pub const PageListSearch = struct {
 
             // Move our tracked pin to the new node.
             self.pin.node = node;
+            self.pin.y = node.rows() - 1;
+            self.pin.x = node.cols() - 1;
+            self.pin.garbage = false;
 
             if (rem == 0) break;
         }
@@ -509,4 +512,32 @@ test "feed with pruned page" {
 
     // Feed should still do nothing
     try testing.expect(!try search.feed());
+}
+
+test "feed keeps its tracked pin within a shorter page" {
+    const alloc = testing.allocator;
+    var pages: PageList = try .init(alloc, 10, 2, null);
+    defer pages.deinit();
+
+    const first = pages.pages.first.?;
+    while (first.rows() < first.capacity().rows) _ = try pages.grow();
+
+    const second = (try pages.grow()).?;
+    while (second.rows() < second.capacity().rows) _ = try pages.grow();
+
+    try pages.split(.{ .node = first, .y = 1, .x = 0 });
+    const shorter = first.next.?;
+    try testing.expect(shorter.rows() < second.rows());
+
+    var search: PageListSearch = try .init(
+        alloc,
+        "x",
+        &pages,
+        second,
+    );
+    defer search.deinit();
+
+    try testing.expect(try search.feed());
+    try testing.expectEqual(shorter, search.pin.node);
+    try testing.expect(pages.pinIsValid(search.pin.*));
 }
