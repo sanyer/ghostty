@@ -4739,6 +4739,9 @@ pub fn pin(self: *const PageList, pt: point.Point) ?Pin {
 
     // Grab the top left and move to the point.
     var p = self.getTopLeft(pt).down(pt.coord().y) orelse return null;
+    // Incomplete reflow can leave a page narrower than the desired width.
+    // Never manufacture an out-of-bounds pin for that page.
+    if (x >= p.node.cols()) return null;
     p.x = x;
     return p;
 }
@@ -6253,26 +6256,18 @@ pub const Pin = struct {
     ///
     /// TODO: Unit tests.
     pub fn leftWrap(self: Pin, n: usize) ?Pin {
-        // NOTE: This assumes that all pages have the same width, which may
-        //       be violated under certain circumstances by incomplete reflow.
-        const cols = self.node.cols();
-        const remaining_in_row = self.x;
-
-        if (n <= remaining_in_row) return self.left(n);
-
-        const extra_after_remaining = n - remaining_in_row;
-        const rows_off = 1 + (extra_after_remaining - 1) / cols;
-
-        switch (self.upOverflow(rows_off)) {
-            .offset => |v| {
-                var result = v;
-                result.x = @intCast(
-                    cols - 1 - (extra_after_remaining - 1) % cols,
-                );
-                return result;
-            },
-            .overflow => return null,
+        var result = self;
+        var remaining = n;
+        while (remaining > result.x) {
+            remaining -= @as(usize, result.x) + 1;
+            result = result.up(1) orelse return null;
+            // Crossing a row boundary lands on that destination row's final
+            // cell, whose width may differ from ours during reflow.
+            result.x = result.node.cols() - 1;
         }
+
+        result.x -= @intCast(remaining);
+        return result;
     }
 
     /// Move the pin right n cells, wrapping to the next row as needed.
@@ -6281,23 +6276,18 @@ pub const Pin = struct {
     ///
     /// TODO: Unit tests.
     pub fn rightWrap(self: Pin, n: usize) ?Pin {
-        // NOTE: This assumes that all pages have the same width, which may
-        //       be violated under certain circumstances by incomplete reflow.
-        const cols = self.node.cols();
-        const remaining_in_row = cols - self.x - 1;
-
-        if (n <= remaining_in_row) return self.right(n);
-
-        const extra_after_remaining = n - remaining_in_row;
-        const rows_off = 1 + (extra_after_remaining - 1) / cols;
-
-        switch (self.downOverflow(rows_off)) {
-            .offset => |v| {
-                var result = v;
-                result.x = @intCast((extra_after_remaining - 1) % cols);
+        var result = self;
+        var remaining = n;
+        while (true) {
+            const row_remaining = result.node.cols() - result.x - 1;
+            if (remaining <= row_remaining) {
+                result.x += @intCast(remaining);
                 return result;
-            },
-            .overflow => return null,
+            }
+
+            remaining -= @as(usize, row_remaining) + 1;
+            result = result.down(1) orelse return null;
+            result.x = 0;
         }
     }
 
@@ -6345,7 +6335,7 @@ pub const Pin = struct {
                 .end = .{
                     .node = node,
                     .y = node.rows() - 1,
-                    .x = self.x,
+                    .x = @min(self.x, node.cols() - 1),
                 },
                 .remaining = n_left,
             } };
@@ -6353,7 +6343,7 @@ pub const Pin = struct {
                 .node = node,
                 .y = std.math.cast(size.CellCountInt, n_left - 1) orelse
                     std.math.maxInt(size.CellCountInt),
-                .x = self.x,
+                .x = @min(self.x, node.cols() - 1),
             } };
             n_left -= node.rows();
         }
@@ -6381,19 +6371,110 @@ pub const Pin = struct {
         var n_left: usize = n - self.y;
         while (true) {
             node = node.prev orelse return .{ .overflow = .{
-                .end = .{ .node = node, .y = 0, .x = self.x },
+                .end = .{
+                    .node = node,
+                    .y = 0,
+                    .x = @min(self.x, node.cols() - 1),
+                },
                 .remaining = n_left,
             } };
             if (n_left <= node.rows()) return .{ .offset = .{
                 .node = node,
                 .y = std.math.cast(size.CellCountInt, node.rows() - n_left) orelse
                     std.math.maxInt(size.CellCountInt),
-                .x = self.x,
+                .x = @min(self.x, node.cols() - 1),
             } };
             n_left -= node.rows();
         }
     }
 };
+
+fn mixedWidthPinListForTest(alloc: Allocator) !PageList {
+    var result = try init(alloc, 2, 1, null);
+    errdefer result.deinit();
+
+    // This deliberately constructs a layout that normal PageList operations
+    // do not expose yet. Keep integrity checks paused through deinit so the
+    // fixture can exercise mixed-width traversal in isolation.
+    result.pauseIntegrityChecks(true);
+
+    inline for (.{ 4, 3 }) |cols| {
+        const node = try result.createPage(.{ .cap = .{
+            .cols = cols,
+            .rows = 1,
+        } });
+        node.page().size.rows = 1;
+        result.pages.append(node);
+        result.total_rows += 1;
+    }
+
+    // Desired geometry is wider than the first and last stored pages.
+    result.cols = 4;
+    return result;
+}
+
+test "PageList Pin row movement clamps across mixed-width pages" {
+    const testing = std.testing;
+
+    var s = try mixedWidthPinListForTest(testing.allocator);
+    defer s.deinit();
+
+    const first = s.pages.first.?;
+    const second = first.next.?;
+    const third = second.next.?;
+
+    try testing.expect((Pin{ .node = third, .x = 2 }).eql(
+        (Pin{ .node = second, .x = 3 }).down(1).?,
+    ));
+    try testing.expect((Pin{ .node = first, .x = 1 }).eql(
+        (Pin{ .node = second, .x = 3 }).up(1).?,
+    ));
+
+    switch ((Pin{ .node = second, .x = 3 }).downOverflow(10)) {
+        .offset => try testing.expect(false),
+        .overflow => |overflow| try testing.expect(
+            (Pin{ .node = third, .x = 2 }).eql(overflow.end),
+        ),
+    }
+    switch ((Pin{ .node = second, .x = 3 }).upOverflow(10)) {
+        .offset => try testing.expect(false),
+        .overflow => |overflow| try testing.expect(
+            (Pin{ .node = first, .x = 1 }).eql(overflow.end),
+        ),
+    }
+}
+
+test "PageList Pin wrapping crosses mixed-width pages" {
+    const testing = std.testing;
+
+    var s = try mixedWidthPinListForTest(testing.allocator);
+    defer s.deinit();
+
+    const first = s.pages.first.?;
+    const second = first.next.?;
+    const third = second.next.?;
+
+    try testing.expect((Pin{ .node = third, .x = 2 }).eql(
+        (Pin{ .node = first, .x = 1 }).rightWrap(7).?,
+    ));
+    try testing.expect((Pin{ .node = second, .x = 0 }).eql(
+        (Pin{ .node = third, .x = 2 }).leftWrap(6).?,
+    ));
+    try testing.expect((Pin{ .node = first }).leftWrap(1) == null);
+    try testing.expect((Pin{ .node = third, .x = 2 }).rightWrap(1) == null);
+}
+
+test "PageList Pin rejects columns beyond mixed-width page bounds" {
+    const testing = std.testing;
+
+    var s = try mixedWidthPinListForTest(testing.allocator);
+    defer s.deinit();
+
+    try testing.expect(s.pin(.{ .screen = .{ .x = 1, .y = 0 } }) != null);
+    try testing.expect(s.pin(.{ .screen = .{ .x = 2, .y = 0 } }) == null);
+    try testing.expect(s.pin(.{ .screen = .{ .x = 3, .y = 1 } }) != null);
+    try testing.expect(s.pin(.{ .screen = .{ .x = 3, .y = 2 } }) == null);
+}
 
 pub const Cell = struct {
     node: *List.Node,
