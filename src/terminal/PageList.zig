@@ -4846,15 +4846,23 @@ pub fn pointFromPin(self: *const PageList, tag: point.Tag, p: Pin) ?point.Point 
         if (tl.y > p.y) return null;
         coord.y = p.y - tl.y;
     } else {
-        coord.y += tl.node.rows() - tl.y;
+        coord.y = std.math.add(
+            u32,
+            coord.y,
+            tl.node.rows() - tl.y,
+        ) catch return null;
         var node_ = tl.node.next;
         while (node_) |node| : (node_ = node.next) {
             if (node == p.node) {
-                coord.y += p.y;
+                coord.y = std.math.add(u32, coord.y, p.y) catch return null;
                 break;
             }
 
-            coord.y += node.rows();
+            coord.y = std.math.add(
+                u32,
+                coord.y,
+                node.rows(),
+            ) catch return null;
         } else {
             // We never saw our node, meaning we're outside the range.
             return null;
@@ -7804,6 +7812,44 @@ test "PageList pointFromPin traverse pages" {
         }) == null);
     }
 }
+
+test "PageList pointFromPin rejects overflowing screen coordinate" {
+    const testing = std.testing;
+
+    // Use maximum-height metadata-only pages to model a valid scrollback just
+    // beyond the u32 coordinate range without allocating their backing cells.
+    const page_count = 65_539;
+    const rows_per_page = std.math.maxInt(size.CellCountInt);
+    const nodes = try testing.allocator.alloc(Node, page_count);
+    defer testing.allocator.free(nodes);
+
+    for (nodes, 0..) |*node, i| {
+        node.* = .{
+            .prev = if (i > 0) &nodes[i - 1] else null,
+            .next = if (i + 1 < nodes.len) &nodes[i + 1] else null,
+            .data = .{ .resident = undefined },
+            .serial = @intCast(i),
+            .owned = .heap,
+        };
+        node.data.resident.size = .{
+            .cols = 1,
+            .rows = rows_per_page,
+        };
+    }
+
+    var s: PageList = undefined;
+    s.pages = .{
+        .first = &nodes[0],
+        .last = &nodes[nodes.len - 1],
+    };
+
+    try testing.expect(s.pointFromPin(.screen, .{
+        .node = &nodes[nodes.len - 1],
+        .y = 0,
+        .x = 0,
+    }) == null);
+}
+
 test "PageList active after grow" {
     const testing = std.testing;
     const alloc = testing.allocator;
