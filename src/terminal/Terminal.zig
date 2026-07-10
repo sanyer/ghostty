@@ -3583,9 +3583,9 @@ pub fn setPwd(self: *Terminal, pwd: []const u8) !void {
         return error.OutOfMemory;
     try self.pwd.ensureTotalCapacity(self.gpa(), capacity);
 
-    self.pwd.clearRetainingCapacity();
-    self.pwd.appendSliceAssumeCapacity(pwd);
-    self.pwd.appendAssumeCapacity(0);
+    self.pwd.items.len = capacity;
+    std.mem.copyForwards(u8, self.pwd.items[0..pwd.len], pwd);
+    self.pwd.items[pwd.len] = 0;
 }
 
 /// Returns the pwd for the terminal, if any. The memory is owned by the
@@ -3605,6 +3605,15 @@ test "Terminal: setPwd preserves a sentinel on allocation failure" {
     failing.fail_index = failing.alloc_index;
     try testing.expectError(error.OutOfMemory, t.setPwd("pwd"));
     try testing.expect(t.getPwd() == null);
+}
+
+test "Terminal: setPwd accepts its current value" {
+    var t = try init(testing.allocator, .{ .cols = 5, .rows = 1 });
+    defer t.deinit(testing.allocator);
+
+    try t.setPwd("file:///tmp");
+    try t.setPwd(t.getPwd().?);
+    try testing.expectEqualStrings("file:///tmp", t.getPwd().?);
 }
 
 /// Set the title for the terminal, as set by escape sequences (e.g. OSC 0/2).
