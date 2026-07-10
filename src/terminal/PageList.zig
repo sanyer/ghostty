@@ -6421,7 +6421,7 @@ pub const Cell = struct {
     /// this file then consider a different approach and ask yourself very
     /// carefully if you really need this.
     pub fn screenPoint(self: Cell) point.Point {
-        var y: size.CellCountInt = self.row_idx;
+        var y: u32 = self.row_idx;
         var node_ = self.node;
         while (node_.prev) |node| {
             y += node.rows();
@@ -9009,6 +9009,47 @@ test "PageList grow allocate" {
             .y = last.capacity.rows,
         } }, cell.screenPoint());
     }
+}
+
+test "PageList Cell screenPoint supports long scrollback" {
+    const testing = std.testing;
+
+    // A modest number of full-size page nodes is enough to exceed the u16
+    // row range without allocating any page backing memory. screenPoint only
+    // reads the linked metadata while calculating the absolute coordinate.
+    const page_count = 307;
+    const rows_per_page = std_capacity.rows;
+    const nodes = try testing.allocator.alloc(Node, page_count);
+    defer testing.allocator.free(nodes);
+
+    for (nodes, 0..) |*node, i| {
+        node.* = .{
+            .prev = if (i > 0) &nodes[i - 1] else null,
+            .next = if (i + 1 < nodes.len) &nodes[i + 1] else null,
+            .data = .{ .resident = undefined },
+            .serial = @intCast(i),
+            .owned = .heap,
+        };
+        node.data.resident.size = .{
+            .cols = 1,
+            .rows = rows_per_page,
+        };
+    }
+
+    const expected_y: u32 = (page_count - 1) * @as(u32, rows_per_page);
+    try testing.expect(expected_y > std.math.maxInt(size.CellCountInt));
+
+    const cell: Cell = .{
+        .node = &nodes[nodes.len - 1],
+        .row = undefined,
+        .cell = undefined,
+        .row_idx = 0,
+        .col_idx = 0,
+    };
+    try testing.expectEqual(point.Point{ .screen = .{
+        .x = 0,
+        .y = expected_y,
+    } }, cell.screenPoint());
 }
 
 test "PageList grow prune scrollback" {
