@@ -2460,15 +2460,16 @@ fn startHyperlinkOnce(
     self: *Screen,
     source: hyperlink.Hyperlink,
 ) (Allocator.Error || Page.InsertHyperlinkError)!void {
-    // End any prior hyperlink
-    self.endHyperlink();
-
     // Allocate our new Hyperlink entry in non-page memory. This
     // lets us quickly get access to URI, ID.
     const link = try self.alloc.create(hyperlink.Hyperlink);
     errdefer self.alloc.destroy(link);
     link.* = try source.dupe(self.alloc);
     errdefer link.deinit(self.alloc);
+
+    // End any prior hyperlink only after duplicating the new value. The
+    // source slices are allowed to reference our current hyperlink.
+    self.endHyperlink();
 
     // Insert the hyperlink into page memory
     var page = self.cursor.page_pin.node.page();
@@ -10031,6 +10032,21 @@ test "Screen: hyperlink start/end" {
         const page = s.cursor.page_pin.node.page();
         try testing.expectEqual(0, page.hyperlink_set.count());
     }
+}
+
+test "Screen: hyperlink accepts its current values" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    var s = try init(alloc, .{ .cols = 5, .rows = 5, .max_scrollback = 0 });
+    defer s.deinit();
+
+    try s.startHyperlink("http://example.com", "current");
+    const current = s.cursor.hyperlink.?;
+    try s.startHyperlink(current.uri, current.id.explicit);
+
+    try testing.expectEqualStrings("http://example.com", s.cursor.hyperlink.?.uri);
+    try testing.expectEqualStrings("current", s.cursor.hyperlink.?.id.explicit);
 }
 
 test "Screen: implicit hyperlink ID wraps" {
