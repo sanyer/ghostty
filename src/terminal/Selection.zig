@@ -155,12 +155,12 @@ pub fn topLeft(self: Selection, s: *const Screen) Pin {
         .reverse => self.end(),
         .mirrored_forward => pin: {
             var p = self.start();
-            p.x = self.end().x;
+            p.x = @min(self.end().x, p.node.cols() - 1);
             break :pin p;
         },
         .mirrored_reverse => pin: {
             var p = self.end();
-            p.x = self.start().x;
+            p.x = @min(self.start().x, p.node.cols() - 1);
             break :pin p;
         },
     };
@@ -173,12 +173,12 @@ pub fn bottomRight(self: Selection, s: *const Screen) Pin {
         .reverse => self.start(),
         .mirrored_forward => pin: {
             var p = self.end();
-            p.x = self.start().x;
+            p.x = @min(self.start().x, p.node.cols() - 1);
             break :pin p;
         },
         .mirrored_reverse => pin: {
             var p = self.start();
-            p.x = self.end().x;
+            p.x = @min(self.end().x, p.node.cols() - 1);
             break :pin p;
         },
     };
@@ -1053,6 +1053,32 @@ test "Selection: order, standard" {
 
         try testing.expect(sel.order(&s) == .reverse);
     }
+}
+
+test "Selection: rectangle corners clamp across mixed-width pages" {
+    const testing = std.testing;
+    var s = try Screen.init(testing.allocator, .{
+        .cols = 4,
+        .rows = 2,
+        .max_scrollback = 0,
+    });
+    defer s.deinit();
+
+    const first = s.pages.pages.first.?;
+    try s.pages.split(.{ .node = first, .y = 1 });
+    const second = first.next.?;
+    second.page().size.cols = 2;
+
+    const sel = Selection.init(
+        .{ .node = first, .x = 3 },
+        .{ .node = second, .x = 1 },
+        true,
+    );
+    try testing.expectEqual(.mirrored_forward, sel.order(&s));
+
+    const bottom_right = sel.bottomRight(&s);
+    _ = bottom_right.rowAndCell();
+    try testing.expect((Pin{ .node = second, .x = 1 }).eql(bottom_right));
 }
 
 test "Selection: order, rectangle" {
