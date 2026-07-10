@@ -134,6 +134,7 @@ pub const ViewportSearch = struct {
         // Add enough overlap to cover needle.len - 1 bytes (if it
         // exists) so we can cover the overlap. We only do this for the
         // soft-wrapped prior pages.
+        const overlap_len = self.window.needle.len -| 1;
         var node_ = fingerprint.nodes[0].prev;
         var added: usize = 0;
         while (node_) |node| : (node_ = node.prev) {
@@ -142,7 +143,7 @@ pub const ViewportSearch = struct {
             // wrap so this should be fine.
             const appended = try self.window.appendIfWrapped(node) orelse break;
             added += appended.content_len;
-            if (added >= self.window.needle.len - 1) break;
+            if (added >= overlap_len) break;
         }
 
         // We can use our fingerprint nodes to initialize our sliding
@@ -162,7 +163,7 @@ pub const ViewportSearch = struct {
             while (node_) |node| : (node_ = node.next) {
                 const appended = try self.window.append(node);
                 added += appended.content_len;
-                if (added >= self.window.needle.len - 1) break;
+                if (added >= overlap_len) break;
 
                 // If this row doesn't wrap, then we can quit
                 if (!appended.last_row_wrapped) break;
