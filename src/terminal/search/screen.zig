@@ -457,6 +457,10 @@ pub const ScreenSearch = struct {
         // searchers: column reflow may have freed every node they reference.
         if (try self.resetIfDimensionsChanged()) return;
 
+        // Validate flattened history before any coordinate is converted back
+        // into a pin or compared with a tracked selection below.
+        self.pruneHistory();
+
         const tw = reloadActive_tw;
 
         // If our selection pin became garbage it means we scrolled off
@@ -766,11 +770,9 @@ pub const ScreenSearch = struct {
         // selected result so no pre-resize pointer is ever dereferenced.
         _ = try self.resetIfDimensionsChanged();
 
-        // All selection requires valid pins so we prune history and
-        // reload our active area immediately. This ensures all search
-        // results point to valid nodes.
+        // All selection requires valid pins, so reload immediately. Reload
+        // validates flattened history before inspecting cached coordinates.
         try self.reloadActive();
-        self.pruneHistory();
 
         return switch (to) {
             .next => try self.selectNext(),
@@ -1646,6 +1648,44 @@ test "select after partial history page erase ignores shifted results" {
     try testing.expectEqual(old_rows - 1, first.rows());
 
     try testing.expect(!try search.select(.next));
+    try testing.expect(search.selected == null);
+}
+
+test "reload after partial history page erase drops shifted selection first" {
+    const alloc = testing.allocator;
+    var t: Terminal = try .init(alloc, .{
+        .cols = 10,
+        .rows = 2,
+        .max_scrollback = std.math.maxInt(usize),
+    });
+    defer t.deinit(alloc);
+    const list: *PageList = &t.screens.active.pages;
+
+    var stream = t.vtStream();
+    defer stream.deinit();
+
+    const first = list.pages.first.?;
+    while (first.rows() < first.capacity().rows) stream.nextSlice("\r\n");
+    stream.nextSlice("error");
+    for (0..list.rows + 1) |_| stream.nextSlice("\r\n");
+
+    var search: ScreenSearch = try .init(alloc, t.screens.active, "error");
+    defer search.deinit();
+    try search.searchAll();
+    try testing.expect(try search.select(.next));
+    try testing.expect(search.selected != null);
+
+    list.eraseHistory(.{ .history = .{ .y = 0 } });
+
+    // Advance the active boundary into another node and add matches so
+    // reloadActive updates the history result offsets. It must discard the
+    // stale selected result before comparing any of its captured coordinates.
+    const active_node = list.getTopLeft(.active).node;
+    while (list.getTopLeft(.active).node == active_node) {
+        stream.nextSlice("error\r\n");
+    }
+
+    try search.reloadActive();
     try testing.expect(search.selected == null);
 }
 
