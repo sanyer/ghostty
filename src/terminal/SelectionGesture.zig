@@ -228,7 +228,8 @@ pub fn validatedLeftClickPin(
 }
 
 pub const Press = struct {
-    /// The time when the press event occurred. Use a monotonic timer.
+    /// The time when the press event occurred. Prefer a monotonic timer;
+    /// backwards timestamps reset the repeat sequence.
     /// This can be null if you're on a system that doesn't support
     /// time for some reason. In that case, we only support single clicks.
     time: ?Time,
@@ -630,7 +631,8 @@ fn pressRepeat(
     const time = p.time orelse return error.PressRequiresReset;
     {
         const prev_time = self.left_click_time orelse return error.PressRequiresReset;
-        const since = timeSince(time, prev_time);
+        const since = timeSince(time, prev_time) orelse
+            return error.PressRequiresReset;
         if (since > p.repeat_interval) return error.PressRequiresReset;
     }
 
@@ -664,8 +666,13 @@ fn pressRepeat(
     self.left_click_behavior = p.behaviors[self.left_click_count - 1];
 }
 
-fn timeSince(time: Time, prev_time: Time) u64 {
-    if (comptime freestanding_wasm) return time -| prev_time;
+fn timeSince(time: Time, prev_time: Time) ?u64 {
+    if (comptime freestanding_wasm) {
+        if (time < prev_time) return null;
+        return time - prev_time;
+    }
+
+    if (time.order(prev_time) == .lt) return null;
     return time.since(prev_time);
 }
 
@@ -932,6 +939,16 @@ fn testPress(t: *Terminal, x: u16, y: u32, time: ?std.time.Instant) Press {
         .max_distance = 1,
         .repeat_interval = std.math.maxInt(u64),
         .word_boundary_codepoints = &.{},
+    };
+}
+
+fn testInstant(ns: u64) std.time.Instant {
+    return switch (builtin.os.tag) {
+        .windows, .uefi, .wasi => .{ .timestamp = ns },
+        else => .{ .timestamp = .{
+            .sec = @intCast(ns / std.time.ns_per_s),
+            .nsec = @intCast(ns % std.time.ns_per_s),
+        } },
     };
 }
 
@@ -1963,6 +1980,22 @@ test "SelectionGesture expired repeat resets click count" {
     _ = try gesture.press(&t, event);
 
     try testing.expectEqual(@as(u3, 1), gesture.left_click_count);
+}
+
+test "SelectionGesture backwards repeat time resets click count" {
+    var t = try Terminal.init(testing.allocator, .{ .cols = 5, .rows = 5 });
+    defer t.deinit(testing.allocator);
+
+    var gesture: SelectionGesture = .init;
+    defer gesture.deinit(&t);
+
+    const earlier = testInstant(std.time.ns_per_s);
+    const later = testInstant(2 * std.time.ns_per_s);
+    _ = try gesture.press(&t, testPress(&t, 1, 1, later));
+    _ = try gesture.press(&t, testPress(&t, 1, 1, earlier));
+
+    try testing.expectEqual(@as(u3, 1), gesture.left_click_count);
+    try testing.expectEqual(.eq, gesture.left_click_time.?.order(earlier));
 }
 
 test "SelectionGesture screen switch resets click count" {
