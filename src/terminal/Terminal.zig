@@ -3627,9 +3627,9 @@ pub fn setTitle(self: *Terminal, t: []const u8) !void {
         return error.OutOfMemory;
     try self.title.ensureTotalCapacity(self.gpa(), capacity);
 
-    self.title.clearRetainingCapacity();
-    self.title.appendSliceAssumeCapacity(t);
-    self.title.appendAssumeCapacity(0);
+    self.title.items.len = capacity;
+    std.mem.copyForwards(u8, self.title.items[0..t.len], t);
+    self.title.items[t.len] = 0;
 }
 
 /// Returns the title for the terminal, if any. The memory is owned by the
@@ -3649,6 +3649,15 @@ test "Terminal: setTitle preserves a sentinel on allocation failure" {
     failing.fail_index = failing.alloc_index;
     try testing.expectError(error.OutOfMemory, t.setTitle("title"));
     try testing.expect(t.getTitle() == null);
+}
+
+test "Terminal: setTitle accepts its current value" {
+    var t = try init(testing.allocator, .{ .cols = 5, .rows = 1 });
+    defer t.deinit(testing.allocator);
+
+    try t.setTitle("Ghostty");
+    try t.setTitle(t.getTitle().?);
+    try testing.expectEqualStrings("Ghostty", t.getTitle().?);
 }
 
 /// Switch to the given screen type (alternate or primary).
