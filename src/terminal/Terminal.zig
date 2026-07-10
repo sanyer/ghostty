@@ -3591,11 +3591,18 @@ test "Terminal: setPwd preserves a sentinel on allocation failure" {
 
 /// Set the title for the terminal, as set by escape sequences (e.g. OSC 0/2).
 pub fn setTitle(self: *Terminal, t: []const u8) !void {
-    self.title.clearRetainingCapacity();
-    if (t.len > 0) {
-        try self.title.appendSlice(self.gpa(), t);
-        try self.title.append(self.gpa(), 0);
+    if (t.len == 0) {
+        self.title.clearRetainingCapacity();
+        return;
     }
+
+    const capacity = std.math.add(usize, t.len, 1) catch
+        return error.OutOfMemory;
+    try self.title.ensureTotalCapacity(self.gpa(), capacity);
+
+    self.title.clearRetainingCapacity();
+    self.title.appendSliceAssumeCapacity(t);
+    self.title.appendAssumeCapacity(0);
 }
 
 /// Returns the title for the terminal, if any. The memory is owned by the
@@ -3603,6 +3610,18 @@ pub fn setTitle(self: *Terminal, t: []const u8) !void {
 pub fn getTitle(self: *const Terminal) ?[:0]const u8 {
     if (self.title.items.len == 0) return null;
     return self.title.items[0 .. self.title.items.len - 1 :0];
+}
+
+test "Terminal: setTitle preserves a sentinel on allocation failure" {
+    var failing = testing.FailingAllocator.init(testing.allocator, .{});
+    const alloc = failing.allocator();
+    var t = try init(alloc, .{ .cols = 5, .rows = 1 });
+    defer t.deinit(alloc);
+
+    try t.title.ensureTotalCapacityPrecise(alloc, 5);
+    failing.fail_index = failing.alloc_index;
+    try testing.expectError(error.OutOfMemory, t.setTitle("title"));
+    try testing.expect(t.getTitle() == null);
 }
 
 /// Switch to the given screen type (alternate or primary).
