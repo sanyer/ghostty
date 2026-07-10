@@ -365,8 +365,9 @@ pool: MemoryPool,
 /// The list of pages in the screen.
 pages: List,
 
-/// The next globally unique page generation for this PageList. A generation
-/// is assigned whenever a page is allocated or reused as new.
+/// The next globally unique reference generation for this PageList. A
+/// generation is assigned whenever a page is allocated, reused as new, or
+/// changed in place such that existing page coordinates are no longer stable.
 ///
 /// The serial number can be used to detect whether the page is identical
 /// to the page that was originally referenced by a pointer. Since we reuse
@@ -3099,6 +3100,14 @@ pub fn scrollClear(self: *PageList) Allocator.Error!void {
     for (0..non_empty) |_| _ = try self.grow();
 }
 
+/// Renew a live node's generation before changing its coordinate layout in
+/// place. This invalidates external pointer-plus-generation references without
+/// changing the whole-list invalidation floor.
+fn invalidateNodeLayout(self: *PageList, node: *List.Node) void {
+    node.serial = self.page_serial;
+    self.page_serial += 1;
+}
+
 /// Compact a page to use the minimum required memory for the contents
 /// it stores. Returns the new node pointer if compaction occurred, or null
 /// if the page was already compact or compaction would not provide any
@@ -4589,6 +4598,7 @@ fn eraseRows(
     bl_pt: ?point.Point,
 ) void {
     defer self.assertIntegrity();
+    self.page_compression.markActivity();
 
     // The count of rows that was erased.
     var erased: usize = 0;
@@ -4606,6 +4616,7 @@ fn eraseRows(
             // page so to handle this we reinit this page, set it to zero
             // size which will let us grow our active area back.
             if (chunk.node.next == null and chunk.node.prev == null) {
+                self.invalidateNodeLayout(chunk.node);
                 const page = chunk.node.page();
                 erased += page.size.rows;
                 page.reinit();
@@ -4617,6 +4628,10 @@ fn eraseRows(
             self.erasePage(chunk.node);
             continue;
         }
+
+        // Moving the retained suffix changes the meaning and valid range of
+        // every captured row coordinate in this node.
+        self.invalidateNodeLayout(chunk.node);
 
         // We are modifying our chunk so make sure it is in a good state.
         const page = chunk.node.page();
@@ -6977,6 +6992,65 @@ test "PageList incremental compression restarts after prune reuse" {
     try s.growColdPagesForTest(1);
     _ = s.compress(.incremental);
     try testing.expectEqual(@as(usize, 1), s.memoryStats().compressed_pages);
+}
+
+test "PageList bounded pruning after partial erase preserves live serials" {
+    const testing = std.testing;
+
+    var s = try init(
+        testing.allocator,
+        80,
+        24,
+        2 * PagePool.item_size,
+    );
+    defer s.deinit();
+
+    while (s.totalPages() < 2) _ = try s.grow();
+    const first = s.pages.first.?;
+    const old_serial = first.serial;
+    const old_rows = first.rows();
+
+    s.eraseHistory(.{ .history = .{ .y = 0 } });
+    try testing.expectEqual(first, s.pages.first.?);
+    try testing.expectEqual(old_rows - 1, first.rows());
+    try testing.expect(!s.nodeIsValid(first, old_serial));
+
+    try s.fillLastPageForTest();
+    _ = try s.grow();
+    try s.expectLivePageSerialsValidForTest();
+}
+
+test "PageList partial erase restarts compression before continuation" {
+    const testing = std.testing;
+
+    var s = try init(testing.allocator, 80, 24, null);
+    defer s.deinit();
+    try s.growColdPagesForTest(incremental_compression_max_inspected + 1);
+    _ = s.compress(.full);
+
+    const first = s.pages.first.?;
+    try testing.expect(first.isCompressed());
+
+    var marker = first;
+    for (1..incremental_compression_max_inspected) |_| marker = marker.next.?;
+    s.page_compression = .{
+        .flags = .{ .verifying = true },
+        .last_serial = marker.serial,
+        .next_serial = s.page_serial,
+    };
+
+    const activity = s.page_compression.activity_serial;
+    s.eraseHistory(.{ .history = .{ .y = 0 } });
+    try testing.expect(!first.isCompressed());
+    try testing.expect(activity != s.page_compression.activity_serial);
+
+    // The changed generation is before the saved marker, so continuation must
+    // restart and recompress it instead of reporting verification complete.
+    try testing.expectEqual(
+        IncrementalCompressionResult.pending,
+        s.compress(.incremental),
+    );
+    try testing.expect(first.isCompressed());
 }
 
 test "PageList repeated bounded pruning after split preserves live serials" {
