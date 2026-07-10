@@ -2729,6 +2729,7 @@ fn trimTrailingBlankRows(
     max: size.CellCountInt,
 ) size.CellCountInt {
     var trimmed: size.CellCountInt = 0;
+    var invalidated_node: ?*List.Node = null;
     const bl_pin = self.getBottomRight(.screen).?;
     var it = bl_pin.rowIterator(.left_up, null);
     while (it.next()) |row_pin| {
@@ -2750,6 +2751,10 @@ fn trimTrailingBlankRows(
         // No text, we can trim this row. Because it has
         // no text we can also be sure it has no styling
         // so we don't need to worry about memory.
+        if (row_pin.node.rows() > 1 and invalidated_node != row_pin.node) {
+            self.invalidateNodeLayout(row_pin.node);
+            invalidated_node = row_pin.node;
+        }
         row_pin.node.page().size.rows -= 1;
         if (row_pin.node.page().size.rows == 0) {
             self.erasePage(row_pin.node);
@@ -4293,9 +4298,12 @@ pub fn eraseRow(
     var page = node.page();
     var rows = page.rows.ptr(page.memory.ptr);
 
+    if (!self.pinIsActive(pn)) self.page_compression.markActivity();
+
     // In order to move the following rows up we rotate the rows array by 1.
     // The rotate operation turns e.g. [ 0 1 2 3 ] in to [ 1 2 3 0 ], which
     // works perfectly to move all of our elements where they belong.
+    self.invalidateNodeLayout(node);
     fastmem.rotateOnce(Row, rows[pn.y..node.rows()]);
 
     // We adjust the tracked pins in this page, moving up any that were below
@@ -4347,6 +4355,7 @@ pub fn eraseRow(
         page = next_page;
         rows = next_rows;
 
+        self.invalidateNodeLayout(node);
         fastmem.rotateOnce(Row, rows[0..node.rows()]);
 
         // Mark the whole page as dirty.
@@ -4395,10 +4404,13 @@ pub fn eraseRowBounded(
     var page = node.page();
     var rows = page.rows.ptr(page.memory.ptr);
 
+    if (!self.pinIsActive(pn)) self.page_compression.markActivity();
+
     // If the row limit is less than the remaining rows before the end of the
     // page, then we clear the row, rotate it to the end of the boundary limit
     // and update our pins.
     if (node.rows() - pn.y > limit) {
+        self.invalidateNodeLayout(node);
         page.clearCells(&rows[pn.y], 0, node.cols());
         fastmem.rotateOnce(Row, rows[pn.y..][0 .. limit + 1]);
 
@@ -4441,6 +4453,7 @@ pub fn eraseRowBounded(
         return;
     }
 
+    self.invalidateNodeLayout(node);
     fastmem.rotateOnce(Row, rows[pn.y..node.rows()]);
 
     // Mark the whole page as dirty.
@@ -4501,6 +4514,7 @@ pub fn eraseRowBounded(
         // The logic here is very similar to the one before the loop.
         const shifted_limit = limit - shifted;
         if (node.rows() > shifted_limit) {
+            self.invalidateNodeLayout(node);
             page.clearCells(&rows[0], 0, node.cols());
             fastmem.rotateOnce(Row, rows[0 .. shifted_limit + 1]);
 
@@ -4536,6 +4550,7 @@ pub fn eraseRowBounded(
             return;
         }
 
+        self.invalidateNodeLayout(node);
         fastmem.rotateOnce(Row, rows[0..node.rows()]);
 
         // Mark the whole page as dirty.
@@ -9669,6 +9684,53 @@ test "PageList eraseRowBounded invalidates viewport offset cache" {
         .offset = pin_y - 1,
         .len = s.rows,
     }, s.scrollbar());
+}
+
+test "PageList row erasure renews affected page generations" {
+    const testing = std.testing;
+
+    var s = try init(testing.allocator, 80, 24, null);
+    defer s.deinit();
+    while (s.totalPages() < 2) _ = try s.grow();
+
+    const first = s.pages.first.?;
+    const second = first.next.?;
+    var first_serial = first.serial;
+    var second_serial = second.serial;
+    var activity = s.page_compression.activity_serial;
+
+    try s.eraseRow(.{ .history = .{ .y = 0 } });
+    try testing.expect(!s.nodeIsValid(first, first_serial));
+    try testing.expect(!s.nodeIsValid(second, second_serial));
+    try testing.expect(activity != s.page_compression.activity_serial);
+
+    first_serial = first.serial;
+    second_serial = second.serial;
+    activity = s.page_compression.activity_serial;
+    try s.eraseRowBounded(
+        .{ .history = .{ .y = 0 } },
+        first.rows() + 1,
+    );
+    try testing.expect(!s.nodeIsValid(first, first_serial));
+    try testing.expect(!s.nodeIsValid(second, second_serial));
+    try testing.expect(activity != s.page_compression.activity_serial);
+}
+
+test "PageList trailing row truncation renews page generation" {
+    const testing = std.testing;
+
+    var s = try init(testing.allocator, 80, 24, null);
+    defer s.deinit();
+
+    const node = s.pages.last.?;
+    const old_serial = node.serial;
+    const trimmed = s.trimTrailingBlankRows(1);
+    s.total_rows -= trimmed;
+    try testing.expectEqual(@as(size.CellCountInt, 1), trimmed);
+    try testing.expect(!s.nodeIsValid(node, old_serial));
+
+    _ = try s.grow();
+    try s.expectLivePageSerialsValidForTest();
 }
 
 test "PageList eraseRowBounded multi-page invalidates viewport offset cache" {
