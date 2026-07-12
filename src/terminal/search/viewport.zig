@@ -197,9 +197,8 @@ pub const ViewportSearch = struct {
         pub fn update(self: *Fingerprint, alloc: Allocator, pages: *PageList) Allocator.Error!bool {
             try self.entries.ensureTotalCapacity(alloc, pages.rows);
 
-            const old = self.entries.items;
+            const old_len = self.entries.items.len;
             var changed = false;
-            self.entries.clearRetainingCapacity();
 
             var i: usize = 0;
             var it = pages.pageIterator(.right_down, .{ .viewport = .{} }, null);
@@ -209,15 +208,20 @@ pub const ViewportSearch = struct {
                     .serial = chunk.node.serial,
                 };
                 if (!changed) {
-                    changed = i >= old.len or
-                        old[i].node != entry.node or
-                        old[i].serial != entry.serial;
+                    changed = i >= old_len or
+                        self.entries.items[i].node != entry.node or
+                        self.entries.items[i].serial != entry.serial;
                 }
 
-                self.entries.appendAssumeCapacity(entry);
+                if (i < self.entries.items.len) {
+                    self.entries.items[i] = entry;
+                } else {
+                    self.entries.appendAssumeCapacity(entry);
+                }
             }
 
-            return changed or i != old.len;
+            self.entries.shrinkRetainingCapacity(i);
+            return changed or i != old_len;
         }
     };
 };
