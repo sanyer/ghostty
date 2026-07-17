@@ -651,34 +651,17 @@ pub fn resize(
     cell_height_px: u32,
 ) callconv(lib.calling_conv) Result {
     const wrapper = terminal_ orelse return .invalid_value;
-    const t = wrapper.terminal;
-    if (cols == 0 or rows == 0) return .invalid_value;
-    t.resize(t.gpa(), cols, rows) catch return .out_of_memory;
-
-    // Update pixel sizes
-    t.width_px = std.math.mul(u32, cols, cell_width_px) catch std.math.maxInt(u32);
-    t.height_px = std.math.mul(u32, rows, cell_height_px) catch std.math.maxInt(u32);
-
-    // Disable synchronized output mode so that we show changes
-    // immediately for a resize. This is allowed by the spec.
-    t.modes.set(.synchronized_output, false);
-
-    // If we have in-band size reporting enabled, send a report.
-    if (t.modes.get(.in_band_size_reports)) in_band: {
-        const func = wrapper.effects.write_pty orelse break :in_band;
-
-        var buf: [1024]u8 = undefined;
-        var writer: std.Io.Writer = .fixed(&buf);
-        size_report.encode(&writer, .mode_2048, .{
-            .rows = rows,
-            .columns = cols,
-            .cell_width = cell_width_px,
-            .cell_height = cell_height_px,
-        }) catch break :in_band;
-
-        const data = writer.buffered();
-        func(@ptrCast(wrapper), wrapper.effects.userdata, data.ptr, data.len);
-    }
+    wrapper.stream.handler.resize(.{
+        .cols = cols,
+        .rows = rows,
+        .cell_size_px = .{
+            .width = cell_width_px,
+            .height = cell_height_px,
+        },
+    }) catch |err| return switch (err) {
+        error.InvalidValue => .invalid_value,
+        error.OutOfMemory => .out_of_memory,
+    };
 
     return .success;
 }
@@ -3368,11 +3351,12 @@ test "resize updates pixel dimensions" {
     ));
     defer free(t);
 
-    try testing.expectEqual(Result.success, resize(t, 100, 40, 9, 18));
+    // Pixel geometry must still be applied when the cell dimensions match.
+    try testing.expectEqual(Result.success, resize(t, 80, 24, 9, 18));
 
     const zt = t.?.terminal;
-    try testing.expectEqual(@as(u32, 100 * 9), zt.width_px);
-    try testing.expectEqual(@as(u32, 40 * 18), zt.height_px);
+    try testing.expectEqual(@as(u32, 80 * 9), zt.width_px);
+    try testing.expectEqual(@as(u32, 24 * 18), zt.height_px);
 }
 
 test "resize pixel overflow saturates" {
@@ -3411,7 +3395,8 @@ test "resize disables synchronized output" {
     const zt = t.?.terminal;
     zt.modes.set(.synchronized_output, true);
 
-    try testing.expectEqual(Result.success, resize(t, 100, 40, 9, 18));
+    // The terminal-level reset must run even if grid work is unnecessary.
+    try testing.expectEqual(Result.success, resize(t, 80, 24, 9, 18));
     try testing.expect(!zt.modes.get(.synchronized_output));
 }
 

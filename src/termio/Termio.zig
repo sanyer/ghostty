@@ -479,17 +479,15 @@ pub fn resize(
         // Update the size of our terminal state
         try self.terminal.resize(
             self.alloc,
-            grid_size.columns,
-            grid_size.rows,
+            .{
+                .cols = grid_size.columns,
+                .rows = grid_size.rows,
+                .cell_size_px = .{
+                    .width = self.size.cell.width,
+                    .height = self.size.cell.height,
+                },
+            },
         );
-
-        // Update our pixel sizes
-        self.terminal.width_px = grid_size.columns * self.size.cell.width;
-        self.terminal.height_px = grid_size.rows * self.size.cell.height;
-
-        // Disable synchronized output mode so that we show changes
-        // immediately for a resize. This is allowed by the spec.
-        self.terminal.modes.set(.synchronized_output, false);
 
         // If we have size reporting enabled we need to send a report.
         if (self.terminal.modes.get(.in_band_size_reports)) {

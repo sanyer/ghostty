@@ -747,8 +747,10 @@ pub const StreamHandler = struct {
                 const grid_size = self.size.grid();
                 self.terminal.resize(
                     self.alloc,
-                    grid_size.columns,
-                    grid_size.rows,
+                    .{
+                        .cols = grid_size.columns,
+                        .rows = grid_size.rows,
+                    },
                 ) catch |err| {
                     log.err("error updating terminal size: {}", .{err});
                 };
