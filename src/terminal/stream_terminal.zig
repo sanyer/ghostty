@@ -1015,7 +1015,7 @@ test "resize suppresses mode 2048 reports" {
     try testing.expectEqual(@as(usize, 0), S.calls);
 }
 
-test "resize failure resets synchronized output but does not write" {
+test "resize failure preserves terminal state and does not write" {
     var failing = testing.FailingAllocator.init(testing.allocator, .{});
     const alloc = failing.allocator();
     var t: Terminal = try .init(alloc, .{ .cols = 10, .rows = 1 });
@@ -1044,9 +1044,11 @@ test "resize failure resets synchronized output but does not write" {
         .cell_size_px = .{ .width = 9, .height = 18 },
     }));
 
-    try testing.expect(!t.modes.get(.synchronized_output));
+    try testing.expect(t.modes.get(.synchronized_output));
     try testing.expect(!S.called);
     try testing.expectEqual(@as(@TypeOf(t.cols), 10), t.cols);
+    try testing.expectEqual(@as(u32, 0), t.width_px);
+    try testing.expectEqual(@as(u32, 0), t.height_px);
 }
 
 test "resize effects do not change canonical terminal state" {

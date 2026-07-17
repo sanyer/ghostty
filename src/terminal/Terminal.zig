@@ -7,6 +7,7 @@ const std = @import("std");
 const build_options = @import("terminal_options");
 const lib = @import("lib.zig");
 const assert = @import("../quirks.zig").inlineAssert;
+const tripwire = @import("../tripwire.zig");
 const testing = std.testing;
 const Allocator = std.mem.Allocator;
 const unicode = @import("../unicode/main.zig");
@@ -3556,31 +3557,67 @@ pub const ResizeError = error{
     InvalidValue,
 };
 
+const resize_tw = tripwire.module(enum {
+    tabstops,
+    primary_screen,
+    alternate_screen,
+    alternate_screen_init,
+}, resize);
+
 /// Resize the underlying terminal.
 ///
 /// This has follow-on impacts:
 ///
 ///   - If the column count changes, tabstops are reset.
 ///   - The scroll region is always reset
-///   - Synchronized output mode is reset before grid resize work.
+///   - Synchronized output mode is reset for every successful resize.
 ///
-/// If this returns an error, the terminal is in a bad state currently.
-/// We will make this safe soon.
+/// This handles errors gracefully and recovers the terminal back to
+/// a clean usable state.
+///
+/// The only error handling edge case is in the highly exceptional scenario
+/// where the primary screen can be resized but the alternate screen cannot.
+/// In this scenario, we attempt to clear the alt screen at the desired
+/// new size. If that fails, we unconditionally deallocate the alt screen
+/// and move to primary screen. This can break terminal programs but it
+/// requires a really particular scenario where memory exists for one
+/// but not the other and we do our best.
 pub fn resize(
     self: *Terminal,
     alloc: Allocator,
     opts: Resize,
 ) ResizeError!void {
+    const tw = resize_tw;
+
     // Screen and scrolling-region invariants require non-zero dimensions.
     // Validate before changing any terminal state.
     if (opts.cols == 0 or opts.rows == 0) return error.InvalidValue;
 
-    // If we have cell geometry, set that now.
+    // Pixel geometry and synchronized output are updated on every valid
+    // resize attempt, including one that doesn't change the grid dimensions.
+    // Save their old values so later allocation failures can roll them back.
+    const old_width_px = self.width_px;
+    const old_height_px = self.height_px;
+    const old_synchronized_output = self.modes.get(.synchronized_output);
+    errdefer {
+        self.width_px = old_width_px;
+        self.height_px = old_height_px;
+        self.modes.set(.synchronized_output, old_synchronized_output);
+    }
+
+    // If our pixel geometry was set, then we set it even if our rows/cols
+    // didn't change.
     if (opts.cell_size_px) |cell_size| {
-        self.width_px = std.math.mul(u32, opts.cols, cell_size.width) catch
-            std.math.maxInt(u32);
-        self.height_px = std.math.mul(u32, opts.rows, cell_size.height) catch
-            std.math.maxInt(u32);
+        self.width_px = std.math.mul(
+            u32,
+            opts.cols,
+            cell_size.width,
+        ) catch std.math.maxInt(u32);
+        self.height_px = std.math.mul(
+            u32,
+            opts.rows,
+            cell_size.height,
+        ) catch std.math.maxInt(u32);
     }
 
     self.modes.set(.synchronized_output, false);
@@ -3588,18 +3625,23 @@ pub fn resize(
     // If our cols/rows didn't change, skip grid work but still apply pixels.
     if (self.cols == opts.cols and self.rows == opts.rows) return;
 
-    // Resize our tabstops
+    // Build replacement tabstops without touching the current table. Keep
+    // ownership here until every fallible resize operation has succeeded.
+    var new_tabstops: ?Tabstops = null;
+    errdefer if (new_tabstops) |*v| v.deinit(alloc);
     if (self.cols != opts.cols) {
-        const tabstops: Tabstops = try .init(
+        try tw.check(.tabstops);
+        new_tabstops = try .init(
             alloc,
             opts.cols,
             TABSTOP_INTERVAL,
         );
-        self.tabstops.deinit(alloc);
-        self.tabstops = tabstops;
     }
 
-    // Resize primary screen, which supports reflow
+    // Resize primary screen, which supports reflow. We do this first
+    // because the cleanup situation is a lot better if this succeeds
+    // and alt fails than the reverse.
+    try tw.check(.primary_screen);
     const primary = self.screens.get(.primary).?;
     try primary.resize(.{
         .cols = opts.cols,
@@ -3608,12 +3650,78 @@ pub fn resize(
         .prompt_redraw = self.flags.shell_redraws_prompt,
     });
 
-    // Alternate screen, if it exists, doesn't reflow
-    if (self.screens.get(.alternate)) |alt| try alt.resize(.{
-        .cols = opts.cols,
-        .rows = opts.rows,
-        .reflow = false,
-    });
+    // Alternate screen, if it exists, doesn't reflow. The primary resize
+    // above can't be losslessly undone, so if the alternate resize fails we
+    // replace it with an empty screen at the requested size. If that
+    // also fails, we fall back to the primary screen.
+    if (self.screens.get(.alternate)) |alt| alt: {
+        const err: ResizeError = resize: {
+            tw.check(.alternate_screen) catch |err| break :resize err;
+            alt.resize(.{
+                .cols = opts.cols,
+                .rows = opts.rows,
+                .reflow = false,
+            }) catch |err| break :resize err;
+
+            // Resize succeeded.
+            break :alt;
+        };
+
+        log.warn("alternate screen resize failed, replacing it err={}", .{err});
+
+        // If the alternate screen isn't active, then we just free it
+        // and move on. It'll be reallocated when it gets reinitialized lazily.
+        // In this case, we just lose the prior data if the terminal program
+        // expected it to be saved.
+        if (self.screens.active_key != .alternate) {
+            self.screens.remove(alloc, .alternate);
+            break :alt;
+        }
+
+        // The alt screen is active, so we temporarily switch to primary
+        // so we can safely remove the alt and recreate it blank. This loses
+        // the data but hopefully keeps us on the alt screen.
+        const charset = alt.charset;
+        self.screens.switchTo(.primary);
+        self.screens.remove(alloc, .alternate);
+
+        // Replace the alt screen with an empty version. If this fails
+        // we just go back to the primary screen. Not great, but best
+        // we can do.
+        tw.check(.alternate_screen_init) catch break :alt;
+        const replacement = self.screens.getInit(alloc, .alternate, .{
+            .cols = opts.cols,
+            .rows = opts.rows,
+            .max_scrollback = 0,
+            .kitty_image_storage_limit = if (comptime build_options.kitty_graphics)
+                primary.kitty_images.total_limit
+            else
+                0,
+            .kitty_image_loading_limits = if (comptime build_options.kitty_graphics)
+                primary.kitty_images.image_limits
+            else {},
+        }) catch |init_err| {
+            log.warn(
+                "alternate screen replacement failed, falling back to primary err={}",
+                .{init_err},
+            );
+            break :alt;
+        };
+
+        replacement.charset = charset;
+        self.screens.switchTo(.alternate);
+    }
+
+    // No more failures are allowed after this point because the screens have
+    // committed their new sizes and the remaining Terminal state must follow.
+    errdefer comptime unreachable;
+
+    // All fallible work is complete. Replace the old tabstop table only now.
+    if (new_tabstops) |v| {
+        self.tabstops.deinit(alloc);
+        self.tabstops = v;
+        new_tabstops = null;
+    }
 
     // Whenever we resize we just mark it as a screen clear
     self.flags.dirty.clear = true;
@@ -3728,6 +3836,190 @@ test "Terminal: resize preserves tabstops on allocation failure" {
 
     try testing.expectEqual(@as(size.CellCountInt, 10), t.cols);
     try testing.expect(t.tabstops.get(8));
+}
+
+test "Terminal: resize failure paths preserve consistent state" {
+    const alloc = testing.allocator;
+
+    for ([_]resize_tw.FailPoint{
+        .tabstops,
+        .primary_screen,
+        .alternate_screen,
+    }) |tag| {
+        const tw = resize_tw;
+        defer tw.end(.reset) catch unreachable;
+
+        var t = try init(alloc, .{ .cols = 10, .rows = 3 });
+        defer t.deinit(alloc);
+
+        try t.printString("primary");
+        _ = try t.switchScreen(.alternate);
+        try t.printString("alternate");
+        _ = try t.switchScreen(.primary);
+
+        t.width_px = 100;
+        t.height_px = 50;
+        t.modes.set(.synchronized_output, true);
+        t.flags.dirty.clear = false;
+        t.scrolling_region = .{
+            .top = 1,
+            .bottom = 2,
+            .left = 1,
+            .right = 8,
+        };
+        t.tabstops.unset(8);
+        t.tabstops.set(3);
+
+        const primary = t.screens.get(.primary).?;
+        const alternate = t.screens.get(.alternate).?;
+        const alternate_generation = t.screens.generation(.alternate);
+        try testing.expectEqual(primary.pages.pages.first, primary.pages.pages.last);
+        try testing.expectEqual(alternate.pages.pages.first, alternate.pages.pages.last);
+
+        const before = t;
+        const before_primary = primary.*;
+        const before_alternate = alternate.*;
+        const before_primary_page = try alloc.dupe(
+            u8,
+            primary.pages.pages.first.?.page().memory,
+        );
+        defer alloc.free(before_primary_page);
+        const before_alternate_page = try alloc.dupe(
+            u8,
+            alternate.pages.pages.first.?.page().memory,
+        );
+        defer alloc.free(before_alternate_page);
+        tw.errorAlways(tag, error.OutOfMemory);
+
+        // A failure after the primary screen has resized is recovered by
+        // dropping the inactive alternate and completing the resize. This
+        // also proves the alternate tripwire is after the primary resize
+        // rather than acting as a preflight check.
+        if (tag == .alternate_screen) {
+            try t.resize(alloc, .{
+                .cols = 513,
+                .rows = 4,
+                .cell_size_px = .{ .width = 9, .height = 18 },
+            });
+
+            try testing.expectEqual(@as(size.CellCountInt, 513), t.cols);
+            try testing.expectEqual(@as(size.CellCountInt, 4), t.rows);
+            try testing.expectEqual(@as(u32, 4617), t.width_px);
+            try testing.expectEqual(@as(u32, 72), t.height_px);
+            try testing.expect(!t.modes.get(.synchronized_output));
+            try testing.expect(t.flags.dirty.clear);
+            try testing.expectEqual(@as(size.CellCountInt, 513), primary.pages.cols);
+            try testing.expectEqual(@as(size.CellCountInt, 4), primary.pages.rows);
+            try testing.expectEqual(@as(?*Screen, null), t.screens.get(.alternate));
+            try testing.expectEqual(
+                alternate_generation +% 1,
+                t.screens.generation(.alternate),
+            );
+            try testing.expectEqual(.primary, t.screens.active_key);
+            try testing.expectEqual(primary, t.screens.active);
+            try testing.expect(t.tabstops.get(8));
+            try testing.expect(!t.tabstops.get(3));
+
+            // The alternate is recreated lazily at the terminal's new size.
+            _ = try t.switchScreen(.alternate);
+            const replacement = t.screens.get(.alternate).?;
+            try testing.expectEqual(@as(size.CellCountInt, 513), replacement.pages.cols);
+            try testing.expectEqual(@as(size.CellCountInt, 4), replacement.pages.rows);
+            try testing.expect(replacement.pages.getCell(.{ .active = .{} }).?.cell.isEmpty());
+            continue;
+        }
+
+        try testing.expectError(error.OutOfMemory, t.resize(alloc, .{
+            .cols = 513,
+            .rows = 4,
+            .cell_size_px = .{ .width = 9, .height = 18 },
+        }));
+
+        try testing.expectEqual(before.width_px, t.width_px);
+        try testing.expectEqual(before.height_px, t.height_px);
+        try testing.expect(std.meta.eql(before.modes, t.modes));
+        try testing.expectEqual(before.cols, t.cols);
+        try testing.expectEqual(before.rows, t.rows);
+        try testing.expectEqual(before.scrolling_region, t.scrolling_region);
+        try testing.expectEqual(before.flags, t.flags);
+        try testing.expect(std.meta.eql(before.tabstops, t.tabstops));
+        try testing.expectEqual(before.screens.active_key, t.screens.active_key);
+        try testing.expectEqual(before.screens.active, t.screens.active);
+
+        try testing.expectEqual(before_primary.pages.cols, primary.pages.cols);
+        try testing.expectEqual(before_primary.pages.rows, primary.pages.rows);
+        try testing.expectEqual(
+            before_primary.pages.total_rows,
+            primary.pages.total_rows,
+        );
+        try testing.expect(std.meta.eql(before_primary.cursor, primary.cursor));
+        try testing.expectEqualSlices(
+            u8,
+            before_primary_page,
+            primary.pages.pages.first.?.page().memory,
+        );
+
+        try testing.expectEqual(before_alternate.pages.cols, alternate.pages.cols);
+        try testing.expectEqual(before_alternate.pages.rows, alternate.pages.rows);
+        try testing.expectEqual(
+            before_alternate.pages.total_rows,
+            alternate.pages.total_rows,
+        );
+        try testing.expect(std.meta.eql(before_alternate.cursor, alternate.cursor));
+        try testing.expectEqualSlices(
+            u8,
+            before_alternate_page,
+            alternate.pages.pages.first.?.page().memory,
+        );
+    }
+}
+
+test "Terminal: alternate resize failure replaces active alternate screen" {
+    const alloc = testing.allocator;
+    const tw = resize_tw;
+    defer tw.end(.reset) catch unreachable;
+
+    var t = try init(alloc, .{ .cols = 10, .rows = 3 });
+    defer t.deinit(alloc);
+
+    _ = try t.switchScreen(.alternate);
+    try testing.expectEqual(.alternate, t.screens.active_key);
+    t.screens.active.charset.gl = .G1;
+    try t.printString("alternate");
+    const generation = t.screens.generation(.alternate);
+
+    tw.errorAlways(.alternate_screen, error.OutOfMemory);
+    try t.resize(alloc, .{ .cols = 20, .rows = 4 });
+
+    const alternate = t.screens.get(.alternate).?;
+    try testing.expectEqual(.alternate, t.screens.active_key);
+    try testing.expectEqual(alternate, t.screens.active);
+    try testing.expectEqual(@as(size.CellCountInt, 20), alternate.pages.cols);
+    try testing.expectEqual(@as(size.CellCountInt, 4), alternate.pages.rows);
+    try testing.expect(alternate.pages.getCell(.{ .active = .{} }).?.cell.isEmpty());
+    try testing.expectEqual(.G1, alternate.charset.gl);
+    try testing.expectEqual(generation +% 1, t.screens.generation(.alternate));
+}
+
+test "Terminal: alternate resize replacement failure falls back to primary" {
+    const alloc = testing.allocator;
+    const tw = resize_tw;
+    defer tw.end(.reset) catch unreachable;
+
+    var t = try init(alloc, .{ .cols = 10, .rows = 3 });
+    defer t.deinit(alloc);
+
+    _ = try t.switchScreen(.alternate);
+    tw.errorAlways(.alternate_screen, error.OutOfMemory);
+    tw.errorAlways(.alternate_screen_init, error.OutOfMemory);
+    try t.resize(alloc, .{ .cols = 20, .rows = 4 });
+
+    const primary = t.screens.get(.primary).?;
+    try testing.expectEqual(@as(?*Screen, null), t.screens.get(.alternate));
+    try testing.expectEqual(.primary, t.screens.active_key);
+    try testing.expectEqual(primary, t.screens.active);
+    try testing.expectEqual(@as(size.CellCountInt, 20), primary.pages.cols);
+    try testing.expectEqual(@as(size.CellCountInt, 4), primary.pages.rows);
 }
 
 /// Set the pwd for the terminal.
