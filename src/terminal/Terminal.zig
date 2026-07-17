@@ -3519,35 +3519,80 @@ pub fn deccolm(self: *Terminal, alloc: Allocator, mode: DeccolmMode) !void {
     self.modes.set(.@"132_column", mode == .@"132_cols");
 
     // Resize to the requested size
-    try self.resize(
-        alloc,
-        switch (mode) {
+    try self.resize(alloc, .{
+        .cols = switch (mode) {
             .@"132_cols" => 132,
             .@"80_cols" => 80,
         },
-        self.rows,
-    );
+        .rows = self.rows,
+    });
 
     // Erase our display and move our cursor.
     self.eraseDisplay(.complete, false);
     self.setCursorPos(1, 1);
 }
 
+/// A terminal resize expressed in cells with optional per-cell pixel
+/// geometry. It is highly recommended that callers supply cell geometry
+/// but a terminal can technically function without it (but some reports
+/// like certain mouse reporting modes and Kitty image protocol will
+/// not be functional).
+///
+/// Cell pixel dimensions must already be scaled for the current display DPI.
+pub const Resize = struct {
+    cols: size.CellCountInt,
+    rows: size.CellCountInt,
+    cell_size_px: ?struct {
+        width: u32,
+        height: u32,
+    } = null,
+};
+
+pub const ResizeError = error{
+    /// Resize requires allocation
+    OutOfMemory,
+
+    /// Input value was invalid, such as a 0-sized dimension.
+    InvalidValue,
+};
+
 /// Resize the underlying terminal.
+///
+/// This has follow-on impacts:
+///
+///   - If the column count changes, tabstops are reset.
+///   - The scroll region is always reset
+///   - Synchronized output mode is reset before grid resize work.
+///
+/// If this returns an error, the terminal is in a bad state currently.
+/// We will make this safe soon.
 pub fn resize(
     self: *Terminal,
     alloc: Allocator,
-    cols: size.CellCountInt,
-    rows: size.CellCountInt,
-) !void {
-    // If our cols/rows didn't change then we're done
-    if (self.cols == cols and self.rows == rows) return;
+    opts: Resize,
+) ResizeError!void {
+    // Screen and scrolling-region invariants require non-zero dimensions.
+    // Validate before changing any terminal state.
+    if (opts.cols == 0 or opts.rows == 0) return error.InvalidValue;
+
+    // If we have cell geometry, set that now.
+    if (opts.cell_size_px) |cell_size| {
+        self.width_px = std.math.mul(u32, opts.cols, cell_size.width) catch
+            std.math.maxInt(u32);
+        self.height_px = std.math.mul(u32, opts.rows, cell_size.height) catch
+            std.math.maxInt(u32);
+    }
+
+    self.modes.set(.synchronized_output, false);
+
+    // If our cols/rows didn't change, skip grid work but still apply pixels.
+    if (self.cols == opts.cols and self.rows == opts.rows) return;
 
     // Resize our tabstops
-    if (self.cols != cols) {
+    if (self.cols != opts.cols) {
         const tabstops: Tabstops = try .init(
             alloc,
-            cols,
+            opts.cols,
             TABSTOP_INTERVAL,
         );
         self.tabstops.deinit(alloc);
@@ -3557,16 +3602,16 @@ pub fn resize(
     // Resize primary screen, which supports reflow
     const primary = self.screens.get(.primary).?;
     try primary.resize(.{
-        .cols = cols,
-        .rows = rows,
+        .cols = opts.cols,
+        .rows = opts.rows,
         .reflow = self.modes.get(.wraparound),
         .prompt_redraw = self.flags.shell_redraws_prompt,
     });
 
     // Alternate screen, if it exists, doesn't reflow
     if (self.screens.get(.alternate)) |alt| try alt.resize(.{
-        .cols = cols,
-        .rows = rows,
+        .cols = opts.cols,
+        .rows = opts.rows,
         .reflow = false,
     });
 
@@ -3574,16 +3619,99 @@ pub fn resize(
     self.flags.dirty.clear = true;
 
     // Set our size
-    self.cols = cols;
-    self.rows = rows;
+    self.cols = opts.cols;
+    self.rows = opts.rows;
 
     // Reset the scrolling region
     self.scrolling_region = .{
         .top = 0,
-        .bottom = rows - 1,
+        .bottom = opts.rows - 1,
         .left = 0,
-        .right = cols - 1,
+        .right = opts.cols - 1,
     };
+}
+
+test "Terminal: resize resets synchronized output" {
+    const alloc = testing.allocator;
+    var t = try init(alloc, .{ .cols = 10, .rows = 5 });
+    defer t.deinit(alloc);
+
+    t.modes.set(.synchronized_output, true);
+    try t.resize(alloc, .{ .cols = 10, .rows = 5 });
+    try testing.expect(!t.modes.get(.synchronized_output));
+}
+
+test "Terminal: resize rejects zero dimensions before mutation" {
+    const alloc = testing.allocator;
+    var t = try init(alloc, .{ .cols = 10, .rows = 5 });
+    defer t.deinit(alloc);
+
+    t.width_px = 100;
+    t.height_px = 100;
+    t.flags.dirty.clear = false;
+
+    try testing.expectError(error.InvalidValue, t.resize(alloc, .{
+        .cols = 0,
+        .rows = 5,
+        .cell_size_px = .{ .width = 9, .height = 18 },
+    }));
+    try testing.expectError(error.InvalidValue, t.resize(alloc, .{
+        .cols = 10,
+        .rows = 0,
+        .cell_size_px = .{ .width = 9, .height = 18 },
+    }));
+
+    try testing.expectEqual(@as(size.CellCountInt, 10), t.cols);
+    try testing.expectEqual(@as(size.CellCountInt, 5), t.rows);
+    try testing.expectEqual(@as(u32, 100), t.width_px);
+    try testing.expectEqual(@as(u32, 100), t.height_px);
+    try testing.expect(!t.flags.dirty.clear);
+}
+
+test "Terminal: resize preserves pixel dimensions when omitted" {
+    const alloc = testing.allocator;
+    var t = try init(alloc, .{ .cols = 10, .rows = 5 });
+    defer t.deinit(alloc);
+
+    t.width_px = 90;
+    t.height_px = 90;
+    try t.resize(alloc, .{ .cols = 20, .rows = 10 });
+
+    try testing.expectEqual(@as(u32, 90), t.width_px);
+    try testing.expectEqual(@as(u32, 90), t.height_px);
+}
+
+test "Terminal: resize updates pixels without changing cell dimensions" {
+    const alloc = testing.allocator;
+    var t = try init(alloc, .{ .cols = 10, .rows = 5 });
+    defer t.deinit(alloc);
+
+    try t.resize(alloc, .{
+        .cols = 10,
+        .rows = 5,
+        .cell_size_px = .{ .width = 9, .height = 18 },
+    });
+
+    try testing.expectEqual(@as(u32, 90), t.width_px);
+    try testing.expectEqual(@as(u32, 90), t.height_px);
+}
+
+test "Terminal: resize pixel dimensions saturate" {
+    const alloc = testing.allocator;
+    var t = try init(alloc, .{ .cols = 2, .rows = 3 });
+    defer t.deinit(alloc);
+
+    try t.resize(alloc, .{
+        .cols = 2,
+        .rows = 3,
+        .cell_size_px = .{
+            .width = std.math.maxInt(u32),
+            .height = std.math.maxInt(u32),
+        },
+    });
+
+    try testing.expectEqual(std.math.maxInt(u32), t.width_px);
+    try testing.expectEqual(std.math.maxInt(u32), t.height_px);
 }
 
 test "Terminal: resize preserves tabstops on allocation failure" {
@@ -3593,7 +3721,10 @@ test "Terminal: resize preserves tabstops on allocation failure" {
     defer t.deinit(alloc);
 
     failing.fail_index = failing.alloc_index;
-    try testing.expectError(error.OutOfMemory, t.resize(alloc, 513, 1));
+    try testing.expectError(error.OutOfMemory, t.resize(alloc, .{
+        .cols = 513,
+        .rows = 1,
+    }));
 
     try testing.expectEqual(@as(size.CellCountInt, 10), t.cols);
     try testing.expect(t.tabstops.get(8));
@@ -11819,7 +11950,7 @@ test "Terminal: saveCursor resize" {
 
     t.setCursorPos(1, 10);
     t.saveCursor();
-    try t.resize(alloc, 5, 5);
+    try t.resize(alloc, .{ .cols = 5, .rows = 5 });
     t.restoreCursor();
     try t.print('X');
 
@@ -13837,7 +13968,7 @@ test "Terminal: resize less cols with wide char then print" {
 
     try t.print('x');
     try t.print('😀'); // 0x1F600
-    try t.resize(alloc, 2, 3);
+    try t.resize(alloc, .{ .cols = 2, .rows = 3 });
     t.setCursorPos(1, 2);
     try t.print('😀'); // 0x1F600
 }
@@ -13854,11 +13985,11 @@ test "Terminal: resize with left and right margin set" {
     t.modes.set(.enable_left_and_right_margin, true);
     try t.print('0');
     t.modes.set(.enable_mode_3, true);
-    try t.resize(alloc, cols, rows);
+    try t.resize(alloc, .{ .cols = cols, .rows = rows });
     t.setLeftAndRightMargin(2, 0);
     try t.printRepeat(1850);
     _ = t.modes.restore(.enable_mode_3);
-    try t.resize(alloc, cols, rows);
+    try t.resize(alloc, .{ .cols = cols, .rows = rows });
 }
 
 // https://github.com/mitchellh/ghostty/issues/1343
@@ -13875,7 +14006,7 @@ test "Terminal: resize with wraparound off" {
     try t.print('2');
     try t.print('3');
     const new_cols = 2;
-    try t.resize(alloc, new_cols, rows);
+    try t.resize(alloc, .{ .cols = new_cols, .rows = rows });
 
     const str = try t.plainString(testing.allocator);
     defer testing.allocator.free(str);
@@ -13895,7 +14026,7 @@ test "Terminal: resize with wraparound on" {
     try t.print('2');
     try t.print('3');
     const new_cols = 2;
-    try t.resize(alloc, new_cols, rows);
+    try t.resize(alloc, .{ .cols = new_cols, .rows = rows });
 
     const str = try t.plainString(testing.allocator);
     defer testing.allocator.free(str);
@@ -13919,7 +14050,7 @@ test "Terminal: resize with high unique style per cell" {
         }
     }
 
-    try t.resize(alloc, 60, 30);
+    try t.resize(alloc, .{ .cols = 60, .rows = 30 });
 }
 
 test "Terminal: resize with high unique style per cell with wrapping" {
@@ -13940,7 +14071,7 @@ test "Terminal: resize with high unique style per cell with wrapping" {
         try t.print('x');
     }
 
-    try t.resize(alloc, 60, 30);
+    try t.resize(alloc, .{ .cols = 60, .rows = 30 });
 }
 
 test "Terminal: resize with reflow and saved cursor" {
@@ -13965,7 +14096,7 @@ test "Terminal: resize with reflow and saved cursor" {
     }
 
     t.saveCursor();
-    try t.resize(alloc, 5, 3);
+    try t.resize(alloc, .{ .cols = 5, .rows = 3 });
     t.restoreCursor();
 
     {
@@ -14006,7 +14137,7 @@ test "Terminal: resize with reflow and saved cursor pending wrap" {
     }
 
     t.saveCursor();
-    try t.resize(alloc, 5, 3);
+    try t.resize(alloc, .{ .cols = 5, .rows = 3 });
     t.restoreCursor();
 
     {

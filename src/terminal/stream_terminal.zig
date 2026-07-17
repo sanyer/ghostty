@@ -138,6 +138,38 @@ pub const Handler = struct {
         self.apc_handler.deinit();
     }
 
+    /// Resize the terminal and apply any side effects (if supported)
+    /// as a result of that.
+    ///
+    /// This is different than a direct `Terminal.resize` operation
+    /// because it also handles the side effects like mode 2048 in-band
+    /// size reports if write_pty is set.
+    pub fn resize(self: *Handler, value: Terminal.Resize) !void {
+        try self.terminal.resize(self.terminal.gpa(), value);
+
+        // Mode 2048 reports require complete, current cell pixel geometry.
+        const cell_size = value.cell_size_px orelse return;
+
+        // If we have no in-band size reports enabled then do nothing.
+        if (!self.terminal.modes.get(.in_band_size_reports)) return;
+
+        // If we have no write_pty effect, do nothing.
+        const write_pty = self.effects.write_pty orelse return;
+
+        // The maximum mode-2048 response is covered by size_report's maximum
+        // value test. Reserve the final byte for the callback's sentinel.
+        var buf: [128]u8 = undefined;
+        var writer: std.Io.Writer = .fixed(buf[0 .. buf.len - 1]);
+        size_report.encode(&writer, .mode_2048, .{
+            .rows = value.rows,
+            .columns = value.cols,
+            .cell_width = cell_size.width,
+            .cell_height = cell_size.height,
+        }) catch unreachable;
+        buf[writer.end] = 0;
+        write_pty(self, buf[0..writer.end :0]);
+    }
+
     pub fn vt(
         self: *Handler,
         comptime action: Action.Tag,
@@ -880,6 +912,191 @@ pub const Handler = struct {
         }
     }
 };
+
+test "resize clears synchronized output on unchanged cell dimensions" {
+    var t: Terminal = try .init(testing.allocator, .{ .cols = 80, .rows = 24 });
+    defer t.deinit(testing.allocator);
+
+    var s: Stream = .initAlloc(testing.allocator, .init(&t));
+    defer s.deinit();
+
+    t.modes.set(.synchronized_output, true);
+    try s.handler.resize(.{
+        .cols = 80,
+        .rows = 24,
+        .cell_size_px = .{ .width = 9, .height = 18 },
+    });
+
+    try testing.expect(!t.modes.get(.synchronized_output));
+    try testing.expectEqual(@as(u32, 720), t.width_px);
+    try testing.expectEqual(@as(u32, 432), t.height_px);
+}
+
+test "resize reports mode 2048 geometry" {
+    var t: Terminal = try .init(testing.allocator, .{ .cols = 80, .rows = 24 });
+    defer t.deinit(testing.allocator);
+
+    const S = struct {
+        var response: [128]u8 = undefined;
+        var response_len: usize = 0;
+
+        fn writePty(_: *Handler, data: [:0]const u8) void {
+            @memcpy(response[0..data.len], data);
+            response_len = data.len;
+        }
+    };
+    S.response_len = 0;
+
+    var handler: Handler = .init(&t);
+    handler.effects.write_pty = &S.writePty;
+    var s: Stream = .initAlloc(testing.allocator, handler);
+    defer s.deinit();
+
+    t.modes.set(.in_band_size_reports, true);
+    try s.handler.resize(.{
+        .cols = 100,
+        .rows = 40,
+        .cell_size_px = .{ .width = 9, .height = 18 },
+    });
+
+    try testing.expectEqualStrings(
+        "\x1B[48;40;100;720;900t",
+        S.response[0..S.response_len],
+    );
+}
+
+test "resize suppresses mode 2048 reports" {
+    const S = struct {
+        var calls: usize = 0;
+
+        fn writePty(_: *Handler, _: [:0]const u8) void {
+            calls += 1;
+        }
+    };
+    S.calls = 0;
+
+    var t: Terminal = try .init(testing.allocator, .{ .cols = 80, .rows = 24 });
+    defer t.deinit(testing.allocator);
+    var handler: Handler = .init(&t);
+    handler.effects.write_pty = &S.writePty;
+    var s: Stream = .initAlloc(testing.allocator, handler);
+    defer s.deinit();
+
+    // Disabled mode suppresses a report even with pixels and a callback.
+    try s.handler.resize(.{
+        .cols = 80,
+        .rows = 24,
+        .cell_size_px = .{ .width = 9, .height = 18 },
+    });
+    try testing.expectEqual(@as(usize, 0), S.calls);
+
+    // Missing pixel geometry suppresses a report even with the mode enabled.
+    t.modes.set(.in_band_size_reports, true);
+    try s.handler.resize(.{ .cols = 80, .rows = 24 });
+    try testing.expectEqual(@as(usize, 0), S.calls);
+
+    // A read-only stream has no write effect and remains successful.
+    var readonly_terminal: Terminal = try .init(
+        testing.allocator,
+        .{ .cols = 80, .rows = 24 },
+    );
+    defer readonly_terminal.deinit(testing.allocator);
+    readonly_terminal.modes.set(.in_band_size_reports, true);
+    var readonly_stream: Stream = .initAlloc(
+        testing.allocator,
+        .init(&readonly_terminal),
+    );
+    defer readonly_stream.deinit();
+    try readonly_stream.handler.resize(.{
+        .cols = 80,
+        .rows = 24,
+        .cell_size_px = .{ .width = 9, .height = 18 },
+    });
+    try testing.expectEqual(@as(usize, 0), S.calls);
+}
+
+test "resize failure resets synchronized output but does not write" {
+    var failing = testing.FailingAllocator.init(testing.allocator, .{});
+    const alloc = failing.allocator();
+    var t: Terminal = try .init(alloc, .{ .cols = 10, .rows = 1 });
+    defer t.deinit(alloc);
+
+    const S = struct {
+        var called: bool = false;
+
+        fn writePty(_: *Handler, _: [:0]const u8) void {
+            called = true;
+        }
+    };
+    S.called = false;
+
+    var handler: Handler = .init(&t);
+    handler.effects.write_pty = &S.writePty;
+    var s: Stream = .initAlloc(alloc, handler);
+    defer s.deinit();
+
+    t.modes.set(.synchronized_output, true);
+    t.modes.set(.in_band_size_reports, true);
+    failing.fail_index = failing.alloc_index;
+    try testing.expectError(error.OutOfMemory, s.handler.resize(.{
+        .cols = 513,
+        .rows = 1,
+        .cell_size_px = .{ .width = 9, .height = 18 },
+    }));
+
+    try testing.expect(!t.modes.get(.synchronized_output));
+    try testing.expect(!S.called);
+    try testing.expectEqual(@as(@TypeOf(t.cols), 10), t.cols);
+}
+
+test "resize effects do not change canonical terminal state" {
+    var authoritative: Terminal = try .init(
+        testing.allocator,
+        .{ .cols = 10, .rows = 5 },
+    );
+    defer authoritative.deinit(testing.allocator);
+    var readonly: Terminal = try .init(
+        testing.allocator,
+        .{ .cols = 10, .rows = 5 },
+    );
+    defer readonly.deinit(testing.allocator);
+
+    const S = struct {
+        fn writePty(_: *Handler, _: [:0]const u8) void {}
+    };
+    var authoritative_handler: Handler = .init(&authoritative);
+    authoritative_handler.effects.write_pty = &S.writePty;
+    var authoritative_stream: Stream = .initAlloc(
+        testing.allocator,
+        authoritative_handler,
+    );
+    defer authoritative_stream.deinit();
+    var readonly_stream: Stream = .initAlloc(
+        testing.allocator,
+        .init(&readonly),
+    );
+    defer readonly_stream.deinit();
+
+    authoritative.modes.set(.in_band_size_reports, true);
+    readonly.modes.set(.in_band_size_reports, true);
+    const value: Terminal.Resize = .{
+        .cols = 20,
+        .rows = 10,
+        .cell_size_px = .{ .width = 9, .height = 18 },
+    };
+    try authoritative_stream.handler.resize(value);
+    try readonly_stream.handler.resize(value);
+
+    try testing.expectEqual(authoritative.cols, readonly.cols);
+    try testing.expectEqual(authoritative.rows, readonly.rows);
+    try testing.expectEqual(authoritative.width_px, readonly.width_px);
+    try testing.expectEqual(authoritative.height_px, readonly.height_px);
+    try testing.expect(std.meta.eql(authoritative.modes, readonly.modes));
+    try testing.expect(std.meta.eql(
+        authoritative.scrolling_region,
+        readonly.scrolling_region,
+    ));
+}
 
 test "basic print" {
     var t: Terminal = try .init(testing.allocator, .{ .cols = 10, .rows = 10 });
