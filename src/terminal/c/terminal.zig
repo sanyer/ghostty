@@ -589,17 +589,11 @@ fn setTyped(
         },
         .default_cursor_style => {
             const style = (if (value) |ptr| ptr.* else TerminalCursorStyle.block).toZig() orelse return .invalid_value;
-            wrapper.stream.handler.default_cursor_style = style;
-            if (wrapper.stream.handler.default_cursor) {
-                wrapper.terminal.screens.active.cursor.cursor_style = style;
-            }
+            wrapper.terminal.setDefaultCursorStyle(style);
         },
         .default_cursor_blink => {
             const blink = if (value) |ptr| ptr.* else false;
-            wrapper.stream.handler.default_cursor_blink = blink;
-            if (wrapper.stream.handler.default_cursor) {
-                wrapper.terminal.modes.set(.cursor_blinking, blink);
-            }
+            wrapper.terminal.setDefaultCursorBlink(blink);
         },
     }
     return .success;
@@ -1835,6 +1829,12 @@ test "set default cursor style and blink" {
 
     // DECSCUSR reset restores the configured default style and blink.
     vt_write(t, "\x1b[0 q", 5);
+    try testing.expectEqual(Screen.CursorStyle.underline, t.?.terminal.screens.active.cursor.cursor_style);
+    try testing.expect(t.?.terminal.modes.get(.cursor_blinking));
+
+    // RIS also restores cursor defaults from Terminal-owned state.
+    vt_write(t, "\x1b[2 q", 5);
+    reset(t);
     try testing.expectEqual(Screen.CursorStyle.underline, t.?.terminal.screens.active.cursor.cursor_style);
     try testing.expect(t.?.terminal.modes.get(.cursor_blinking));
 }

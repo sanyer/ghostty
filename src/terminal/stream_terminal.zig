@@ -60,11 +60,6 @@ pub const Handler = struct {
     /// the kitty graphics protocol.
     apc_handler: apc.Handler = .{},
 
-    /// Default cursor style used by DECSCUSR reset (CSI 0 q).
-    default_cursor: bool = true,
-    default_cursor_style: Screen.CursorStyle = .block,
-    default_cursor_blink: bool = false,
-
     pub const Effects = struct {
         /// Called when the terminal needs to write data back to the pty,
         /// e.g. in response to a DECRQM query. The data is only valid
@@ -228,26 +223,7 @@ pub const Handler = struct {
                 self.terminal.screens.active.cursor.y + 1 +| value.value,
                 self.terminal.screens.active.cursor.x + 1,
             ),
-            .cursor_style => {
-                self.default_cursor = false;
-
-                const blink = switch (value) {
-                    .default => self.default_cursor_blink,
-                    .steady_block, .steady_bar, .steady_underline => false,
-                    .blinking_block, .blinking_bar, .blinking_underline => true,
-                };
-                const style: Screen.CursorStyle = switch (value) {
-                    .default => style: {
-                        self.default_cursor = true;
-                        break :style self.default_cursor_style;
-                    },
-                    .blinking_block, .steady_block => .block,
-                    .blinking_bar, .steady_bar => .bar,
-                    .blinking_underline, .steady_underline => .underline,
-                };
-                self.terminal.modes.set(.cursor_blinking, blink);
-                self.terminal.screens.active.cursor.cursor_style = style;
-            },
+            .cursor_style => self.terminal.setCursorStyle(value),
             .erase_display_below => self.terminal.eraseDisplay(.below, value),
             .erase_display_above => self.terminal.eraseDisplay(.above, value),
             .erase_display_complete => self.terminal.eraseDisplay(.complete, value),
@@ -312,12 +288,7 @@ pub const Handler = struct {
             },
             .active_status_display => self.terminal.status_display = value,
             .decaln => try self.terminal.decaln(),
-            .full_reset => {
-                self.terminal.fullReset();
-                self.default_cursor = true;
-                self.terminal.modes.set(.cursor_blinking, self.default_cursor_blink);
-                self.terminal.screens.active.cursor.cursor_style = self.default_cursor_style;
-            },
+            .full_reset => self.terminal.fullReset(),
             .start_hyperlink => try self.terminal.screens.active.startHyperlink(value.uri, value.id),
             .end_hyperlink => self.terminal.screens.active.endHyperlink(),
             .semantic_prompt => try self.terminal.semanticPrompt(value),

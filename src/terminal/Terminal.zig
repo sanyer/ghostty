@@ -81,6 +81,9 @@ previous_char: ?u21 = null,
 /// The modes that this terminal currently has active.
 modes: modespkg.ModeState = .{},
 
+/// Terminal-level cursor state.
+cursor: Cursor = .{},
+
 /// The most recently set mouse shape for the terminal.
 mouse_shape: mouse.Shape = .text,
 
@@ -236,6 +239,19 @@ pub const ScrollingRegion = struct {
     right: size.CellCountInt,
 };
 
+/// Terminal-level cursor state shared by all screens.
+pub const Cursor = struct {
+    /// Whether the current cursor appearance follows the configured defaults.
+    is_default: bool = true,
+
+    /// Configured style restored by DECSCUSR default and RIS.
+    default_style: Screen.CursorStyle = .block,
+
+    /// Configured blink restored by DECSCUSR default and RIS. Null selects
+    /// the terminal emulator default, which is blinking.
+    default_blink: ?bool = false,
+};
+
 pub const Options = struct {
     cols: size.CellCountInt,
     rows: size.CellCountInt,
@@ -245,6 +261,10 @@ pub const Options = struct {
     /// The default mode state. When the terminal gets a reset, it
     /// will revert back to this state.
     default_modes: modespkg.ModePacked = .{},
+
+    /// Cursor state restored by DECSCUSR default and RIS.
+    default_cursor_style: Screen.CursorStyle = .block,
+    default_cursor_blink: ?bool = false,
 
     /// The total storage limit for Kitty images in bytes. Has no effect
     /// if kitty images are disabled at build-time.
@@ -284,7 +304,7 @@ pub fn init(
     });
     errdefer screen_set.deinit(alloc);
 
-    return .{
+    var result: Terminal = .{
         .cols = cols,
         .rows = rows,
         .screens = screen_set,
@@ -302,7 +322,13 @@ pub fn init(
             .values = opts.default_modes,
             .default = opts.default_modes,
         },
+        .cursor = .{
+            .default_style = opts.default_cursor_style,
+            .default_blink = opts.default_cursor_blink,
+        },
     };
+    result.setCursorStyle(.default);
+    return result;
 }
 
 pub fn deinit(self: *Terminal, alloc: Allocator) void {
@@ -335,6 +361,63 @@ pub fn vtStream(self: *Terminal) Stream {
 /// This is the handler-side only for vtStream.
 pub fn vtHandler(self: *Terminal) Stream.Handler {
     return .init(self);
+}
+
+/// Change the cursor's current shape and blink behavior.
+///
+/// The terminal parser uses this for DECSCUSR (`CSI Ps SP q`), but the behavior
+/// is general: `.default` selects the configured defaults, while any other
+/// value selects a concrete appearance until it is changed again or reset.
+pub fn setCursorStyle(self: *Terminal, value: ansi.CursorStyle) void {
+    // Remember whether future configuration changes should update the visible
+    // cursor. An explicit appearance must remain in effect until the program
+    // selects the default again.
+    self.cursor.is_default = value == .default;
+
+    // Convert the request into the concrete values used by the renderer and
+    // terminal mode state. A null default blink means the emulator default.
+    self.modes.set(.cursor_blinking, switch (value) {
+        .default => self.cursor.default_blink orelse true,
+        .steady_block, .steady_bar, .steady_underline => false,
+        .blinking_block, .blinking_bar, .blinking_underline => true,
+    });
+    self.screens.active.cursor.cursor_style = switch (value) {
+        .default => self.cursor.default_style,
+        .blinking_block, .steady_block => .block,
+        .blinking_bar, .steady_bar => .bar,
+        .blinking_underline, .steady_underline => .underline,
+    };
+}
+
+/// Change the default cursor shape.
+///
+/// If the cursor currently follows its defaults, the visible shape changes
+/// immediately. Otherwise the new shape is saved for the next reset or default
+/// selection, such as DECSCUSR `CSI 0 SP q`.
+pub fn setDefaultCursorStyle(
+    self: *Terminal,
+    configured_style: Screen.CursorStyle,
+) void {
+    // Always retain the new default, even while an explicit appearance is
+    // active, so a later reset or default request can restore it.
+    self.cursor.default_style = configured_style;
+
+    // Do not overwrite an appearance explicitly selected by the program.
+    if (self.cursor.is_default) self.setCursorStyle(.default);
+}
+
+/// Change the default cursor blink behavior.
+///
+/// Null selects the terminal emulator default (blinking). Like the default
+/// shape, this is applied immediately only when the cursor currently follows
+/// its defaults; otherwise it is saved for the next reset or default selection.
+pub fn setDefaultCursorBlink(self: *Terminal, blink: ?bool) void {
+    // Keep the configured value separate from the currently resolved mode so
+    // null can continue to mean "use the emulator default."
+    self.cursor.default_blink = blink;
+
+    // Do not overwrite blink behavior explicitly selected by the program.
+    if (self.cursor.is_default) self.setCursorStyle(.default);
 }
 
 /// The general allocator we should use for this terminal.
@@ -4331,6 +4414,7 @@ pub fn fullReset(self: *Terminal) void {
         .left = 0,
         .right = self.cols - 1,
     };
+    self.setCursorStyle(.default);
 
     // Always mark dirty so we redraw everything
     self.flags.dirty.clear = true;
@@ -14132,6 +14216,64 @@ test "Terminal: cursorIsAtPrompt alternate screen" {
     try testing.expect(!t.cursorIsAtPrompt());
     try t.semanticPrompt(.init(.prompt_start));
     try testing.expect(!t.cursorIsAtPrompt());
+}
+
+test "Terminal: cursor defaults update current default cursor" {
+    var t = try init(testing.allocator, .{
+        .cols = 10,
+        .rows = 10,
+        .default_cursor_style = .bar,
+        .default_cursor_blink = true,
+    });
+    defer t.deinit(testing.allocator);
+
+    // Initialization applies the configured defaults.
+    try testing.expect(t.cursor.is_default);
+    try testing.expectEqual(.bar, t.screens.active.cursor.cursor_style);
+    try testing.expect(t.modes.get(.cursor_blinking));
+
+    // Configuration changes are immediately visible while the cursor still
+    // follows its defaults.
+    t.setDefaultCursorStyle(.underline);
+    t.setDefaultCursorBlink(false);
+    try testing.expect(t.cursor.is_default);
+    try testing.expectEqual(.underline, t.screens.active.cursor.cursor_style);
+    try testing.expect(!t.modes.get(.cursor_blinking));
+
+    // Null restores the terminal emulator's blinking default.
+    t.setDefaultCursorBlink(null);
+    try testing.expect(t.modes.get(.cursor_blinking));
+}
+
+test "Terminal: cursor defaults do not override explicit cursor" {
+    var t = try init(testing.allocator, .{ .cols = 10, .rows = 10 });
+    defer t.deinit(testing.allocator);
+
+    t.setCursorStyle(.blinking_bar);
+    try testing.expect(!t.cursor.is_default);
+    try testing.expectEqual(.bar, t.screens.active.cursor.cursor_style);
+    try testing.expect(t.modes.get(.cursor_blinking));
+
+    // New defaults are retained without replacing the explicit appearance.
+    t.setDefaultCursorStyle(.underline);
+    t.setDefaultCursorBlink(false);
+    try testing.expectEqual(.underline, t.cursor.default_style);
+    try testing.expectEqual(false, t.cursor.default_blink);
+    try testing.expectEqual(.bar, t.screens.active.cursor.cursor_style);
+    try testing.expect(t.modes.get(.cursor_blinking));
+
+    // Selecting the default applies the values that changed above.
+    t.setCursorStyle(.default);
+    try testing.expect(t.cursor.is_default);
+    try testing.expectEqual(.underline, t.screens.active.cursor.cursor_style);
+    try testing.expect(!t.modes.get(.cursor_blinking));
+
+    // A full reset also leaves the cursor on the configured defaults.
+    t.setCursorStyle(.steady_block);
+    t.fullReset();
+    try testing.expect(t.cursor.is_default);
+    try testing.expectEqual(.underline, t.screens.active.cursor.cursor_style);
+    try testing.expect(!t.modes.get(.cursor_blinking));
 }
 
 test "Terminal: fullReset with a non-empty pen" {
