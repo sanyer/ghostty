@@ -575,6 +575,7 @@ pub fn clone(
     result.assertIntegrity();
     return result;
 }
+
 pub fn increaseCapacity(
     self: *Screen,
     node: *PageList.List.Node,
@@ -643,6 +644,74 @@ pub fn increaseCapacity(
     self.cursorReload();
 
     return new_node;
+}
+
+/// Clone the cells in columns [x_start, x_end) of a source row into
+/// the row at `dst_y` of the given node's page, increasing the node's
+/// capacity as necessary to fit the managed memory (styles,
+/// hyperlinks, etc.) of the copied cells.
+///
+/// This is the Screen-level analog of PageList.cloneRowGrowCapacity:
+/// capacity increases are routed through Screen.increaseCapacity so
+/// that the cursor's style/hyperlink references are migrated when the
+/// destination node is the cursor's page.
+///
+/// Since increasing capacity replaces the node in the page list, the
+/// (possibly replaced) node is returned and the caller must use it in
+/// place of the old node. Tracked pins are updated automatically. The
+/// source must NOT be on the given node since the node's page memory
+/// may be freed on capacity increase.
+///
+/// Callers use this mid-mutation (after rows have been rotated or
+/// shifted), so a failure can't be propagated without leaving the
+/// page list half-mutated (and corrupt). If the capacity can't be
+/// increased (system OOM or the page is already at max capacity),
+/// this panics: a crash is better than corruption.
+pub fn clonePartialRowGrowCapacity(
+    self: *Screen,
+    node: *PageList.List.Node,
+    dst_y: usize,
+    src_page: *Page,
+    src_row: *const Row,
+    x_start: usize,
+    x_end: usize,
+) *PageList.List.Node {
+    assert(src_page != node.page());
+
+    var current = node;
+    while (true) {
+        const cur_page: *Page = current.page();
+        const cur_rows = cur_page.rows.ptr(cur_page.memory.ptr);
+        cur_page.clonePartialRowFrom(
+            src_page,
+            &cur_rows[dst_y],
+            src_row,
+            x_start,
+            x_end,
+        ) catch |err| {
+            // Adjust our page capacity to make room for what we
+            // didn't have space for and retry the copy.
+            current = self.increaseCapacity(
+                current,
+                PageList.IncreaseCapacity.forCloneError(err),
+            ) catch |e| switch (e) {
+                // We can't gracefully recover from either of these
+                // here: our callers have already rotated or shifted
+                // rows, so returning an error would leave the page
+                // list half-mutated (and corrupt), so a crash is
+                // better.
+                error.OutOfMemory,
+                => @panic("increaseCapacity system allocator OOM"),
+
+                error.OutOfSpace,
+                => @panic("increaseCapacity OutOfSpace"),
+            };
+
+            continue;
+        };
+
+        return current;
+    }
 }
 
 pub inline fn cursorCellRight(self: *Screen, n: size.CellCountInt) *pagepkg.Cell {
@@ -1068,70 +1137,21 @@ fn cursorScrollAboveRotate(
         // Copy the last row of the previous page to the top of current.
         // If the current page doesn't have enough capacity for the
         // managed memory of the copied row (styles, hyperlinks, etc.)
-        // then we increase its capacity and retry, the same way that
-        // insertLines/deleteLines handle their cross-page copies.
-        while (true) {
+        // then its capacity is increased and the copy retried, which
+        // may replace `current` in the page list. Our loop condition
+        // guarantees `current` is never the cursor page, and `prev` is
+        // unaffected by the replacement.
+        {
             const prev_page = prev.page();
-            const cur_page = current.page();
             const prev_rows = prev_page.rows.ptr(prev_page.memory.ptr);
-            const cur_rows = cur_page.rows.ptr(cur_page.memory.ptr);
-            cur_page.cloneRowFrom(
+            current = self.clonePartialRowGrowCapacity(
+                current,
+                0,
                 prev_page,
-                &cur_rows[0],
                 &prev_rows[prev_page.size.rows - 1],
-            ) catch |err| {
-                // Adjust our page capacity to make
-                // room for what we didn't have space for
-                const new_node = self.increaseCapacity(
-                    current,
-                    switch (err) {
-                        // Rehash the sets
-                        error.StyleSetNeedsRehash,
-                        error.HyperlinkSetNeedsRehash,
-                        => null,
-
-                        // Increase style memory
-                        error.StyleSetOutOfMemory,
-                        => .styles,
-
-                        // Increase string memory
-                        error.StringAllocOutOfMemory,
-                        => .string_bytes,
-
-                        // Increase hyperlink memory
-                        error.HyperlinkSetOutOfMemory,
-                        error.HyperlinkMapOutOfMemory,
-                        => .hyperlink_bytes,
-
-                        // Increase grapheme memory
-                        error.GraphemeMapOutOfMemory,
-                        error.GraphemeAllocOutOfMemory,
-                        => .grapheme_bytes,
-                    },
-                ) catch |e| switch (e) {
-                    // See insertLines which takes the same approach for
-                    // the same errors. We can't gracefully recover from
-                    // either of these here: the rows have already been
-                    // rotated, so returning an error would leave the
-                    // page list half-mutated (and corrupt), so a crash
-                    // is better.
-                    error.OutOfMemory,
-                    => @panic("increaseCapacity system allocator OOM"),
-
-                    error.OutOfSpace,
-                    => @panic("increaseCapacity OutOfSpace"),
-                };
-
-                // increaseCapacity replaces the node in the page list
-                // so our iteration node must be updated to the
-                // replacement.
-                current = new_node;
-
-                // Retry the row copy with the increased capacity.
-                continue;
-            };
-
-            break;
+                0,
+                self.pages.cols,
+            );
         }
 
         // Mark dirty on the page, since we are dirtying all rows with this.
