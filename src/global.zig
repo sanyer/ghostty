@@ -35,6 +35,14 @@ var state: ?GlobalState = undefined;
 
 pub const InitOpts = union(enum) {
     main: std.process.Init,
+
+    /// Same as `main` but for auxiliary tool binaries (e.g. ghostty-bench
+    /// and ghostty-gen) that have their own CLI action namespace. This
+    /// skips detection of ghostty app CLI actions, since tool actions
+    /// (e.g. `+terminal-stream`) are not valid app actions and would
+    /// otherwise cause init to fail with InvalidAction.
+    tool: std.process.Init,
+
     c: struct {
         argc: usize,
         argv: [*][*:0]u8,
@@ -52,11 +60,11 @@ pub fn init(opts: InitOpts) !void {
         .gpa = null,
         .alloc = undefined,
         .environ = switch (opts) {
-            .main => |m| m.minimal.environ,
+            .main, .tool => |m| m.minimal.environ,
             .c => |c| c.environ,
         },
         .args = switch (opts) {
-            .main => |m| m.minimal.args,
+            .main, .tool => |m| m.minimal.args,
             // TODO: Using the C API from Windows is unsupported at this time.
             //
             // When do we plan on supporting Windows, it's recommended to
@@ -116,11 +124,16 @@ pub fn init(opts: InitOpts) !void {
     errdefer freeTmpDir(self.alloc, self.tmp_dir_path.?);
 
     // We first try to parse any action that we may be executing.
-    self.action = try cli.action.detectArgs(
-        cli.ghostty.Action,
-        self.alloc,
-        self.args,
-    );
+    // Tool binaries (ghostty-bench, ghostty-gen) have their own action
+    // namespace and detect their own actions, so we skip detection here.
+    self.action = switch (opts) {
+        .main, .c => try cli.action.detectArgs(
+            cli.ghostty.Action,
+            self.alloc,
+            self.args,
+        ),
+        .tool => null,
+    };
 
     // If we have an action executing, we disable logging by default
     // since we write to stderr we don't want logs messing up our

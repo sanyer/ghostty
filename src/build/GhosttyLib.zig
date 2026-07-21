@@ -1,9 +1,11 @@
 const GhosttyLib = @This();
 
 const std = @import("std");
+const builtin = @import("builtin");
 const RunStep = std.Build.Step.Run;
 const CombineArchivesStep = @import("CombineArchivesStep.zig");
 const Config = @import("Config.zig");
+const LibsystemOverrideStep = @import("LibsystemOverrideStep.zig");
 const SharedDeps = @import("SharedDeps.zig");
 const LipoStep = @import("LipoStep.zig");
 
@@ -27,7 +29,7 @@ pub fn initStatic(
             .target = deps.config.target,
             .optimize = deps.config.optimize,
             .strip = deps.config.strip,
-            .omit_frame_pointer = deps.config.strip,
+            .omit_frame_pointer = deps.config.omitFramePointer(),
             .unwind_tables = if (deps.config.strip) .none else .sync,
             .link_libc = true,
         }),
@@ -57,9 +59,19 @@ pub fn initStatic(
     const combined = CombineArchivesStep.create(b, deps.config.target, "ghostty-internal", lib_list.items);
     combined.step.dependOn(&lib.step);
 
+    // On Darwin, prefer libSystem's libc/libm over the bundled
+    // compiler-rt for consumers of this archive. See
+    // libsystem_override.sh for details. This is a no-op elsewhere.
+    const override = LibsystemOverrideStep.create(
+        b,
+        deps.config.target,
+        combined.output,
+        "libghostty-internal.a",
+    );
+
     return .{
-        .step = combined.step,
-        .output = combined.output,
+        .step = override.step orelse combined.step,
+        .output = override.output,
 
         // Static libraries cannot have dSYMs because they aren't linked.
         .dsym = null,
@@ -88,7 +100,7 @@ pub fn initShared(
             .target = deps.config.target,
             .optimize = deps.config.optimize,
             .strip = deps.config.strip,
-            .omit_frame_pointer = deps.config.strip,
+            .omit_frame_pointer = deps.config.omitFramePointer(),
             .unwind_tables = if (deps.config.strip) .none else .sync,
         }),
 

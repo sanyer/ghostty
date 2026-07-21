@@ -141,8 +141,8 @@ inline fn invalidCodepoint(cp: anytype) bool {
 
 /// This is all the structures and data for the precomputed lookup table
 /// for all possible permutations of state and grapheme break properties.
-/// Precomputation requires 2^13 keys of 4 bit values so the whole table is
-/// 8KB.
+/// Precomputation requires 2^13 keys of byte-sized values so the whole
+/// table is 8KB.
 const Precompute = struct {
     const Key = packed struct(u13) {
         state: uucode.grapheme.BreakState,
@@ -154,9 +154,15 @@ const Precompute = struct {
         }
     };
 
-    const Value = packed struct(u4) {
+    const Value = packed struct(u8) {
         result: bool,
         state: uucode.grapheme.BreakState,
+
+        /// Explicit padding to give the struct a power-of-two backing
+        /// integer, for the same reason as `Properties._padding` (avoids
+        /// exotic-width LLVM integer accesses that defeat register
+        /// promotion). @sizeOf was already 1, so the table stays 8KB.
+        _padding: u4 = 0,
     };
 
     const data = precompute: {

@@ -5,6 +5,7 @@ const builtin = @import("builtin");
 const assert = std.debug.assert;
 const RunStep = std.Build.Step.Run;
 const CombineArchivesStep = @import("CombineArchivesStep.zig");
+const LibsystemOverrideStep = @import("LibsystemOverrideStep.zig");
 const Config = @import("Config.zig");
 const GhosttyZig = @import("GhosttyZig.zig");
 const LipoStep = @import("LipoStep.zig");
@@ -295,22 +296,44 @@ fn initLib(
         const combined = CombineArchivesStep.create(b, target, "ghostty-vt", sources.items);
         combined.step.dependOn(&lib.step);
 
+        // On Darwin, prefer libSystem's libc/libm over the bundled
+        // compiler-rt for consumers of this archive. See GhosttyLib
+        // and libsystem_override.sh for details.
+        const override = LibsystemOverrideStep.create(
+            b,
+            target,
+            combined.output,
+            "libghostty-vt-fat.a",
+        );
+
         return .{
-            .step = combined.step,
+            .step = override.step orelse combined.step,
             .artifact = &b.addInstallArtifact(lib, .{}).step,
             .kind = kind,
-            .output = combined.output,
+            .output = override.output,
             .dsym = dsymutil,
             .pkg_config = if (pcs) |v| v.shared else null,
             .pkg_config_static = if (pcs) |v| v.static else null,
         };
     }
 
+    // Same libSystem preference for the plain (no vendored SIMD)
+    // static archive; a no-op off Darwin.
+    const override: LibsystemOverrideStep.Result = if (kind == .static) LibsystemOverrideStep.create(
+        b,
+        target,
+        lib.getEmittedBin(),
+        "libghostty-vt-static.a",
+    ) else .{
+        .step = null,
+        .output = lib.getEmittedBin(),
+    };
+
     return .{
-        .step = &lib.step,
+        .step = override.step orelse &lib.step,
         .artifact = &b.addInstallArtifact(lib, .{}).step,
         .kind = kind,
-        .output = lib.getEmittedBin(),
+        .output = override.output,
         .dsym = dsymutil,
         .pkg_config = if (pcs) |v| v.shared else null,
         .pkg_config_static = if (pcs) |v| v.static else null,

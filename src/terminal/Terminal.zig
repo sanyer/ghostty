@@ -10,6 +10,7 @@ const assert = @import("../quirks.zig").inlineAssert;
 const tripwire = @import("../tripwire.zig");
 const testing = std.testing;
 const Allocator = std.mem.Allocator;
+const simd = @import("../simd/main.zig");
 const unicode = @import("../unicode/main.zig");
 const uucode = @import("uucode");
 
@@ -630,6 +631,85 @@ inline fn printSliceEligible(cp: u32, comptime width: PrintSliceWidth) bool {
     });
 }
 
+/// Store a run of narrow codepoint cells built from a bit template:
+/// for each `idx` in `[from, to)`, `cells[idx]` is assigned the bits
+/// `template_bits | (cps[idx] << cp_shift)`.
+///
+/// The template is a complete Cell (content tag, style, wide state,
+/// etc. already baked in by the caller) whose codepoint content bits
+/// are zero. Since Cell is a packed struct(u64), OR-ing a codepoint
+/// into the content field's bit position yields a finished cell as a
+/// single integer, keeping the loop pure data movement: no per-cell
+/// field assignments and no branches.
+///
+/// This loop is manually vectorized: Zig 0.16 (LLVM 21) no longer
+/// auto-vectorizes the scalar form the way Zig 0.15 (LLVM 20) did.
+inline fn printSliceStoreRun(
+    cells: [*]Cell,
+    cps: [*]const u32,
+    from: usize,
+    to: usize,
+    template_bits: u64,
+) void {
+    // The bit position of the `content` field within the packed
+    // Cell. A codepoint occupies the low bits of `content`, so
+    // shifting a codepoint left by this amount places it exactly
+    // where `.content = .{ .codepoint = .{ .data = cp } }` would.
+    const cp_shift = @bitOffsetOf(Cell, "content");
+
+    // Since codepoints are OR'd into the content field rather than
+    // assigned, any nonzero content bits in the template would
+    // corrupt the stored codepoints.
+    const content_mask: u64 = comptime mask: {
+        const bits = @bitSizeOf(@FieldType(Cell, "content"));
+        break :mask ((1 << bits) - 1) << cp_shift;
+    };
+    assert(template_bits & content_mask == 0);
+
+    var idx = from;
+
+    // Vectorized bulk of the run.
+    if (simd.lanes(u64)) |lanes| {
+        // u64 due to backing integer of Cell
+        const V = @Vector(lanes, u64);
+
+        // The template and shift amount are loop-invariant, so
+        // broadcast them to every lane once up front.
+        const template: V = @splat(template_bits);
+        const shift: @Vector(
+            lanes,
+            std.math.Log2Int(u64),
+        ) = @splat(cp_shift);
+
+        while (idx + lanes <= to) : (idx += lanes) {
+            // Load `lanes` decoded codepoints...
+            const narrow: @Vector(lanes, u32) = cps[idx..][0..lanes].*;
+
+            // ...widen each u32 lane to the u64 cell size...
+            const wide: V = @intCast(narrow);
+
+            // ...shift each codepoint into the content field's bit
+            // position and merge with the template, producing
+            // `lanes` finished cells (coerced from vector to array
+            // so they can be bitcast for the store below)...
+            const bits: [lanes]u64 = template | (wide << shift);
+
+            // ...and store them contiguously. Cell is a packed
+            // struct(u64) so an array of u64 bit patterns has
+            // identical layout to an array of cells.
+            cells[idx..][0..lanes].* = @bitCast(bits);
+        }
+    }
+
+    // Scalar tail: the final `< lanes` cells of the run, or the
+    // entire run on targets without SIMD. Note `idx` carries over
+    // from the vector loop above. This is the same computation as
+    // the vector body, one cell at a time.
+    while (idx < to) : (idx += 1) {
+        cells[idx] = @bitCast(template_bits | (@as(u64, cps[idx]) << cp_shift));
+    }
+}
+
 /// The row-filling portion of the printSlice fast path, specialized by
 /// width class. The first codepoint must already be validated by the
 /// caller (printSliceFast).
@@ -671,19 +751,20 @@ fn printSliceFill(
         // Anything else (including eligible unicode) proceeds via
         // the scalar loop below.
         if (comptime width == .narrow) {
-            const lanes = 8;
-            const V = @Vector(lanes, u32);
-            const lo: V = @splat(0x10);
-            const hi: V = @splat(0xFF);
-            while (idx + lanes <= cps.len) {
-                const v: V = cps[idx..][0..lanes].*;
-                const in_range = (v >= lo) & (v <= hi);
-                if (!@reduce(.And, in_range)) {
-                    const bits: std.meta.Int(.unsigned, lanes) = @bitCast(in_range);
-                    idx += @ctz(~bits);
-                    break;
+            if (simd.lanes(u32)) |lanes| {
+                const V = @Vector(lanes, u32);
+                const lo: V = @splat(0x10);
+                const hi: V = @splat(0xFF);
+                while (idx + lanes <= cps.len) {
+                    const v: V = cps[idx..][0..lanes].*;
+                    const in_range = (v >= lo) & (v <= hi);
+                    if (!@reduce(.And, in_range)) {
+                        const bits: std.meta.Int(.unsigned, lanes) = @bitCast(in_range);
+                        idx += @ctz(~bits);
+                        break;
+                    }
+                    idx += lanes;
                 }
-                idx += lanes;
             }
         }
 
@@ -817,12 +898,38 @@ fn printSliceFill(
                 // We can only write whole (wide, spacer) pairs.
                 const pair_end = k + (simple - k) / 2 * 2;
                 var idx = k;
+
+                // Manually vectorized for the same reason as
+                // printSliceStoreRun: build a vector of wide cells,
+                // interleave with spacer tails, and store (wide,
+                // spacer) pairs several at a time.
+                if (simd.lanes(u64)) |lanes| {
+                    const pair_lanes = lanes / 2;
+                    const Vp = @Vector(pair_lanes, u64);
+                    const wide_v: Vp = @splat(wide_bits);
+                    const spacer_v: Vp = @splat(spacer_bits);
+                    const shift_v: @Vector(
+                        pair_lanes,
+                        std.math.Log2Int(u64),
+                    ) = @splat(cp_shift);
+                    while (idx + 2 * pair_lanes <= pair_end) : (idx += 2 * pair_lanes) {
+                        const narrow: @Vector(pair_lanes, u32) =
+                            cps[printed + idx / 2 ..][0..pair_lanes].*;
+                        const wides: Vp = wide_v | (@as(Vp, @intCast(narrow)) << shift_v);
+                        const inter: [2 * pair_lanes]u64 = std.simd.interlace(.{
+                            wides,
+                            spacer_v,
+                        });
+                        cells[idx..][0 .. 2 * pair_lanes].* = @bitCast(inter);
+                    }
+                }
                 while (idx < pair_end) : (idx += 2) {
                     cells[idx] = @bitCast(
                         wide_bits | (@as(u64, cps[printed + idx / 2]) << cp_shift),
                     );
                     cells[idx + 1] = @bitCast(spacer_bits);
                 }
+
                 // If the simple run ended mid-pair we stop at the pair
                 // boundary and handle the offending cell below.
                 k = pair_end;
@@ -832,11 +939,13 @@ fn printSliceFill(
                     simple = pair_end;
                 }
             } else {
-                for (k..simple) |idx| {
-                    cells[idx] = @bitCast(
-                        template_bits | (@as(u64, cps[printed + idx]) << cp_shift),
-                    );
-                }
+                printSliceStoreRun(
+                    cells,
+                    cps.ptr + printed,
+                    k,
+                    simple,
+                    template_bits,
+                );
                 k = simple;
             }
             if (k >= cell_count) break;
@@ -888,11 +997,13 @@ fn printSliceFill(
                     page.styles.useMultiple(page.memory, style_id, @intCast(n));
                 }
 
-                for (k..m) |idx| {
-                    cells[idx] = @bitCast(
-                        template_bits | (@as(u64, cps[printed + idx]) << cp_shift),
-                    );
-                }
+                printSliceStoreRun(
+                    cells,
+                    cps.ptr + printed,
+                    k,
+                    m,
+                    template_bits,
+                );
                 k = m;
                 continue :fill;
             }

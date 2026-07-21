@@ -204,7 +204,7 @@ pub const Path = union(enum) {
         defer dir.close(global.io());
 
         const abs = abs: {
-            const dir_len = dir.realPathFile(global.io(), ".", &buf) catch |err| {
+            const abs_len = dir.realPathFile(global.io(), path, &buf) catch |err| {
                 if (err == error.FileNotFound) {
                     // The file doesn't exist. Try to resolve the relative path
                     // another way.
@@ -229,7 +229,7 @@ pub const Path = union(enum) {
                 return;
             };
 
-            break :abs buf[0..dir_len];
+            break :abs buf[0..abs_len];
         };
 
         log.debug(

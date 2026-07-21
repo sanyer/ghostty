@@ -145,6 +145,12 @@ comptime {
     // If we're building the C library (vs. the Zig module) then
     // we want to reference the C API so that it gets exported.
     if (@import("root") == lib) {
+        // Force-reference our memset override so its export is
+        // emitted. This must stay inside the root guard so that
+        // downstream Zig module consumers don't get the override
+        // injected into their binaries. See quirks_memset.zig.
+        _ = @import("quirks_memset.zig");
+
         const c = terminal.c_api;
         @export(&c.key_event_new, .{ .name = "ghostty_key_event_new" });
         @export(&c.key_event_free, .{ .name = "ghostty_key_event_free" });

@@ -18,7 +18,7 @@ pub fn init(b: *std.Build, cfg: *const Config, deps: *const SharedDeps) !Ghostty
             .target = cfg.target,
             .optimize = cfg.optimize,
             .strip = cfg.strip,
-            .omit_frame_pointer = cfg.strip,
+            .omit_frame_pointer = cfg.omitFramePointer(),
             .unwind_tables = if (cfg.strip) .none else .sync,
         }),
         // Crashes on x86_64 self-hosted on 0.15.1

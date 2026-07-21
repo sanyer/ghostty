@@ -669,6 +669,17 @@ pub fn fromOptions() Config {
     };
 }
 
+/// Whether release artifacts should omit frame pointers.
+///
+/// Stripped release builds omit them in general, but we always keep frame
+/// pointers on Apple platforms: the Apple arm64 ABI expects x29 to
+/// be a valid frame pointer and Apple's profiling and crash reporting
+/// tools rely on it for backtraces.
+pub fn omitFramePointer(self: *const Config) bool {
+    if (self.target.result.os.tag.isDarwin()) return false;
+    return self.strip;
+}
+
 /// Returns the minimum OS version for the given OS tag. This shouldn't
 /// be used generally, it should only be used for Darwin-based OS currently.
 pub fn osVersionMin(tag: std.Target.Os.Tag) ?std.Target.Query.OsVersion {
