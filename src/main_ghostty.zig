@@ -30,7 +30,10 @@ pub fn main(minimal: std.process.Init.Minimal) !MainReturn {
     // no other Zig code should EVER access the global state.
     global.init(.{ .main = minimal }) catch |err| {
         var buffer: [1024]u8 = undefined;
-        var stderr_writer = std.Io.File.stderr().writer(global.io(), &buffer);
+        var stderr_writer = std.Io.File.stderr().writer(
+            std.Io.Threaded.global_single_threaded.io(),
+            &buffer,
+        );
         const stderr = &stderr_writer.interface;
         defer std.process.exit(1);
         const ErrSet = @TypeOf(err) || error{Unknown};

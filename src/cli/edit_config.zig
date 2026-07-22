@@ -158,9 +158,13 @@ fn runInner(alloc: Allocator, stderr: *std.Io.Writer) !u8 {
     defer alloc.free(command);
 
     // Run/replace process (using execve)
-    const argv = &.{ "/bin/sh", "-c", command };
+    const argv = [_:null]?[*:0]const u8{
+        "/bin/sh",
+        "-c",
+        command.ptr,
+    };
     const envp = std.c.environ;
-    const err = std.posix.errno(std.posix.system.execve(argv[0], @ptrCast(argv), envp));
+    const err = std.posix.errno(std.posix.system.execve(argv[0].?, &argv, envp));
 
     // If we reached this point then exec failed.
     try stderr.print(

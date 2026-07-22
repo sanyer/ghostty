@@ -189,7 +189,7 @@ fn startPosix(self: *Command, arena: Allocator) !void {
         @compileError("missing env vars");
 
     // Fork.
-    const pid = posix.system.fork();
+    const pid = try fork();
 
     if (pid != 0) {
         // Parent, return immediately.
@@ -289,6 +289,17 @@ fn startPosix(self: *Command, arena: Allocator) !void {
     // We return a very specific error that can be detected to determine
     // we're in the child.
     return error.ExecFailedInChild;
+}
+
+/// Wrapper for the raw fork syscall. This preserves the error handling from
+/// the std.posix wrapper that was removed in Zig 0.16.
+fn fork() !posix.pid_t {
+    const rc = posix.system.fork();
+    switch (posix.errno(rc)) {
+        .SUCCESS => return @intCast(rc),
+        .AGAIN, .NOMEM => return error.SystemResources,
+        else => |err| return posix.unexpectedErrno(err),
+    }
 }
 
 fn startWindows(self: *Command, arena: Allocator) !void {
@@ -494,10 +505,10 @@ pub fn wait(self: Command, block: bool) !Exit {
         return .{ .Exited = exit_code };
     }
 
-    const status = if (block) wait_block: {
-        var status: c_int = undefined;
-        _ = posix.system.waitpid(self.pid.?, &status, 0);
-        break :wait_block status;
+    const status: u32 = if (block) wait_block: {
+        var status: if (builtin.link_libc) c_int else u32 = undefined;
+        _ = try waitPid(self.pid.?, &status, 0);
+        break :wait_block @bitCast(status);
     } else wait_nohang: {
         // We specify NOHANG because its not our fault if the process we launch
         // for the tty doesn't properly waitpid its children. We don't want
@@ -507,13 +518,32 @@ pub fn wait(self: Command, block: bool) !Exit {
         // wait call has not been performed, so we need to keep trying until we get
         // a non-zero pid back, otherwise we end up with zombie processes.
         while (true) {
-            var status: c_int = undefined;
-            const pid = posix.system.waitpid(self.pid.?, &status, posix.system.W.NOHANG);
-            if (pid != 0) break :wait_nohang status;
+            var status: if (builtin.link_libc) c_int else u32 = undefined;
+            const pid = try waitPid(self.pid.?, &status, posix.system.W.NOHANG);
+            if (pid != 0) break :wait_nohang @bitCast(status);
         }
     };
 
-    return .init(@bitCast(status));
+    return .init(status);
+}
+
+/// Wrapper for the raw waitpid syscall. Status is only initialized on success;
+/// interrupted waits are retried and all other errors are propagated.
+fn waitPid(
+    pid: posix.pid_t,
+    status: *if (builtin.link_libc) c_int else u32,
+    flags: u32,
+) !posix.pid_t {
+    while (true) {
+        const rc = posix.system.waitpid(pid, status, @intCast(flags));
+        switch (posix.errno(rc)) {
+            .SUCCESS => return @intCast(rc),
+            .INTR => continue,
+            .CHILD => return error.NoChildProcess,
+            .INVAL => return error.InvalidWaitOptions,
+            else => |err| return posix.unexpectedErrno(err),
+        }
+    }
 }
 
 /// Sets command->data to data.

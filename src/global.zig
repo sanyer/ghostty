@@ -121,7 +121,6 @@ pub fn init(opts: InitOpts) !void {
 
     // Discover and save the temporary directory path
     self.tmp_dir_path = try allocTmpDir(self.alloc, self.environ);
-    errdefer freeTmpDir(self.alloc, self.tmp_dir_path.?);
 
     // We first try to parse any action that we may be executing.
     // Tool binaries (ghostty-bench, ghostty-gen) have their own action
