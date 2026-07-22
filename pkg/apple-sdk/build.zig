@@ -150,6 +150,30 @@ pub fn addPaths(
     step: *std.Build.Step.Compile,
 ) !void {
     const target = step.rootModuleTarget();
+
+    // A three paragraph comment to describe a single C macro. Strap in.
+    //
+    // Zig uses its own libc++ headers when compiling C++. In Zig 0.16,
+    // `__config` skips `__config_site`, the file that normally contains
+    // platform settings, and expects those settings as `-D` flags:
+    // https://codeberg.org/ziglang/zig/src/tag/0.16.0/lib/libcxx/include/__config#L13
+    //
+    // This macro enables Apple's availability checks. Without them, libc++
+    // assumes every symbol declared by these newer headers also exists in the
+    // target's runtime library:
+    // https://github.com/llvm/llvm-project/blob/llvmorg-21.1.0/libcxx/include/__configuration/availability.h#L63-L125
+    //
+    // For example, `hash.h` either calls `std::__hash_memory` from the runtime
+    // library or compiles an inline fallback:
+    // https://github.com/llvm/llvm-project/blob/llvmorg-21.1.0/libcxx/include/__functional/hash.h#L244-L250
+    // Without the checks, it chooses the runtime symbol. Older macOS versions
+    // don't have that symbol, so dyld aborts at launch:
+    // https://github.com/llvm/llvm-project/issues/155531
+    step.root_module.addCMacro(
+        "_LIBCPP_HAS_VENDOR_AVAILABILITY_ANNOTATIONS",
+        "1",
+    );
+
     switch (try pathsForTarget(b, target)) {
         .native => |native| {
             step.setLibCFile(native.libc);
