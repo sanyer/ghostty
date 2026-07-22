@@ -34,14 +34,14 @@ pub const xev = @import("xev").Dynamic;
 var state: ?GlobalState = undefined;
 
 pub const InitOpts = union(enum) {
-    main: std.process.Init,
+    main: std.process.Init.Minimal,
 
     /// Same as `main` but for auxiliary tool binaries (e.g. ghostty-bench
     /// and ghostty-gen) that have their own CLI action namespace. This
     /// skips detection of ghostty app CLI actions, since tool actions
     /// (e.g. `+terminal-stream`) are not valid app actions and would
     /// otherwise cause init to fail with InvalidAction.
-    tool: std.process.Init,
+    tool: std.process.Init.Minimal,
 
     c: struct {
         argc: usize,
@@ -60,11 +60,11 @@ pub fn init(opts: InitOpts) !void {
         .gpa = null,
         .alloc = undefined,
         .environ = switch (opts) {
-            .main, .tool => |m| m.minimal.environ,
+            .main, .tool => |m| m.environ,
             .c => |c| c.environ,
         },
         .args = switch (opts) {
-            .main, .tool => |m| m.minimal.args,
+            .main, .tool => |m| m.args,
             // TODO: Using the C API from Windows is unsupported at this time.
             //
             // When do we plan on supporting Windows, it's recommended to

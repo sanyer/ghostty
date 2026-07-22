@@ -23,12 +23,12 @@ const MainReturn = switch (build_config.artifact) {
     else => void,
 };
 
-pub fn main(init: std.process.Init) !MainReturn {
+pub fn main(minimal: std.process.Init.Minimal) !MainReturn {
     // We first start by initializing our global state. This will setup
     // process-level state we need to run the terminal. The reason we use
     // a global is because the C API needs to be able to access this state;
     // no other Zig code should EVER access the global state.
-    global.init(.{ .main = init }) catch |err| {
+    global.init(.{ .main = minimal }) catch |err| {
         var buffer: [1024]u8 = undefined;
         var stderr_writer = std.Io.File.stderr().writer(global.io(), &buffer);
         const stderr = &stderr_writer.interface;

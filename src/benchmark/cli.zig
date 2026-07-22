@@ -45,12 +45,12 @@ pub const Action = enum {
 };
 
 /// An entrypoint for the benchmark CLI.
-pub fn main(init: std.process.Init) !void {
-    try global.init(.{ .tool = init });
+pub fn main(minimal: std.process.Init.Minimal) !void {
+    try global.init(.{ .tool = minimal });
     const alloc = std.heap.c_allocator;
-    const action_ = try cli.action.detectArgs(Action, alloc, init.minimal.args);
+    const action_ = try cli.action.detectArgs(Action, alloc, minimal.args);
     const action = action_ orelse return error.NoAction;
-    try mainAction(alloc, action, .{ .cli = init.minimal.args });
+    try mainAction(alloc, action, .{ .cli = minimal.args });
 }
 
 /// Arguments that can be passed to the benchmark.
