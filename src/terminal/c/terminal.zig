@@ -39,44 +39,16 @@ const log = std.log.scoped(.terminal_c);
 /// such as the persistent VT stream needed to handle escape sequences split
 /// across multiple vt_write calls.
 const TerminalWrapper = struct {
-    // Shim for the I/O interface that passes freestanding calls to std.Io.failing.
-    const Io = switch (builtin.os.tag) {
-        .freestanding => struct {
-            fn init() @This() {
-                return .{};
-            }
-
-            fn deinit(self: *@This()) void {
-                _ = self;
-            }
-
-            fn io(self: *@This()) std.Io {
-                _ = self;
-                return std.Io.failing;
-            }
-        },
-        else => struct {
-            threaded: std.Io.Threaded,
-
-            fn init(alloc: std.mem.Allocator, argv0: std.Io.Threaded.Argv0) @This() {
-                return .{ .threaded = .init(alloc, .{ .argv0 = argv0 }) };
-            }
-
-            fn deinit(self: *@This()) void {
-                self.threaded.deinit();
-            }
-
-            fn io(self: *@This()) std.Io {
-                return self.threaded.io();
-            }
-        },
-    };
+    const IoImpl = if (builtin.os.tag != .freestanding) *std.Io.Threaded else void;
 
     terminal: *ZigTerminal,
     /// We need to keep an I/O instance here as part of the terminal since we
     /// have no way of taking it in the C API. This is set up in `new` and
     /// destroyed on `free`.
-    io_impl: Io,
+    ///
+    /// This is set to null on freestanding platforms, which get std.Io.failing
+    /// instead.
+    io_impl: IoImpl,
     /// We also need to store a temp dir path for some operations (e.g., kitty
     /// graphics). This provides stable storage for the API calls.
     tmp_dir_path: [max_path_bytes]u8,
@@ -378,34 +350,24 @@ fn new_(
         return error.OutOfMemory;
     errdefer alloc.destroy(wrapper);
 
-    // Since I/O implementations are out of scope for C, we just create a
-    // standard threaded one off of our allocator. Note that due to the fact
-    // that easy access to the OS environment is not something that can be
-    // guaranteed we *always* create an empty environment here.
-    const argv0 = "libghostty-vt";
-    const argv0_windows = argv0_windows: {
-        var buf: [std.unicode.calcUtf16LeLen(argv0) catch unreachable]u16 = undefined;
-        _ = std.unicode.utf8ToUtf16Le(&buf, argv0) catch unreachable;
-        break :argv0_windows buf;
-    };
-
-    var io_impl: TerminalWrapper.Io = switch (builtin.os.tag) {
-        .freestanding => .init(),
-        else => .init(
-            alloc,
-            .init(.{ .vector = switch (builtin.os.tag) {
-                .windows => &argv0_windows,
-                else => &.{argv0},
-            } }),
-        ),
-    };
+    const has_nonfailing_io = builtin.os.tag != .freestanding;
+    const io_impl: TerminalWrapper.IoImpl = if (has_nonfailing_io) io_impl: {
+        const ptr = try alloc.create(std.Io.Threaded);
+        ptr.* = .init_single_threaded;
+        break :io_impl ptr;
+    } else {};
+    errdefer if (has_nonfailing_io) alloc.destroy(io_impl);
 
     // Setup our terminal
-    t.* = try .init(io_impl.io(), alloc, .{
-        .cols = opts.cols,
-        .rows = opts.rows,
-        .max_scrollback = opts.max_scrollback,
-    });
+    t.* = try .init(
+        if (has_nonfailing_io) io_impl.io() else std.Io.failing,
+        alloc,
+        .{
+            .cols = opts.cols,
+            .rows = opts.rows,
+            .max_scrollback = opts.max_scrollback,
+        },
+    );
     errdefer t.deinit(alloc);
 
     // libghostty-vt embedders don't necessarily install Ghostty's shell
@@ -1051,7 +1013,11 @@ pub fn free(terminal_: Terminal) callconv(lib.calling_conv) void {
     wrapper.tracked_grid_refs.deinit(alloc);
     wrapper.stream.deinit();
     t.deinit(alloc);
-    wrapper.io_impl.deinit();
+    if (builtin.os.tag != .freestanding) {
+        // Deinit is always safe to call, even for single-threaded instances
+        wrapper.io_impl.deinit();
+        alloc.destroy(wrapper.io_impl);
+    }
     alloc.destroy(t);
     alloc.destroy(wrapper);
 }
