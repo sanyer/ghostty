@@ -31,7 +31,7 @@ pub const xev = @import("xev").Dynamic;
 /// Global process state. This is initialized in main() for exe artifacts and
 /// by ghostty_init() for lib artifacts. Most other methods in this file will
 /// retrieve items stored in this state.
-var state: ?GlobalState = undefined;
+var state: ?GlobalState = null;
 
 pub const InitOpts = union(enum) {
     main: std.process.Init.Minimal,
