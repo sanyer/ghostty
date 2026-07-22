@@ -1593,7 +1593,10 @@ pub const Surface = extern struct {
     pub fn defaultTermioEnv(self: *Self) !std.process.Environ.Map {
         const app = Application.default();
         const alloc = app.allocator();
-        var env = try global.environMap();
+        var env = if (internal_os.isFlatpak())
+            std.process.Environ.Map.init(alloc)
+        else
+            try global.environMap();
         errdefer env.deinit();
 
         if (app.savedLanguage()) |language| {

@@ -1196,7 +1196,11 @@ const Subprocess = struct {
             // The gist is that it lets us detect when children
             // are still alive without blocking so that we can
             // kill them again.
-            const res_pid = posix.system.waitpid(pid, null, std.c.W.NOHANG);
+            const res_pid = while (true) {
+                const rc = posix.system.waitpid(pid, null, std.c.W.NOHANG);
+                if (posix.errno(rc) == .INTR) continue;
+                break rc;
+            };
             log.debug("waitpid result={}", .{res_pid});
             if (res_pid != 0) break;
             try std.Io.sleep(global.io(), .fromMilliseconds(10), .awake);

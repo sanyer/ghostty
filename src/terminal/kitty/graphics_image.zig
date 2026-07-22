@@ -150,7 +150,7 @@ pub const LoadingImage = struct {
         const path = switch (t.medium) {
             .direct => unreachable, // handled above
             .file, .temporary_file => path: {
-                const len = std.Io.Dir.realPathFileAbsolute(
+                const len = std.Io.Dir.cwd().realPathFile(
                     io,
                     cmd.data,
                     &abs_buf,
@@ -364,7 +364,7 @@ pub const LoadingImage = struct {
         // The temporary dir is sometimes a symlink. On macOS for
         // example /tmp is /private/var/...
         var buf: [std.fs.max_path_bytes]u8 = undefined;
-        const real_dir = buf[0 .. std.Io.Dir.realPathFileAbsolute(
+        const real_dir = buf[0 .. std.Io.Dir.cwd().realPathFile(
             io,
             dir,
             &buf,
@@ -910,6 +910,46 @@ test "image load: rgb, not compressed, regular file" {
     defer img.deinit(alloc);
     try testing.expect(img.compression == .none);
     try tmp_dir.dir.access(testing.io, path, .{});
+}
+
+test "image load: rgb, not compressed, relative regular file" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const io = testing.io;
+
+    var tmp_dir = testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    const data = @embedFile("testdata/image-rgb-none-20x15-2147483647-raw.data");
+    try tmp_dir.dir.writeFile(testing.io, .{
+        .sub_path = "image.data",
+        .data = data,
+    });
+
+    var cmd: command.Command = .{
+        .control = .{ .transmit = .{
+            .format = .rgb,
+            .medium = .file,
+            .compression = .none,
+            .width = 20,
+            .height = 15,
+            .image_id = 31,
+        } },
+        .data = try std.fmt.allocPrint(
+            alloc,
+            ".zig-cache/tmp/{s}/image.data",
+            .{tmp_dir.sub_path},
+        ),
+    };
+    defer cmd.deinit(alloc);
+    var loading = try LoadingImage.init(io, alloc, &cmd, .{
+        .file = true,
+        .temporary_file = .disabled,
+        .shared_memory = false,
+    });
+    defer loading.deinit(alloc);
+    var img = try loading.complete(alloc);
+    defer img.deinit(alloc);
+    try testing.expect(img.compression == .none);
 }
 
 test "image load: png, not compressed, regular file" {

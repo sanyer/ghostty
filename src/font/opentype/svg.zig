@@ -34,6 +34,7 @@ pub const SVG = struct {
         const offset = try compat_reader.readerInt(&reader, u32, .big);
 
         // Seek to the offset to get our document list
+        if (offset > data.len) return error.EndOfStream;
         reader.seek = offset;
 
         // Get our document records along with the start/end glyph range.
@@ -107,4 +108,14 @@ test "SVG" {
     try testing.expectEqual(11482, svg.start_glyph_id);
     try testing.expectEqual(11482, svg.end_glyph_id);
     try testing.expect(svg.hasGlyph(11482));
+}
+
+test "SVG document list offset past end" {
+    const testing = std.testing;
+    const table = [_]u8{
+        0, 0, // Version
+        0, 0, 0, 7, // Document list offset, one byte past end
+    };
+
+    try testing.expectError(error.EndOfStream, SVG.init(&table));
 }

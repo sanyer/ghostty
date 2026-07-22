@@ -4,27 +4,53 @@ const builtin = @import("builtin");
 const std = @import("std");
 const global = @import("../../global.zig");
 
-pub const ReadToEndAllocError = error{ FileTooBig, BytesReadMismatch } ||
-    std.Io.File.StatError ||
+pub const ReadToEndAllocError = error{FileTooBig} ||
     std.Io.File.ReadStreamingError ||
     std.mem.Allocator.Error;
 
-/// This is a much simpler `readToEndAlloc` that just pre-allocates the memory
-/// for the file ahead of time, and errors out if the size is larger than
-/// `max_bytes`.
+/// Read the file from its current position through end-of-stream, returning
+/// `error.FileTooBig` if the result exceeds `max_bytes`.
 ///
 /// Caller owns the memory.
 pub fn readToEndAlloc(file: std.Io.File, alloc: std.mem.Allocator, max_bytes: usize) ReadToEndAllocError![]u8 {
-    const size = (try file.stat(global.io())).size;
-    if (size > max_bytes) {
-        return error.FileTooBig;
+    var read_buf: [4096]u8 = undefined;
+    var result: std.ArrayList(u8) = .empty;
+    defer result.deinit(alloc);
+
+    while (true) {
+        const n = file.readStreaming(global.io(), &.{&read_buf}) catch |err| switch (err) {
+            error.EndOfStream => break,
+            else => |e| return e,
+        };
+        if (n == 0) continue;
+        if (n > max_bytes - result.items.len) return error.FileTooBig;
+        try result.appendSlice(alloc, read_buf[0..n]);
     }
 
-    const buf = try alloc.alloc(u8, size);
-    errdefer alloc.free(buf);
-    if (try file.readStreaming(global.io(), &.{buf}) != size) {
-        return error.BytesReadMismatch;
-    }
+    return result.toOwnedSlice(alloc);
+}
 
-    return buf;
+test "readToEndAlloc reads through EOF and permits exact limit" {
+    const testing = std.testing;
+    const contents = "hello, world";
+
+    var tmp_dir = testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    try tmp_dir.dir.writeFile(testing.io, .{
+        .sub_path = "data",
+        .data = contents,
+    });
+
+    const file = try tmp_dir.dir.openFile(testing.io, "data", .{});
+    defer file.close(testing.io);
+    const result = try readToEndAlloc(file, testing.allocator, contents.len);
+    defer testing.allocator.free(result);
+    try testing.expectEqualStrings(contents, result);
+
+    const too_big_file = try tmp_dir.dir.openFile(testing.io, "data", .{});
+    defer too_big_file.close(testing.io);
+    try testing.expectError(
+        error.FileTooBig,
+        readToEndAlloc(too_big_file, testing.allocator, contents.len - 1),
+    );
 }

@@ -236,12 +236,12 @@ fn startPosix(self: *Command, arena: Allocator) !void {
         var path_expanded_buf: [std.fs.max_path_bytes]u8 = undefined;
         const PATH = global.environ().getPosix("PATH") orelse "/usr/local/bin:/bin/:/usr/bin";
         var it = std.mem.tokenizeScalar(u8, PATH, ':');
-        var err: posix.system.E = undefined;
+        var err: posix.system.E = .NOENT;
         var seen_eacces = false;
 
         while (it.next()) |search_path| {
             const path_len = search_path.len + file_slice.len + 1;
-            if (path_expanded_buf.len < path_len + 1) return error.NameTooLong;
+            if (path_expanded_buf.len < path_len + 1) break :execve .NAMETOOLONG;
             @memcpy(path_expanded_buf[0..search_path.len], search_path);
             path_expanded_buf[search_path.len] = '/';
             @memcpy(path_expanded_buf[search_path.len + 1 ..][0..file_slice.len], file_slice);

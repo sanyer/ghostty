@@ -658,9 +658,11 @@ fn processOutputLocked(self: *Termio, buf: []const u8) void {
     // HEAVY read load, we don't want to send a ton of these so we
     // use a timer under the covers
     const now = std.Io.Timestamp.now(global.io(), .awake);
-    if (self.last_cursor_reset) |last| cursor_reset: {
-        if (last.durationTo(now).toMilliseconds() <= 500) {
-            break :cursor_reset;
+    cursor_reset: {
+        if (self.last_cursor_reset) |last| {
+            if (last.durationTo(now).toMilliseconds() <= 500) {
+                break :cursor_reset;
+            }
         }
 
         self.last_cursor_reset = now;

@@ -3816,18 +3816,23 @@ pub fn resize(
         // we just go back to the primary screen. Not great, but best
         // we can do.
         tw.check(.alternate_screen_init) catch break :alt;
-        const replacement = self.screens.getInit(alt.io, alloc, .alternate, .{
-            .cols = opts.cols,
-            .rows = opts.rows,
-            .max_scrollback = 0,
-            .kitty_image_storage_limit = if (comptime build_options.kitty_graphics)
-                primary.kitty_images.total_limit
-            else
-                0,
-            .kitty_image_loading_limits = if (comptime build_options.kitty_graphics)
-                primary.kitty_images.image_limits
-            else {},
-        }) catch |init_err| {
+        const replacement = self.screens.getInit(
+            self.io(),
+            alloc,
+            .alternate,
+            .{
+                .cols = opts.cols,
+                .rows = opts.rows,
+                .max_scrollback = 0,
+                .kitty_image_storage_limit = if (comptime build_options.kitty_graphics)
+                    primary.kitty_images.total_limit
+                else
+                    0,
+                .kitty_image_loading_limits = if (comptime build_options.kitty_graphics)
+                    primary.kitty_images.image_limits
+                else {},
+            },
+        ) catch |init_err| {
             log.warn(
                 "alternate screen replacement failed, falling back to primary err={}",
                 .{init_err},
