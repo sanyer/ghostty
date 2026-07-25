@@ -139,9 +139,9 @@
   },
   {
     "type": "archive",
-    "url": "https://deps.files.ghostty.org/translate_c-a916baf225a3cfc93a982225462db612604ae290.tar.gz",
-    "dest": "vendor/p/translate_c-0.0.0-Q_BUWj8_BwCr4na219OimiKKj4IVSq0aKtMXCQmIk4AB",
-    "sha256": "4fd2a2b21dbc49c22bea6854a59a7568dc77183760531ace3cf8da1267696afd"
+    "url": "https://codeberg.org/vancluever/translate-c/archive/80f8b6e4f45a303268717d8e5f4f91d7837138bb.tar.gz",
+    "dest": "vendor/p/translate_c-0.0.0-Q_BUWmU6BwB_9JKG2l2W7i_mhmYWeRseTGBEHi_YlV5f",
+    "sha256": "38c9e59d58f36e3481f6fa38f11fe59c63c12492fccf399ca56f3dfcce17b53e"
   },
   {
     "type": "archive",
