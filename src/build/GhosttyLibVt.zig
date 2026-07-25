@@ -247,6 +247,14 @@ fn initLib(
         // Zig's ubsan emits /exclude-symbols linker directives that
         // are incompatible with the MSVC linker (LNK4229).
         lib.bundle_ubsan_rt = false;
+
+        if (kind == .static) {
+            // compiler_rt expects ntdll to provide _fltused when libc is
+            // linked, and the Zig standard library uses other NT and kernel32
+            // symbols.
+            lib.root_module.linkSystemLibrary("ntdll", .{});
+            lib.root_module.linkSystemLibrary("kernel32", .{});
+        }
     }
 
     if (lib.rootModuleTarget().abi.isAndroid()) {
