@@ -16,7 +16,7 @@ const log = std.log.scoped(.winproto_wayland_hotkeys);
 
 alloc: Allocator,
 app_id: [:0]const u8,
-entries: std.ArrayListUnmanaged(*Entry) = .empty,
+entries: std.ArrayList(*Entry) = .empty,
 
 const Entry = struct {
     /// Null once the binding was denied or revoked.
@@ -142,7 +142,7 @@ fn hotkeyListener(
         .denied => |v| {
             log.warn("hotkey denied action={f} reason={} message={s}", .{
                 entry.action,
-                @intFromEnum(v.reason),
+                v.reason,
                 v.message,
             });
             entry.fail(v.message, false);
@@ -151,7 +151,7 @@ fn hotkeyListener(
         .revoked => |v| {
             log.warn("hotkey revoked action={f} reason={} message={s}", .{
                 entry.action,
-                @intFromEnum(v.reason),
+                v.reason,
                 v.message,
             });
             entry.fail(v.message, true);
