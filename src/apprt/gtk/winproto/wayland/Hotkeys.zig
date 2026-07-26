@@ -16,6 +16,9 @@ const log = std.log.scoped(.winproto_wayland_hotkeys);
 
 alloc: Allocator,
 app_id: [:0]const u8,
+
+/// Entries must have stable addresses: the hotkey listeners point to them.
+arena: std.heap.ArenaAllocator,
 entries: std.ArrayList(*Entry) = .empty,
 
 const Entry = struct {
@@ -42,6 +45,7 @@ pub fn init(alloc: Allocator, app_id: [:0]const u8) Allocator.Error!Hotkeys {
     return .{
         .alloc = alloc,
         .app_id = try alloc.dupeZ(u8, app_id),
+        .arena = .init(alloc),
     };
 }
 
@@ -49,17 +53,17 @@ pub fn init(alloc: Allocator, app_id: [:0]const u8) Allocator.Error!Hotkeys {
 /// called after deinit during application teardown.
 pub fn deinit(self: *Hotkeys) void {
     self.clear();
-    self.entries.deinit(self.alloc);
-    self.entries = .empty;
+    self.arena.deinit();
+    self.arena = .init(self.alloc);
     self.alloc.free(self.app_id);
 }
 
 pub fn clear(self: *Hotkeys) void {
     for (self.entries.items) |entry| {
         if (entry.hotkey) |hotkey| hotkey.destroy();
-        self.alloc.destroy(entry);
     }
-    self.entries.clearRetainingCapacity();
+    _ = self.arena.reset(.retain_capacity);
+    self.entries = .empty;
 }
 
 pub fn bind(
@@ -104,8 +108,8 @@ fn bindOne(
     var desc_buf: [256]u8 = undefined;
     const description = std.fmt.bufPrintZ(&desc_buf, "{f}", .{action}) catch "";
 
-    const entry = try self.alloc.create(Entry);
-    errdefer self.alloc.destroy(entry);
+    const alloc = self.arena.allocator();
+    const entry = try alloc.create(Entry);
 
     const hotkey = try manager.bind(
         keysym,
@@ -128,7 +132,7 @@ fn bindOne(
         .shortcuts = shortcuts,
     };
     hotkey.setListener(*Entry, hotkeyListener, entry);
-    try self.entries.append(self.alloc, entry);
+    try self.entries.append(alloc, entry);
 }
 
 fn hotkeyListener(
