@@ -12,8 +12,6 @@ const lib = @This();
 const std = @import("std");
 const builtin = @import("builtin");
 
-var msvc_fltused: c_int = 1;
-
 // The public API below reproduces a lot of terminal/main.zig but
 // is separate because (1) we need our root file to be in `src/`
 // so we can access other directories and (2) we may want to withhold
@@ -143,6 +141,9 @@ pub const unicode = struct {
     pub const graphemeWidth = unicode_pkg.graphemeWidth;
 };
 
+/// Used for MSVC builds (see below)
+var msvc_fltused: c_int = 1;
+
 comptime {
     // If we're building the C library (vs. the Zig module) then
     // we want to reference the C API so that it gets exported.
@@ -153,7 +154,10 @@ comptime {
             builtin.abi == .msvc and
             builtin.link_mode == .static)
         {
-            @export(&msvc_fltused, .{ .name = "_fltused" });
+            @export(
+                &msvc_fltused,
+                .{ .name = "_fltused" },
+            );
         }
 
         // Force-reference our memset override so its export is
