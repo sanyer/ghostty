@@ -293,12 +293,11 @@ pub fn init(
     opts: Options,
 ) Allocator.Error!Screen {
     // Initialize our backing pages.
-    var pages = try PageList.init(
-        alloc,
-        opts.cols,
-        opts.rows,
-        opts.max_scrollback,
-    );
+    var pages = try PageList.init(alloc, .{
+        .cols = opts.cols,
+        .rows = opts.rows,
+        .max_size = opts.max_scrollback,
+    });
     errdefer pages.deinit();
 
     // Create our tracked pin for the cursor.
