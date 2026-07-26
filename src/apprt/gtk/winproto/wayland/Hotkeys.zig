@@ -106,7 +106,6 @@ fn bindOne(
 
     const entry = try self.alloc.create(Entry);
     errdefer self.alloc.destroy(entry);
-    try self.entries.ensureUnusedCapacity(self.alloc, 1);
 
     const hotkey = try manager.bind(
         keysym,
@@ -120,6 +119,7 @@ fn bindOne(
         self.app_id.ptr,
         description.ptr,
     );
+    errdefer hotkey.destroy();
 
     entry.* = .{
         .hotkey = hotkey,
@@ -128,7 +128,7 @@ fn bindOne(
         .shortcuts = shortcuts,
     };
     hotkey.setListener(*Entry, hotkeyListener, entry);
-    self.entries.appendAssumeCapacity(entry);
+    try self.entries.append(self.alloc, entry);
 }
 
 fn hotkeyListener(
