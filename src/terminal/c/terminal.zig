@@ -365,7 +365,7 @@ fn new_(
         .{
             .cols = opts.cols,
             .rows = opts.rows,
-            .max_scrollback = opts.max_scrollback,
+            .max_scrollback_bytes = opts.max_scrollback,
         },
     );
     errdefer t.deinit(alloc);

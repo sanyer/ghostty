@@ -2239,7 +2239,7 @@ test "stream: CSI W with intermediate but no params" {
     var t: Terminal = try .init(testing.io, testing.allocator, .{
         .cols = 80,
         .rows = 24,
-        .max_scrollback = 100,
+        .max_scrollback_bytes = 100,
     });
     defer t.deinit(testing.allocator);
 
