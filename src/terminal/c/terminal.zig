@@ -6,6 +6,7 @@ const lib = @import("../lib.zig");
 const CAllocator = lib.alloc.Allocator;
 pub const ZigTerminal = @import("../Terminal.zig");
 const Action = @import("../stream.zig").Action;
+const osc = @import("../osc.zig");
 const Stream = @import("../stream_terminal.zig").Stream;
 const Screen = @import("../Screen.zig");
 const ScreenSet = @import("../ScreenSet.zig");
@@ -91,6 +92,26 @@ pub const DesktopNotification = extern struct {
     body: lib.String,
 };
 
+/// State of a terminal progress report.
+///
+/// C: GhosttyTerminalProgressState
+pub const ProgressState = enum(c_int) {
+    remove = 0,
+    set = 1,
+    @"error" = 2,
+    indeterminate = 3,
+    pause = 4,
+};
+
+/// A progress report emitted by the running program.
+///
+/// C: GhosttyTerminalProgressReport
+pub const ProgressReport = extern struct {
+    size: usize,
+    state: ProgressState,
+    progress: i8,
+};
+
 /// C callback state for terminal effects. Trampolines are always
 /// installed on the stream handler; they check these fields and
 /// no-op when the corresponding callback is null.
@@ -105,6 +126,7 @@ const Effects = struct {
     xtversion: ?XtversionFn = null,
     title_changed: ?TitleChangedFn = null,
     pwd_changed: ?PwdChangedFn = null,
+    progress_report: ?ProgressReportFn = null,
     size_cb: ?SizeFn = null,
     clipboard_write: ?ClipboardWriteFn = null,
 
@@ -150,6 +172,9 @@ const Effects = struct {
 
     /// C function pointer type for the pwd_changed callback.
     pub const PwdChangedFn = *const fn (Terminal, ?*anyopaque) callconv(lib.calling_conv) void;
+
+    /// C function pointer type for the progress_report callback.
+    pub const ProgressReportFn = *const fn (Terminal, ?*anyopaque, *const ProgressReport) callconv(lib.calling_conv) void;
 
     /// C function pointer type for the size callback.
     /// Returns true and fills out_size if size is available,
@@ -320,6 +345,20 @@ const Effects = struct {
         func(@ptrCast(wrapper), wrapper.effects.userdata);
     }
 
+    fn progressReportTrampoline(
+        handler: *Handler,
+        report: osc.Command.ProgressReport,
+    ) void {
+        const wrapper = TerminalWrapper.fromHandler(handler);
+        const func = wrapper.effects.progress_report orelse return;
+        const c_report: ProgressReport = .{
+            .size = @sizeOf(ProgressReport),
+            .state = @enumFromInt(@intFromEnum(report.state)),
+            .progress = if (report.progress) |value| @intCast(value) else -1,
+        };
+        func(@ptrCast(wrapper), wrapper.effects.userdata, &c_report);
+    }
+
     fn sizeTrampoline(handler: *Handler) ?size_report.Size {
         const wrapper = TerminalWrapper.fromHandler(handler);
         const func = wrapper.effects.size_cb orelse return null;
@@ -417,6 +456,7 @@ fn new_(
         .xtversion = &Effects.xtversionTrampoline,
         .title_changed = &Effects.titleChangedTrampoline,
         .pwd_changed = &Effects.pwdChangedTrampoline,
+        .progress_report = &Effects.progressReportTrampoline,
         .size = &Effects.sizeTrampoline,
         .clipboard_write = &Effects.clipboardWriteTrampoline,
     };
@@ -494,6 +534,7 @@ pub const Option = enum(c_int) {
     scrollback_max_bytes = 27,
     scrollback_max_lines = 28,
     desktop_notification = 29,
+    progress_report = 30,
 
     /// Input type expected for setting the option.
     pub fn InType(comptime self: Option) type {
@@ -508,6 +549,7 @@ pub const Option = enum(c_int) {
             .xtversion => ?Effects.XtversionFn,
             .title_changed => ?Effects.TitleChangedFn,
             .pwd_changed => ?Effects.PwdChangedFn,
+            .progress_report => ?Effects.ProgressReportFn,
             .size_cb => ?Effects.SizeFn,
             .clipboard_write => ?Effects.ClipboardWriteFn,
             .title, .pwd => ?*const lib.String,
@@ -570,6 +612,7 @@ fn setTyped(
         .xtversion => wrapper.effects.xtversion = value,
         .title_changed => wrapper.effects.title_changed = value,
         .pwd_changed => wrapper.effects.pwd_changed = value,
+        .progress_report => wrapper.effects.progress_report = value,
         .size_cb => wrapper.effects.size_cb = value,
         .clipboard_write => wrapper.effects.clipboard_write = value,
         .title => {
@@ -2955,6 +2998,82 @@ test "set desktop_notification callback" {
     try testing.expectEqual(Result.success, set(t, .desktop_notification, null));
     vt_write(t, seq_c, seq_c.len);
     try testing.expectEqual(@as(usize, 2), S.count);
+}
+
+test "set progress_report callback" {
+    var t: Terminal = null;
+    try testing.expectEqual(Result.success, new(
+        &lib.alloc.test_allocator,
+        &t,
+        .{
+            .cols = 80,
+            .rows = 24,
+            .max_scrollback = 0,
+        },
+    ));
+    defer free(t);
+
+    const S = struct {
+        var count: usize = 0;
+        var last_userdata: ?*anyopaque = null;
+        var last_size: usize = 0;
+        var last_state: ProgressState = .remove;
+        var last_progress: i8 = -1;
+
+        fn progressReport(
+            _: Terminal,
+            ud: ?*anyopaque,
+            report: *const ProgressReport,
+        ) callconv(lib.calling_conv) void {
+            count += 1;
+            last_userdata = ud;
+            last_size = report.size;
+            last_state = report.state;
+            last_progress = report.progress;
+        }
+    };
+    S.count = 0;
+    S.last_userdata = null;
+    S.last_size = 0;
+    S.last_state = .remove;
+    S.last_progress = -1;
+
+    var sentinel: u8 = 100;
+    try testing.expectEqual(Result.success, set(t, .userdata, @ptrCast(&sentinel)));
+    try testing.expectEqual(Result.success, set(
+        t,
+        .progress_report,
+        @ptrCast(&S.progressReport),
+    ));
+
+    const cases = [_]struct {
+        sequence: []const u8,
+        state: ProgressState,
+        progress: i8,
+    }{
+        .{ .sequence = "\x1B]9;4;0;\x1B\\", .state = .remove, .progress = -1 },
+        .{ .sequence = "\x1B]9;4;1;42\x07", .state = .set, .progress = 42 },
+        .{ .sequence = "\x1B]9;4;2;7\x1B\\", .state = .@"error", .progress = 7 },
+        .{ .sequence = "\x1B]9;4;3\x1B\\", .state = .indeterminate, .progress = -1 },
+        .{ .sequence = "\x1B]9;4;4;75\x1B\\", .state = .pause, .progress = 75 },
+    };
+
+    for (cases, 1..) |case, expected_count| {
+        const midpoint = case.sequence.len / 2;
+        vt_write(t, case.sequence.ptr, midpoint);
+        try testing.expectEqual(expected_count - 1, S.count);
+        vt_write(t, case.sequence.ptr + midpoint, case.sequence.len - midpoint);
+        try testing.expectEqual(expected_count, S.count);
+        try testing.expectEqual(@as(?*anyopaque, @ptrCast(&sentinel)), S.last_userdata);
+        try testing.expectEqual(@sizeOf(ProgressReport), S.last_size);
+        try testing.expectEqual(case.state, S.last_state);
+        try testing.expectEqual(case.progress, S.last_progress);
+    }
+
+    try testing.expectEqual(Result.success, set(t, .progress_report, null));
+    const ignored = "\x1B]9;4;1;90\x1B\\";
+    vt_write(t, ignored, ignored.len);
+    try testing.expectEqual(@as(usize, cases.len), S.count);
 }
 
 test "set pwd_changed callback" {

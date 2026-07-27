@@ -109,6 +109,9 @@ pub const Handler = struct {
         /// handler.terminal.getPwd().
         pwd_changed: ?*const fn (*Handler) void,
 
+        /// Called when the running program reports progress via OSC 9;4.
+        progress_report: ?*const fn (*Handler, osc.Command.ProgressReport) void,
+
         /// Called when the running program writes to a clipboard. The write
         /// has a normalized destination and one or more decoded MIME
         /// representations. All request, MIME, and data memory is borrowed
@@ -139,6 +142,7 @@ pub const Handler = struct {
             .desktop_notification = null,
             .device_attributes = null,
             .enquiry = null,
+            .progress_report = null,
             .size = null,
             .title_changed = null,
             .pwd_changed = null,
@@ -330,6 +334,7 @@ pub const Handler = struct {
             .size_report => self.reportSize(value),
             .window_title => try self.windowTitle(value.title),
             .report_pwd => try self.reportPwd(value.url),
+            .progress_report => self.progressReport(value),
             .xtversion => self.reportXtversion(),
             .clipboard_contents => self.clipboardContents(
                 value.kind,
@@ -344,7 +349,6 @@ pub const Handler = struct {
             .dcs_unhook => try self.dcsUnhook(),
 
             // Have no terminal-modifying effect
-            .progress_report,
             .title_push,
             .title_pop,
             => {},
@@ -408,6 +412,11 @@ pub const Handler = struct {
     ) void {
         const func = self.effects.desktop_notification orelse return;
         func(self, notification);
+    }
+
+    fn progressReport(self: *Handler, report: osc.Command.ProgressReport) void {
+        const func = self.effects.progress_report orelse return;
+        func(self, report);
     }
 
     fn clipboardContents(self: *Handler, kind: u8, data: []const u8) !void {
@@ -2104,6 +2113,62 @@ test "desktop_notification effect callback" {
     try testing.expectEqual(@as(usize, 2), S.count);
     try testing.expectEqualStrings("Codex", S.last_title);
     try testing.expectEqualStrings("Needs attention", S.last_body);
+}
+
+test "progress_report effect callback" {
+    var t: Terminal = try .init(testing.io, testing.allocator, .{ .cols = 80, .rows = 24 });
+    defer t.deinit(testing.allocator);
+
+    // A null callback (the default readonly effects) silently ignores reports.
+    {
+        var s: Stream = .initAlloc(testing.allocator, .init(&t));
+        defer s.deinit();
+        s.nextSlice("\x1B]9;4;1;25\x1B\\");
+    }
+
+    const S = struct {
+        var count: usize = 0;
+        var last_state: osc.Command.ProgressReport.State = .remove;
+        var last_progress: ?u8 = null;
+
+        fn progressReport(_: *Handler, report: osc.Command.ProgressReport) void {
+            count += 1;
+            last_state = report.state;
+            last_progress = report.progress;
+        }
+    };
+    S.count = 0;
+    S.last_state = .remove;
+    S.last_progress = null;
+
+    var handler: Handler = .init(&t);
+    handler.effects.progress_report = &S.progressReport;
+
+    var s: Stream = .initAlloc(testing.allocator, handler);
+    defer s.deinit();
+
+    const cases = [_]struct {
+        sequence: []const u8,
+        state: osc.Command.ProgressReport.State,
+        progress: ?u8,
+    }{
+        .{ .sequence = "\x1B]9;4;0;\x1B\\", .state = .remove, .progress = null },
+        .{ .sequence = "\x1B]9;4;1;42\x07", .state = .set, .progress = 42 },
+        .{ .sequence = "\x1B]9;4;2;7\x1B\\", .state = .@"error", .progress = 7 },
+        .{ .sequence = "\x1B]9;4;3\x1B\\", .state = .indeterminate, .progress = null },
+        .{ .sequence = "\x1B]9;4;4;75\x1B\\", .state = .pause, .progress = 75 },
+    };
+
+    for (cases, 1..) |case, expected_count| {
+        // Split each sequence to verify parsing survives PTY read boundaries.
+        const midpoint = case.sequence.len / 2;
+        s.nextSlice(case.sequence[0..midpoint]);
+        try testing.expectEqual(expected_count - 1, S.count);
+        s.nextSlice(case.sequence[midpoint..]);
+        try testing.expectEqual(expected_count, S.count);
+        try testing.expectEqual(case.state, S.last_state);
+        try testing.expectEqual(case.progress, S.last_progress);
+    }
 }
 
 test "clipboard_write effect callback" {
