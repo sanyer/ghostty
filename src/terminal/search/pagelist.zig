@@ -381,7 +381,7 @@ test "compressed history match spanning page boundary remains compressed" {
     var t: Terminal = try .init(io, alloc, .{
         .cols = 80,
         .rows = 24,
-        .max_scrollback = 10 * 1024 * 1024,
+        .max_scrollback_bytes = 10 * 1024 * 1024,
     });
     defer t.deinit(alloc);
 

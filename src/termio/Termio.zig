@@ -246,7 +246,7 @@ pub fn init(self: *Termio, alloc: Allocator, opts: termio.Options) !void {
         break :opts .{
             .cols = grid_size.columns,
             .rows = grid_size.rows,
-            .max_scrollback = opts.full_config.@"scrollback-limit",
+            .max_scrollback_bytes = opts.full_config.@"scrollback-limit",
             .default_modes = default_modes,
             .default_cursor_style = opts.config.cursor_style,
             .default_cursor_blink = opts.config.cursor_blink,
