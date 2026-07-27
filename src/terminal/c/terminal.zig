@@ -307,13 +307,6 @@ pub fn zigTerminal(terminal_: Terminal) ?*ZigTerminal {
     return (terminal_ orelse return null).terminal;
 }
 
-/// C: GhosttyTerminalOptions
-pub const Options = extern struct {
-    cols: size.CellCountInt,
-    rows: size.CellCountInt,
-    max_scrollback: usize,
-};
-
 const NewError = error{
     InvalidValue,
     OutOfMemory,
@@ -322,9 +315,10 @@ const NewError = error{
 pub fn new(
     alloc_: ?*const CAllocator,
     result: *Terminal,
-    opts: Options,
+    cols: size.CellCountInt,
+    rows: size.CellCountInt,
 ) callconv(lib.calling_conv) Result {
-    result.* = new_(alloc_, opts) catch |err| {
+    result.* = new_(alloc_, cols, rows) catch |err| {
         result.* = null;
         return switch (err) {
             error.InvalidValue => .invalid_value,
@@ -337,9 +331,10 @@ pub fn new(
 
 fn new_(
     alloc_: ?*const CAllocator,
-    opts: Options,
+    cols: size.CellCountInt,
+    rows: size.CellCountInt,
 ) NewError!*TerminalWrapper {
-    if (opts.cols == 0 or opts.rows == 0) return error.InvalidValue;
+    if (cols == 0 or rows == 0) return error.InvalidValue;
 
     const alloc = lib.alloc.default(alloc_);
     const t = alloc.create(ZigTerminal) catch
@@ -363,9 +358,8 @@ fn new_(
         if (has_nonfailing_io) io_impl.io() else std.Io.failing,
         alloc,
         .{
-            .cols = opts.cols,
-            .rows = opts.rows,
-            .max_scrollback_bytes = opts.max_scrollback,
+            .cols = cols,
+            .rows = rows,
         },
     );
     errdefer t.deinit(alloc);
@@ -461,6 +455,8 @@ pub const Option = enum(c_int) {
     glyph_protocol = 24,
     pwd_changed = 25,
     clipboard_write = 26,
+    scrollback_max_bytes = 27,
+    scrollback_max_lines = 28,
 
     /// Input type expected for setting the option.
     pub fn InType(comptime self: Option) type {
@@ -485,7 +481,11 @@ pub const Option = enum(c_int) {
             .glyph_protocol,
             => ?*const bool,
             .kitty_image_medium_temp_file => ?*const lib.String,
-            .apc_max_bytes, .apc_max_bytes_kitty => ?*const usize,
+            .apc_max_bytes,
+            .apc_max_bytes_kitty,
+            .scrollback_max_bytes,
+            .scrollback_max_lines,
+            => ?*const usize,
             .selection => ?*const selection_c.CSelection,
             .default_cursor_style => ?*const TerminalCursorStyle,
             .default_cursor_blink => ?*const bool,
@@ -637,6 +637,12 @@ fn setTyped(
             const blink = if (value) |ptr| ptr.* else false;
             wrapper.terminal.setDefaultCursorBlink(blink);
         },
+        .scrollback_max_bytes => wrapper.terminal.setScrollbackMaxBytes(
+            if (value) |ptr| ptr.* else null,
+        ),
+        .scrollback_max_lines => wrapper.terminal.setScrollbackMaxLines(
+            if (value) |ptr| ptr.* else null,
+        ),
     }
     return .success;
 }
@@ -776,6 +782,8 @@ pub const TerminalData = enum(c_int) {
     selection = 31,
     viewport_active = 32,
     vt_processing_error = 33,
+    scrollback_max_bytes = 34,
+    scrollback_max_lines = 35,
 
     /// Output type expected for querying the data of the given kind.
     pub fn OutType(comptime self: TerminalData) type {
@@ -793,7 +801,11 @@ pub const TerminalData = enum(c_int) {
             .scrollbar => TerminalScrollbar,
             .cursor_style => style_c.Style,
             .title, .pwd => lib.String,
-            .total_rows, .scrollback_rows => usize,
+            .total_rows,
+            .scrollback_rows,
+            .scrollback_max_bytes,
+            .scrollback_max_lines,
+            => usize,
             .width_px, .height_px => u32,
             .color_foreground,
             .color_background,
@@ -929,6 +941,16 @@ fn getTyped(
         ),
         .viewport_active => out.* = t.screens.active.pages.viewport == .active,
         .vt_processing_error => out.* = wrapper.stream.handler.semantic_failure,
+        .scrollback_max_bytes => {
+            const max = t.screens.get(.primary).?.pages.limits.bytes.explicit;
+            if (max == std.math.maxInt(usize)) return .no_value;
+            out.* = max;
+        },
+        .scrollback_max_lines => {
+            const max = t.screens.get(.primary).?.pages.limits.lines.explicit;
+            if (max == std.math.maxInt(usize)) return .no_value;
+            out.* = max;
+        },
     }
 
     return .success;
@@ -1027,11 +1049,8 @@ test "new/free" {
     try testing.expectEqual(Result.success, new(
         &lib.alloc.test_allocator,
         &t,
-        .{
-            .cols = 80,
-            .rows = 24,
-            .max_scrollback = 10_000,
-        },
+        80,
+        24,
     ));
 
     try testing.expect(t != null);
@@ -1044,24 +1063,71 @@ test "new invalid value" {
     try testing.expectEqual(Result.invalid_value, new(
         &lib.alloc.test_allocator,
         &t,
-        .{
-            .cols = 0,
-            .rows = 24,
-            .max_scrollback = 10_000,
-        },
+        0,
+        24,
     ));
     try testing.expect(t == null);
 
     try testing.expectEqual(Result.invalid_value, new(
         &lib.alloc.test_allocator,
         &t,
-        .{
-            .cols = 80,
-            .rows = 0,
-            .max_scrollback = 10_000,
-        },
+        80,
+        0,
     ));
     try testing.expect(t == null);
+}
+
+test "set scrollback limits" {
+    var t: Terminal = null;
+    try testing.expectEqual(Result.success, new(
+        &lib.alloc.test_allocator,
+        &t,
+        80,
+        3,
+    ));
+    defer free(t);
+
+    const primary = t.?.terminal.screens.get(.primary).?;
+
+    const max_bytes: usize = 0;
+    try testing.expectEqual(
+        Result.success,
+        set(t, .scrollback_max_bytes, &max_bytes),
+    );
+    try testing.expectEqual(
+        @as(usize, 0),
+        primary.pages.limits.bytes.explicit,
+    );
+    try testing.expect(primary.no_scrollback);
+
+    try testing.expectEqual(
+        Result.success,
+        set(t, .scrollback_max_bytes, null),
+    );
+    try testing.expectEqual(
+        std.math.maxInt(usize),
+        primary.pages.limits.bytes.explicit,
+    );
+    try testing.expect(!primary.no_scrollback);
+
+    const max_lines: usize = 12;
+    try testing.expectEqual(
+        Result.success,
+        set(t, .scrollback_max_lines, &max_lines),
+    );
+    try testing.expectEqual(
+        max_lines,
+        primary.pages.limits.lines.explicit,
+    );
+
+    try testing.expectEqual(
+        Result.success,
+        set(t, .scrollback_max_lines, null),
+    );
+    try testing.expectEqual(
+        std.math.maxInt(usize),
+        primary.pages.limits.lines.explicit,
+    );
 }
 
 test "free null" {
@@ -1073,11 +1139,8 @@ test "scroll_viewport" {
     try testing.expectEqual(Result.success, new(
         &lib.alloc.test_allocator,
         &t,
-        .{
-            .cols = 5,
-            .rows = 2,
-            .max_scrollback = 10_000,
-        },
+        5,
+        2,
     ));
     defer free(t);
 
@@ -1135,11 +1198,8 @@ test "scroll_viewport row" {
     try testing.expectEqual(Result.success, new(
         &lib.alloc.test_allocator,
         &t,
-        .{
-            .cols = 5,
-            .rows = 2,
-            .max_scrollback = 10_000,
-        },
+        5,
+        2,
     ));
     defer free(t);
 
@@ -1195,11 +1255,8 @@ test "scroll_viewport row alt screen" {
     try testing.expectEqual(Result.success, new(
         &lib.alloc.test_allocator,
         &t,
-        .{
-            .cols = 5,
-            .rows = 2,
-            .max_scrollback = 10_000,
-        },
+        5,
+        2,
     ));
     defer free(t);
 
@@ -1248,11 +1305,8 @@ test "compression invalid arguments" {
     try testing.expectEqual(Result.success, new(
         &lib.alloc.test_allocator,
         &t,
-        .{
-            .cols = 80,
-            .rows = 24,
-            .max_scrollback = 10_000_000,
-        },
+        80,
+        24,
     ));
     defer free(t);
 
@@ -1275,11 +1329,8 @@ test "compression activity and incremental scheduling" {
     try testing.expectEqual(Result.success, new(
         &lib.alloc.test_allocator,
         &t,
-        .{
-            .cols = 80,
-            .rows = 24,
-            .max_scrollback = 10_000_000,
-        },
+        80,
+        24,
     ));
     defer free(t);
 
@@ -1342,11 +1393,8 @@ test "reset" {
     try testing.expectEqual(Result.success, new(
         &lib.alloc.test_allocator,
         &t,
-        .{
-            .cols = 80,
-            .rows = 24,
-            .max_scrollback = 10_000,
-        },
+        80,
+        24,
     ));
     defer free(t);
 
@@ -1367,11 +1415,8 @@ test "resize" {
     try testing.expectEqual(Result.success, new(
         &lib.alloc.test_allocator,
         &t,
-        .{
-            .cols = 80,
-            .rows = 24,
-            .max_scrollback = 10_000,
-        },
+        80,
+        24,
     ));
     defer free(t);
 
@@ -1389,11 +1434,8 @@ test "resize invalid value" {
     try testing.expectEqual(Result.success, new(
         &lib.alloc.test_allocator,
         &t,
-        .{
-            .cols = 80,
-            .rows = 24,
-            .max_scrollback = 10_000,
-        },
+        80,
+        24,
     ));
     defer free(t);
 
@@ -1406,11 +1448,8 @@ test "resize shrinks both axes with cursor at bottom" {
     try testing.expectEqual(Result.success, new(
         &lib.alloc.test_allocator,
         &t,
-        .{
-            .cols = 80,
-            .rows = 24,
-            .max_scrollback = 0,
-        },
+        80,
+        24,
     ));
     defer free(t);
 
@@ -1430,11 +1469,8 @@ test "mode_get and mode_set" {
     try testing.expectEqual(Result.success, new(
         &lib.alloc.test_allocator,
         &t,
-        .{
-            .cols = 80,
-            .rows = 24,
-            .max_scrollback = 0,
-        },
+        80,
+        24,
     ));
     defer free(t);
 
@@ -1476,11 +1512,8 @@ test "mode_get unknown mode" {
     try testing.expectEqual(Result.success, new(
         &lib.alloc.test_allocator,
         &t,
-        .{
-            .cols = 80,
-            .rows = 24,
-            .max_scrollback = 0,
-        },
+        80,
+        24,
     ));
     defer free(t);
 
@@ -1494,11 +1527,8 @@ test "mode_set unknown mode" {
     try testing.expectEqual(Result.success, new(
         &lib.alloc.test_allocator,
         &t,
-        .{
-            .cols = 80,
-            .rows = 24,
-            .max_scrollback = 0,
-        },
+        80,
+        24,
     ));
     defer free(t);
 
@@ -1511,11 +1541,8 @@ test "vt_write" {
     try testing.expectEqual(Result.success, new(
         &lib.alloc.test_allocator,
         &t,
-        .{
-            .cols = 80,
-            .rows = 24,
-            .max_scrollback = 10_000,
-        },
+        80,
+        24,
     ));
     defer free(t);
 
@@ -1531,11 +1558,8 @@ test "vt_write split escape sequence" {
     try testing.expectEqual(Result.success, new(
         &lib.alloc.test_allocator,
         &t,
-        .{
-            .cols = 80,
-            .rows = 24,
-            .max_scrollback = 10_000,
-        },
+        80,
+        24,
     ));
     defer free(t);
 
@@ -1556,11 +1580,8 @@ test "vt_write split combining mark after base at right edge" {
     try testing.expectEqual(Result.success, new(
         &lib.alloc.test_allocator,
         &t,
-        .{
-            .cols = 2,
-            .rows = 2,
-            .max_scrollback = 0,
-        },
+        2,
+        2,
     ));
     defer free(t);
 
@@ -1579,11 +1600,8 @@ test "get cols and rows" {
     try testing.expectEqual(Result.success, new(
         &lib.alloc.test_allocator,
         &t,
-        .{
-            .cols = 80,
-            .rows = 24,
-            .max_scrollback = 0,
-        },
+        80,
+        24,
     ));
     defer free(t);
 
@@ -1600,11 +1618,8 @@ test "get cursor position" {
     try testing.expectEqual(Result.success, new(
         &lib.alloc.test_allocator,
         &t,
-        .{
-            .cols = 80,
-            .rows = 24,
-            .max_scrollback = 0,
-        },
+        80,
+        24,
     ));
     defer free(t);
 
@@ -1623,11 +1638,8 @@ test "get vt_processing_error" {
     try testing.expectEqual(Result.success, new(
         &lib.alloc.test_allocator,
         &t,
-        .{
-            .cols = 80,
-            .rows = 24,
-            .max_scrollback = 0,
-        },
+        80,
+        24,
     ));
     defer free(t);
 
@@ -1676,11 +1688,8 @@ test "get cursor_visible" {
     try testing.expectEqual(Result.success, new(
         &lib.alloc.test_allocator,
         &t,
-        .{
-            .cols = 80,
-            .rows = 24,
-            .max_scrollback = 0,
-        },
+        80,
+        24,
     ));
     defer free(t);
 
@@ -1700,11 +1709,8 @@ test "get active_screen" {
     try testing.expectEqual(Result.success, new(
         &lib.alloc.test_allocator,
         &t,
-        .{
-            .cols = 80,
-            .rows = 24,
-            .max_scrollback = 0,
-        },
+        80,
+        24,
     ));
     defer free(t);
 
@@ -1718,11 +1724,8 @@ test "get kitty_keyboard_flags" {
     try testing.expectEqual(Result.success, new(
         &lib.alloc.test_allocator,
         &t,
-        .{
-            .cols = 80,
-            .rows = 24,
-            .max_scrollback = 0,
-        },
+        80,
+        24,
     ));
     defer free(t);
 
@@ -1742,11 +1745,8 @@ test "get mouse_tracking" {
     try testing.expectEqual(Result.success, new(
         &lib.alloc.test_allocator,
         &t,
-        .{
-            .cols = 80,
-            .rows = 24,
-            .max_scrollback = 0,
-        },
+        80,
+        24,
     ));
     defer free(t);
 
@@ -1792,11 +1792,8 @@ test "get total_rows" {
     try testing.expectEqual(Result.success, new(
         &lib.alloc.test_allocator,
         &t,
-        .{
-            .cols = 80,
-            .rows = 24,
-            .max_scrollback = 10_000,
-        },
+        80,
+        24,
     ));
     defer free(t);
 
@@ -1810,11 +1807,8 @@ test "get scrollback_rows" {
     try testing.expectEqual(Result.success, new(
         &lib.alloc.test_allocator,
         &t,
-        .{
-            .cols = 80,
-            .rows = 3,
-            .max_scrollback = 10_000,
-        },
+        80,
+        3,
     ));
     defer free(t);
 
@@ -1829,16 +1823,87 @@ test "get scrollback_rows" {
     try testing.expectEqual(@as(usize, 2), scrollback);
 }
 
+test "get configured scrollback limits" {
+    var t: Terminal = null;
+    try testing.expectEqual(Result.success, new(
+        &lib.alloc.test_allocator,
+        &t,
+        80,
+        3,
+    ));
+    defer free(t);
+
+    var value: usize = undefined;
+    try testing.expectEqual(
+        Result.success,
+        get(t, .scrollback_max_bytes, @ptrCast(&value)),
+    );
+    try testing.expectEqual(@as(usize, 10_000), value);
+    try testing.expectEqual(
+        Result.no_value,
+        get(t, .scrollback_max_lines, @ptrCast(&value)),
+    );
+
+    const max_bytes: usize = 0;
+    const max_lines: usize = 12;
+    try testing.expectEqual(
+        Result.success,
+        set(t, .scrollback_max_bytes, &max_bytes),
+    );
+    try testing.expectEqual(
+        Result.success,
+        set(t, .scrollback_max_lines, &max_lines),
+    );
+    try testing.expectEqual(
+        Result.success,
+        get(t, .scrollback_max_bytes, @ptrCast(&value)),
+    );
+    try testing.expectEqual(max_bytes, value);
+    try testing.expectEqual(
+        Result.success,
+        get(t, .scrollback_max_lines, @ptrCast(&value)),
+    );
+    try testing.expectEqual(max_lines, value);
+
+    // The configured limits belong to the primary screen and remain
+    // readable while an alternate screen is active.
+    vt_write(t, "\x1b[?1049h", 8);
+    try testing.expectEqual(
+        Result.success,
+        get(t, .scrollback_max_bytes, @ptrCast(&value)),
+    );
+    try testing.expectEqual(max_bytes, value);
+    try testing.expectEqual(
+        Result.success,
+        get(t, .scrollback_max_lines, @ptrCast(&value)),
+    );
+    try testing.expectEqual(max_lines, value);
+
+    try testing.expectEqual(
+        Result.success,
+        set(t, .scrollback_max_bytes, null),
+    );
+    try testing.expectEqual(
+        Result.success,
+        set(t, .scrollback_max_lines, null),
+    );
+    try testing.expectEqual(
+        Result.no_value,
+        get(t, .scrollback_max_bytes, @ptrCast(&value)),
+    );
+    try testing.expectEqual(
+        Result.no_value,
+        get(t, .scrollback_max_lines, @ptrCast(&value)),
+    );
+}
+
 test "get invalid" {
     var t: Terminal = null;
     try testing.expectEqual(Result.success, new(
         &lib.alloc.test_allocator,
         &t,
-        .{
-            .cols = 80,
-            .rows = 24,
-            .max_scrollback = 0,
-        },
+        80,
+        24,
     ));
     defer free(t);
 
@@ -1850,11 +1915,8 @@ test "set default cursor style and blink" {
     try testing.expectEqual(Result.success, new(
         &lib.alloc.test_allocator,
         &t,
-        .{
-            .cols = 80,
-            .rows = 24,
-            .max_scrollback = 0,
-        },
+        80,
+        24,
     ));
     defer free(t);
 
@@ -1895,11 +1957,8 @@ test "set and get selection" {
     try testing.expectEqual(Result.success, new(
         &lib.alloc.test_allocator,
         &t,
-        .{
-            .cols = 80,
-            .rows = 24,
-            .max_scrollback = 0,
-        },
+        80,
+        24,
     ));
     defer free(t);
 
@@ -1943,11 +2002,8 @@ test "selection derivation helpers" {
     try testing.expectEqual(Result.success, new(
         &lib.alloc.test_allocator,
         &t,
-        .{
-            .cols = 80,
-            .rows = 24,
-            .max_scrollback = 0,
-        },
+        80,
+        24,
     ));
     defer free(t);
 
@@ -2033,11 +2089,8 @@ test "selection_adjust mutates snapshot end" {
     try testing.expectEqual(Result.success, new(
         &lib.alloc.test_allocator,
         &t,
-        .{
-            .cols = 80,
-            .rows = 24,
-            .max_scrollback = 0,
-        },
+        80,
+        24,
     ));
     defer free(t);
 
@@ -2081,11 +2134,8 @@ test "selection_order and selection_ordered" {
     try testing.expectEqual(Result.success, new(
         &lib.alloc.test_allocator,
         &t,
-        .{
-            .cols = 80,
-            .rows = 24,
-            .max_scrollback = 0,
-        },
+        80,
+        24,
     ));
     defer free(t);
 
@@ -2134,11 +2184,8 @@ test "selection_contains" {
     try testing.expectEqual(Result.success, new(
         &lib.alloc.test_allocator,
         &t,
-        .{
-            .cols = 80,
-            .rows = 24,
-            .max_scrollback = 0,
-        },
+        80,
+        24,
     ));
     defer free(t);
 
@@ -2192,11 +2239,8 @@ test "selection_equal" {
     try testing.expectEqual(Result.success, new(
         &lib.alloc.test_allocator,
         &t,
-        .{
-            .cols = 80,
-            .rows = 24,
-            .max_scrollback = 0,
-        },
+        80,
+        24,
     ));
     defer free(t);
 
@@ -2204,11 +2248,8 @@ test "selection_equal" {
     try testing.expectEqual(Result.success, new(
         &lib.alloc.test_allocator,
         &other_t,
-        .{
-            .cols = 80,
-            .rows = 24,
-            .max_scrollback = 0,
-        },
+        80,
+        24,
     ));
     defer free(other_t);
 
@@ -2281,11 +2322,8 @@ test "selection_order invalid values" {
     try testing.expectEqual(Result.success, new(
         &lib.alloc.test_allocator,
         &t,
-        .{
-            .cols = 80,
-            .rows = 24,
-            .max_scrollback = 0,
-        },
+        80,
+        24,
     ));
     defer free(t);
 
@@ -2299,11 +2337,8 @@ test "grid_ref" {
     try testing.expectEqual(Result.success, new(
         &lib.alloc.test_allocator,
         &t,
-        .{
-            .cols = 80,
-            .rows = 24,
-            .max_scrollback = 0,
-        },
+        80,
+        24,
     ));
     defer free(t);
 
@@ -2337,7 +2372,8 @@ test "point_from_grid_ref roundtrip active" {
     try testing.expectEqual(Result.success, new(
         &lib.alloc.test_allocator,
         &t,
-        .{ .cols = 80, .rows = 24, .max_scrollback = 10_000 },
+        80,
+        24,
     ));
     defer free(t);
 
@@ -2362,7 +2398,8 @@ test "point_from_grid_ref roundtrip viewport" {
     try testing.expectEqual(Result.success, new(
         &lib.alloc.test_allocator,
         &t,
-        .{ .cols = 80, .rows = 24, .max_scrollback = 10_000 },
+        80,
+        24,
     ));
     defer free(t);
 
@@ -2385,7 +2422,8 @@ test "point_from_grid_ref history ref to active returns no_value" {
     try testing.expectEqual(Result.success, new(
         &lib.alloc.test_allocator,
         &t,
-        .{ .cols = 80, .rows = 4, .max_scrollback = 10_000 },
+        80,
+        4,
     ));
     defer free(t);
 
@@ -2420,7 +2458,8 @@ test "point_from_grid_ref null node" {
     try testing.expectEqual(Result.success, new(
         &lib.alloc.test_allocator,
         &t,
-        .{ .cols = 80, .rows = 24, .max_scrollback = 0 },
+        80,
+        24,
     ));
     defer free(t);
 
@@ -2433,11 +2472,8 @@ test "set write_pty callback" {
     try testing.expectEqual(Result.success, new(
         &lib.alloc.test_allocator,
         &t,
-        .{
-            .cols = 80,
-            .rows = 24,
-            .max_scrollback = 0,
-        },
+        80,
+        24,
     ));
     defer free(t);
 
@@ -2476,11 +2512,8 @@ test "write_pty receives DECRQSS response" {
     try testing.expectEqual(Result.success, new(
         &lib.alloc.test_allocator,
         &t,
-        .{
-            .cols = 80,
-            .rows = 24,
-            .max_scrollback = 0,
-        },
+        80,
+        24,
     ));
     defer free(t);
 
@@ -2511,11 +2544,8 @@ test "write_pty receives OSC color query response" {
     try testing.expectEqual(Result.success, new(
         &lib.alloc.test_allocator,
         &t,
-        .{
-            .cols = 80,
-            .rows = 24,
-            .max_scrollback = 0,
-        },
+        80,
+        24,
     ));
     defer free(t);
 
@@ -2551,11 +2581,8 @@ test "set write_pty without callback ignores queries" {
     try testing.expectEqual(Result.success, new(
         &lib.alloc.test_allocator,
         &t,
-        .{
-            .cols = 80,
-            .rows = 24,
-            .max_scrollback = 0,
-        },
+        80,
+        24,
     ));
     defer free(t);
 
@@ -2568,11 +2595,8 @@ test "set write_pty null clears callback" {
     try testing.expectEqual(Result.success, new(
         &lib.alloc.test_allocator,
         &t,
-        .{
-            .cols = 80,
-            .rows = 24,
-            .max_scrollback = 0,
-        },
+        80,
+        24,
     ));
     defer free(t);
 
@@ -2597,11 +2621,8 @@ test "set bell callback" {
     try testing.expectEqual(Result.success, new(
         &lib.alloc.test_allocator,
         &t,
-        .{
-            .cols = 80,
-            .rows = 24,
-            .max_scrollback = 0,
-        },
+        80,
+        24,
     ));
     defer free(t);
 
@@ -2637,11 +2658,8 @@ test "bell without callback is silent" {
     try testing.expectEqual(Result.success, new(
         &lib.alloc.test_allocator,
         &t,
-        .{
-            .cols = 80,
-            .rows = 24,
-            .max_scrollback = 0,
-        },
+        80,
+        24,
     ));
     defer free(t);
 
@@ -2654,11 +2672,8 @@ test "set enquiry callback" {
     try testing.expectEqual(Result.success, new(
         &lib.alloc.test_allocator,
         &t,
-        .{
-            .cols = 80,
-            .rows = 24,
-            .max_scrollback = 0,
-        },
+        80,
+        24,
     ));
     defer free(t);
 
@@ -2696,11 +2711,8 @@ test "enquiry without callback is silent" {
     try testing.expectEqual(Result.success, new(
         &lib.alloc.test_allocator,
         &t,
-        .{
-            .cols = 80,
-            .rows = 24,
-            .max_scrollback = 0,
-        },
+        80,
+        24,
     ));
     defer free(t);
 
@@ -2713,11 +2725,8 @@ test "set xtversion callback" {
     try testing.expectEqual(Result.success, new(
         &lib.alloc.test_allocator,
         &t,
-        .{
-            .cols = 80,
-            .rows = 24,
-            .max_scrollback = 0,
-        },
+        80,
+        24,
     ));
     defer free(t);
 
@@ -2756,11 +2765,8 @@ test "xtversion without callback reports default" {
     try testing.expectEqual(Result.success, new(
         &lib.alloc.test_allocator,
         &t,
-        .{
-            .cols = 80,
-            .rows = 24,
-            .max_scrollback = 0,
-        },
+        80,
+        24,
     ));
     defer free(t);
 
@@ -2792,11 +2798,8 @@ test "set title_changed callback" {
     try testing.expectEqual(Result.success, new(
         &lib.alloc.test_allocator,
         &t,
-        .{
-            .cols = 80,
-            .rows = 24,
-            .max_scrollback = 0,
-        },
+        80,
+        24,
     ));
     defer free(t);
 
@@ -2831,11 +2834,8 @@ test "title_changed without callback is silent" {
     try testing.expectEqual(Result.success, new(
         &lib.alloc.test_allocator,
         &t,
-        .{
-            .cols = 80,
-            .rows = 24,
-            .max_scrollback = 0,
-        },
+        80,
+        24,
     ));
     defer free(t);
 
@@ -2848,11 +2848,8 @@ test "set pwd_changed callback" {
     try testing.expectEqual(Result.success, new(
         &lib.alloc.test_allocator,
         &t,
-        .{
-            .cols = 80,
-            .rows = 24,
-            .max_scrollback = 0,
-        },
+        80,
+        24,
     ));
     defer free(t);
 
@@ -2891,11 +2888,8 @@ test "set clipboard_write callback" {
     try testing.expectEqual(Result.success, new(
         &lib.alloc.test_allocator,
         &t,
-        .{
-            .cols = 80,
-            .rows = 24,
-            .max_scrollback = 0,
-        },
+        80,
+        24,
     ));
     defer free(t);
 
@@ -3046,11 +3040,8 @@ test "clipboard_write without callback is unsupported and silent" {
     try testing.expectEqual(Result.success, new(
         &lib.alloc.test_allocator,
         &t,
-        .{
-            .cols = 80,
-            .rows = 24,
-            .max_scrollback = 0,
-        },
+        80,
+        24,
     ));
     defer free(t);
 
@@ -3071,11 +3062,8 @@ test "pwd_changed without callback is silent" {
     try testing.expectEqual(Result.success, new(
         &lib.alloc.test_allocator,
         &t,
-        .{
-            .cols = 80,
-            .rows = 24,
-            .max_scrollback = 0,
-        },
+        80,
+        24,
     ));
     defer free(t);
 
@@ -3090,11 +3078,8 @@ test "set size callback" {
     try testing.expectEqual(Result.success, new(
         &lib.alloc.test_allocator,
         &t,
-        .{
-            .cols = 80,
-            .rows = 24,
-            .max_scrollback = 0,
-        },
+        80,
+        24,
     ));
     defer free(t);
 
@@ -3137,11 +3122,8 @@ test "size without callback is silent" {
     try testing.expectEqual(Result.success, new(
         &lib.alloc.test_allocator,
         &t,
-        .{
-            .cols = 80,
-            .rows = 24,
-            .max_scrollback = 0,
-        },
+        80,
+        24,
     ));
     defer free(t);
 
@@ -3154,11 +3136,8 @@ test "set device_attributes callback primary" {
     try testing.expectEqual(Result.success, new(
         &lib.alloc.test_allocator,
         &t,
-        .{
-            .cols = 80,
-            .rows = 24,
-            .max_scrollback = 0,
-        },
+        80,
+        24,
     ));
     defer free(t);
 
@@ -3208,11 +3187,8 @@ test "set device_attributes callback secondary" {
     try testing.expectEqual(Result.success, new(
         &lib.alloc.test_allocator,
         &t,
-        .{
-            .cols = 80,
-            .rows = 24,
-            .max_scrollback = 0,
-        },
+        80,
+        24,
     ));
     defer free(t);
 
@@ -3262,11 +3238,8 @@ test "set device_attributes callback tertiary" {
     try testing.expectEqual(Result.success, new(
         &lib.alloc.test_allocator,
         &t,
-        .{
-            .cols = 80,
-            .rows = 24,
-            .max_scrollback = 0,
-        },
+        80,
+        24,
     ));
     defer free(t);
 
@@ -3316,11 +3289,8 @@ test "device_attributes without callback uses default" {
     try testing.expectEqual(Result.success, new(
         &lib.alloc.test_allocator,
         &t,
-        .{
-            .cols = 80,
-            .rows = 24,
-            .max_scrollback = 0,
-        },
+        80,
+        24,
     ));
     defer free(t);
 
@@ -3352,11 +3322,8 @@ test "device_attributes callback returns false uses default" {
     try testing.expectEqual(Result.success, new(
         &lib.alloc.test_allocator,
         &t,
-        .{
-            .cols = 80,
-            .rows = 24,
-            .max_scrollback = 0,
-        },
+        80,
+        24,
     ));
     defer free(t);
 
@@ -3393,11 +3360,8 @@ test "set and get title" {
     try testing.expectEqual(Result.success, new(
         &lib.alloc.test_allocator,
         &t,
-        .{
-            .cols = 80,
-            .rows = 24,
-            .max_scrollback = 0,
-        },
+        80,
+        24,
     ));
     defer free(t);
 
@@ -3432,11 +3396,8 @@ test "set and get pwd" {
     try testing.expectEqual(Result.success, new(
         &lib.alloc.test_allocator,
         &t,
-        .{
-            .cols = 80,
-            .rows = 24,
-            .max_scrollback = 0,
-        },
+        80,
+        24,
     ));
     defer free(t);
 
@@ -3464,11 +3425,8 @@ test "get title set via vt_write" {
     try testing.expectEqual(Result.success, new(
         &lib.alloc.test_allocator,
         &t,
-        .{
-            .cols = 80,
-            .rows = 24,
-            .max_scrollback = 0,
-        },
+        80,
+        24,
     ));
     defer free(t);
 
@@ -3485,11 +3443,8 @@ test "resize updates pixel dimensions" {
     try testing.expectEqual(Result.success, new(
         &lib.alloc.test_allocator,
         &t,
-        .{
-            .cols = 80,
-            .rows = 24,
-            .max_scrollback = 0,
-        },
+        80,
+        24,
     ));
     defer free(t);
 
@@ -3506,11 +3461,8 @@ test "resize pixel overflow saturates" {
     try testing.expectEqual(Result.success, new(
         &lib.alloc.test_allocator,
         &t,
-        .{
-            .cols = 80,
-            .rows = 24,
-            .max_scrollback = 0,
-        },
+        80,
+        24,
     ));
     defer free(t);
 
@@ -3526,11 +3478,8 @@ test "resize disables synchronized output" {
     try testing.expectEqual(Result.success, new(
         &lib.alloc.test_allocator,
         &t,
-        .{
-            .cols = 80,
-            .rows = 24,
-            .max_scrollback = 0,
-        },
+        80,
+        24,
     ));
     defer free(t);
 
@@ -3547,11 +3496,8 @@ test "resize sends in-band size report" {
     try testing.expectEqual(Result.success, new(
         &lib.alloc.test_allocator,
         &t,
-        .{
-            .cols = 80,
-            .rows = 24,
-            .max_scrollback = 0,
-        },
+        80,
+        24,
     ));
     defer free(t);
 
@@ -3588,11 +3534,8 @@ test "resize no size report without mode 2048" {
     try testing.expectEqual(Result.success, new(
         &lib.alloc.test_allocator,
         &t,
-        .{
-            .cols = 80,
-            .rows = 24,
-            .max_scrollback = 0,
-        },
+        80,
+        24,
     ));
     defer free(t);
 
@@ -3616,11 +3559,8 @@ test "resize in-band report without write_pty callback" {
     try testing.expectEqual(Result.success, new(
         &lib.alloc.test_allocator,
         &t,
-        .{
-            .cols = 80,
-            .rows = 24,
-            .max_scrollback = 0,
-        },
+        80,
+        24,
     ));
     defer free(t);
 
@@ -3638,11 +3578,8 @@ test "resize zero cols" {
     try testing.expectEqual(Result.success, new(
         &lib.alloc.test_allocator,
         &t,
-        .{
-            .cols = 80,
-            .rows = 24,
-            .max_scrollback = 0,
-        },
+        80,
+        24,
     ));
     defer free(t);
 
@@ -3654,11 +3591,8 @@ test "resize zero rows" {
     try testing.expectEqual(Result.success, new(
         &lib.alloc.test_allocator,
         &t,
-        .{
-            .cols = 80,
-            .rows = 24,
-            .max_scrollback = 0,
-        },
+        80,
+        24,
     ));
     defer free(t);
 
@@ -3670,11 +3604,8 @@ test "grid_ref out of bounds" {
     try testing.expectEqual(Result.success, new(
         &lib.alloc.test_allocator,
         &t,
-        .{
-            .cols = 80,
-            .rows = 24,
-            .max_scrollback = 0,
-        },
+        80,
+        24,
     ));
     defer free(t);
 
@@ -3690,11 +3621,8 @@ test "set and get color_foreground" {
     try testing.expectEqual(Result.success, new(
         &lib.alloc.test_allocator,
         &t,
-        .{
-            .cols = 80,
-            .rows = 24,
-            .max_scrollback = 0,
-        },
+        80,
+        24,
     ));
     defer free(t);
 
@@ -3718,11 +3646,8 @@ test "set and get color_background" {
     try testing.expectEqual(Result.success, new(
         &lib.alloc.test_allocator,
         &t,
-        .{
-            .cols = 80,
-            .rows = 24,
-            .max_scrollback = 0,
-        },
+        80,
+        24,
     ));
     defer free(t);
 
@@ -3743,11 +3668,8 @@ test "set and get color_cursor" {
     try testing.expectEqual(Result.success, new(
         &lib.alloc.test_allocator,
         &t,
-        .{
-            .cols = 80,
-            .rows = 24,
-            .max_scrollback = 0,
-        },
+        80,
+        24,
     ));
     defer free(t);
 
@@ -3768,11 +3690,8 @@ test "set and get color_palette" {
     try testing.expectEqual(Result.success, new(
         &lib.alloc.test_allocator,
         &t,
-        .{
-            .cols = 80,
-            .rows = 24,
-            .max_scrollback = 0,
-        },
+        80,
+        24,
     ));
     defer free(t);
 
@@ -3799,11 +3718,8 @@ test "get color default vs effective with override" {
     try testing.expectEqual(Result.success, new(
         &lib.alloc.test_allocator,
         &t,
-        .{
-            .cols = 80,
-            .rows = 24,
-            .max_scrollback = 0,
-        },
+        80,
+        24,
     ));
     defer free(t);
 
@@ -3846,11 +3762,8 @@ test "get color default returns no_value when unset" {
     try testing.expectEqual(Result.success, new(
         &lib.alloc.test_allocator,
         &t,
-        .{
-            .cols = 80,
-            .rows = 24,
-            .max_scrollback = 0,
-        },
+        80,
+        24,
     ));
     defer free(t);
 
@@ -3865,11 +3778,8 @@ test "get color_palette_default vs current" {
     try testing.expectEqual(Result.success, new(
         &lib.alloc.test_allocator,
         &t,
-        .{
-            .cols = 80,
-            .rows = 24,
-            .max_scrollback = 0,
-        },
+        80,
+        24,
     ));
     defer free(t);
 
@@ -3898,11 +3808,8 @@ test "set color sets dirty flag" {
     try testing.expectEqual(Result.success, new(
         &lib.alloc.test_allocator,
         &t,
-        .{
-            .cols = 80,
-            .rows = 24,
-            .max_scrollback = 0,
-        },
+        80,
+        24,
     ));
     defer free(t);
 
@@ -3919,7 +3826,8 @@ test "set glyph protocol disables APC handling and clears glossary" {
     try testing.expectEqual(Result.success, new(
         &lib.alloc.test_allocator,
         &t,
-        .{ .cols = 80, .rows = 24, .max_scrollback = 0 },
+        80,
+        24,
     ));
     defer free(t);
 
@@ -3946,7 +3854,8 @@ test "get_multi success" {
     try testing.expectEqual(Result.success, new(
         &lib.alloc.test_allocator,
         &t,
-        .{ .cols = 80, .rows = 24, .max_scrollback = 0 },
+        80,
+        24,
     ));
     defer free(t);
 
@@ -3967,7 +3876,8 @@ test "get_multi error sets out_written" {
     try testing.expectEqual(Result.success, new(
         &lib.alloc.test_allocator,
         &t,
-        .{ .cols = 80, .rows = 24, .max_scrollback = 0 },
+        80,
+        24,
     ));
     defer free(t);
 

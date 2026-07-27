@@ -401,23 +401,8 @@ page_size: usize,
 /// in the state struct.
 page_compression: IncrementalCompressionState = .{},
 
-/// Maximum size of the page allocation in bytes. This only includes pages
-/// that are used ONLY for scrollback. If the active area is still partially
-/// in a page that also includes scrollback, then that page is not included.
-explicit_max_size: usize,
-
-/// This is the minimum max size that we will respect due to the rows/cols
-/// of the PageList. We must always be able to fit at least the active area
-/// and at least two pages for our algorithms.
-min_max_size: usize,
-
-/// Maximum number of physical rows retained as scrollback. This excludes the
-/// active area and is raised to `min_max_lines` when necessary.
-explicit_max_lines: usize,
-
-/// Minimum line limit required to retain one standard page worth of
-/// scrollback at the current column count.
-min_max_lines: usize,
+/// Limits for scrollback.
+limits: Limits,
 
 /// The total number of rows represented by this PageList. This is used
 /// specifically for scrollbar information so we can have the total size.
@@ -485,66 +470,6 @@ pub const Viewport = union(enum) {
     /// allocations.
     pin,
 };
-
-/// Returns the minimum valid "max size" for a given number of rows and cols
-/// such that we can fit the active area AND at least two pages. Note we
-/// need the two pages for algorithms to work properly (such as grow) but
-/// we don't need to fit double the active area.
-///
-/// This min size may not be totally correct in the case that a large
-/// number of other dimensions makes our row size in a page very small.
-/// But this gives us a nice fast heuristic for determining min/max size.
-/// Therefore, if the page size is violated you should always also verify
-/// that we have enough space for the active area.
-fn minMaxSize(cols: size.CellCountInt, rows: size.CellCountInt) usize {
-    // Invariant required to ensure our divCeil below cannot overflow.
-    comptime {
-        const max_rows = std.math.maxInt(size.CellCountInt);
-        _ = std.math.divCeil(usize, max_rows, 1) catch unreachable;
-    }
-
-    // Get our capacity to fit our rows. If the cols are too big, it may
-    // force less rows than we want meaning we need more than one page to
-    // represent a viewport.
-    const cap = initialCapacity(cols);
-
-    // Calculate the number of standard sized pages we need to represent
-    // an active area.
-    const pages_exact = if (cap.rows >= rows) 1 else std.math.divCeil(
-        usize,
-        rows,
-        cap.rows,
-    ) catch {
-        // Not possible:
-        // - initialCapacity guarantees at least 1 row
-        // - numerator/denominator can't overflow because of comptime check above
-        unreachable;
-    };
-
-    // We always need at least one page extra so that we
-    // can fit partial pages to spread our active area across two pages.
-    // Even for caps that can't fit all rows in a single page, we add one
-    // because the most extra space we need at any given time is only
-    // the partial amount of one page.
-    const pages = pages_exact + 1;
-    assert(pages >= 2);
-
-    // log.debug("minMaxSize cols={} rows={} cap={} pages={}", .{
-    //     cols,
-    //     rows,
-    //     cap,
-    //     pages,
-    // });
-
-    return PagePool.item_size * pages;
-}
-
-/// Returns the minimum line limit for a given column count. Line limits are
-/// page-granular, so we always permit at least one standard page worth of
-/// scrollback rows.
-fn minMaxLines(cols: size.CellCountInt) usize {
-    return initialCapacity(cols).rows;
-}
 
 /// Calculates the initial capacity for a new page for a given column
 /// count. This will attempt to fit within std_size at all times so we
@@ -680,8 +605,9 @@ pub fn init(
         rows,
     );
 
-    // Get our minimum max size, see doc comments for more details.
-    const min_max_size = minMaxSize(cols, rows);
+    var limits: Limits = .init(cols, rows);
+    limits.set(.bytes, opts.max_size);
+    limits.set(.lines, opts.max_lines);
 
     // We always track our viewport pin to ensure this is never an allocation
     try tw.check(.viewport_pin);
@@ -702,10 +628,7 @@ pub fn init(
         .page_serial = page_serial,
         .page_serial_epoch = 0,
         .page_size = page_size,
-        .explicit_max_size = opts.max_size orelse std.math.maxInt(usize),
-        .min_max_size = min_max_size,
-        .explicit_max_lines = opts.max_lines orelse std.math.maxInt(usize),
-        .min_max_lines = minMaxLines(cols),
+        .limits = limits,
         .total_rows = rows,
         .tracked_pins = tracked_pins,
         .viewport = .{ .active = {} },
@@ -884,12 +807,12 @@ fn verifyIntegrity(self: *const PageList) IntegrityError!void {
     // active rows. Complete historical pages are always eligible for pruning.
     if (self.total_rows > self.rows) {
         const history_rows = self.total_rows - self.rows;
-        if (history_rows > self.maxLines() and
+        if (history_rows > self.limits.max(.lines) and
             self.pages.first.? != self.getTopLeft(.active).node)
         {
             log.warn(
                 "PageList integrity violation: max lines exceeded history={} max={}",
-                .{ history_rows, self.maxLines() },
+                .{ history_rows, self.limits.max(.lines) },
             );
             return IntegrityError.MaxLinesExceeded;
         }
@@ -1236,10 +1159,7 @@ pub fn clone(
         .page_serial = page_serial,
         .page_serial_epoch = 0,
         .page_size = page_size,
-        .explicit_max_size = self.explicit_max_size,
-        .min_max_size = self.min_max_size,
-        .explicit_max_lines = self.explicit_max_lines,
-        .min_max_lines = self.min_max_lines,
+        .limits = self.limits,
         .cols = self.cols,
         .rows = self.rows,
         .total_rows = total_rows,
@@ -1270,7 +1190,7 @@ pub fn clone(
     }
 
     // A clone can copy more history than its inherited line limit.
-    result.enforceMaxLines();
+    result.limits.enforce(&result, .lines);
 
     result.assertIntegrity();
     return result;
@@ -1328,24 +1248,18 @@ pub fn resize(self: *PageList, opts: Resize) Allocator.Error!void {
         try self.resizeWithoutReflow(opts);
         // Shrinking the active row count turns former active rows into
         // scrollback even without reflow, which can cross the line limit.
-        self.enforceMaxLines();
+        self.limits.enforce(self, .lines);
         return;
     }
 
-    // Recalculate our minimum max size. This allows grow to work properly
-    // when increasing beyond our initial minimum max size or explicit max
-    // size to fit the active area.
-    const old_min_max_size = self.min_max_size;
-    self.min_max_size = minMaxSize(
+    // Recalculate our minimum limits. This allows grow to work properly when
+    // increasing beyond the explicit limits to fit the active area.
+    const old_limits = self.limits;
+    self.limits.resize(
         opts.cols orelse self.cols,
         opts.rows orelse self.rows,
     );
-    errdefer self.min_max_size = old_min_max_size;
-
-    // Recalculate our minimum max lines for the same reasons as above.
-    const old_min_max_lines = self.min_max_lines;
-    self.min_max_lines = minMaxLines(opts.cols orelse self.cols);
-    errdefer self.min_max_lines = old_min_max_lines;
+    errdefer self.limits = old_limits;
 
     // On reflow, the main thing that causes reflow is column changes. If
     // only rows change, reflow is impossible. So we change our behavior based
@@ -1386,7 +1300,7 @@ pub fn resize(self: *PageList, opts: Resize) Allocator.Error!void {
     // Column reflow can change the physical history row count, and a row
     // resize can move the active boundary. Both may expose whole old pages
     // that are now eligible for line-limit pruning.
-    self.enforceMaxLines();
+    self.limits.enforce(self, .lines);
 }
 
 /// Resize the pagelist with reflow by adding or removing columns.
@@ -2413,20 +2327,14 @@ const ReflowCursor = struct {
 };
 
 fn resizeWithoutReflow(self: *PageList, opts: Resize) Allocator.Error!void {
-    // We only set the new min_max_size if we're not reflowing. If we are
-    // reflowing, then resize handles this for us.
-    const old_min_max_size = self.min_max_size;
-    self.min_max_size = if (!opts.reflow) minMaxSize(
+    // We only set the new minimums if we're not reflowing. If we are
+    // reflowing, then the outer resize call handles this for us.
+    const old_limits = self.limits;
+    if (!opts.reflow) self.limits.resize(
         opts.cols orelse self.cols,
         opts.rows orelse self.rows,
-    ) else old_min_max_size;
-    errdefer self.min_max_size = old_min_max_size;
-    const old_min_max_lines = self.min_max_lines;
-    self.min_max_lines = if (!opts.reflow)
-        minMaxLines(opts.cols orelse self.cols)
-    else
-        old_min_max_lines;
-    errdefer self.min_max_lines = old_min_max_lines;
+    );
+    errdefer self.limits = old_limits;
 
     // Important! We have to do cols first because cols may cause us to
     // destroy pages if we're increasing cols which will free up page_size
@@ -2913,7 +2821,7 @@ pub fn scroll(self: *PageList, behavior: Scroll) void {
     defer self.assertIntegrity();
 
     // Special case no-scrollback mode to never allow scrolling.
-    if (self.explicit_max_size == 0) {
+    if (self.limits.bytes.explicit == 0) {
         self.viewport = .active;
         return;
     }
@@ -3483,7 +3391,7 @@ pub fn scrollbar(self: *PageList) Scrollbar {
     // it always has SOME extra space (due to the way we allocate by page).
     // So even with no scrollback we have some growth. It is architecturally
     // much simpler to just hide that for no-scrollback cases.
-    if (self.explicit_max_size == 0) return .{
+    if (self.limits.bytes.explicit == 0) return .{
         .total = self.rows,
         .offset = 0,
         .len = self.rows,
@@ -3584,74 +3492,31 @@ fn fixupViewport(
     }
 }
 
-/// Returns the actual max size. This may be greater than the explicit
-/// value if the explicit value is less than the min_max_size.
+/// Change the maximum logical page allocation at runtime. Null removes the
+/// explicit byte limit and zero disables scrollback.
 ///
-/// This value is a HEURISTIC. You cannot assert on this value. We may
-/// exceed this value if required to fit the active area. This may be
-/// required in some cases if the active area has a large number of
-/// graphemes, styles, etc.
-pub fn maxSize(self: *const PageList) usize {
-    return @max(self.explicit_max_size, self.min_max_size);
+/// Lowering the limit immediately removes eligible complete historical pages.
+/// The effective limit may still be raised to fit the active area, and a page
+/// which overlaps the active area is never split solely to satisfy this limit.
+pub fn setMaxBytes(self: *PageList, max: ?usize) void {
+    defer self.assertIntegrity();
+
+    self.limits.set(.bytes, max);
+    self.limits.enforce(self, .bytes);
+    if (self.limits.bytes.explicit == 0) self.viewport = .active;
 }
 
-/// Returns the effective scrollback row limit. At least one standard page
-/// worth of rows is permitted so enforcement never has to split a page.
+/// Change the maximum number of physical scrollback rows at runtime. Null
+/// removes the explicit line limit.
 ///
-/// Like `maxSize`, this is a heuristic. An unusually large page which contains
-/// both history and active rows can temporarily exceed this value because only
-/// complete historical pages are pruned.
-fn maxLines(self: *const PageList) usize {
-    return @max(self.explicit_max_lines, self.min_max_lines);
-}
+/// Lowering the limit immediately removes eligible complete historical pages.
+/// The effective limit always permits at least one standard page of history,
+/// and a page which overlaps the active area is never split for enforcement.
+pub fn setMaxLines(self: *PageList, max: ?usize) void {
+    defer self.assertIntegrity();
 
-/// Prune complete historical pages until the line limit is satisfied or the
-/// oldest remaining page overlaps the active area.
-fn enforceMaxLines(self: *PageList) void {
-    if (self.explicit_max_lines == std.math.maxInt(usize)) return;
-
-    // A partially constructed clone can temporarily contain fewer rows than
-    // its active area. It has no scrollback to prune.
-    if (self.total_rows <= self.rows) return;
-
-    // If we're lower then the limit we're good.
-    const max_lines = self.maxLines();
-    if (self.total_rows - self.rows <= max_lines) return;
-
-    // Removing pages changes compression.
-    self.page_compression.markActivity();
-
-    // Accumulate the row delta so viewport offsets are fixed up once
-    // after all eligible pages have been removed.
-    var removed: usize = 0;
-    while (self.total_rows - self.rows > max_lines) {
-        const first = self.pages.first.?;
-
-        // The page containing the active top may also contain history. Keep
-        // that boundary page whole even if its history exceeds the heuristic.
-        if (first == self.getTopLeft(.active).node) break;
-
-        const first_rows = first.rows();
-
-        // Automatic pruning invalidates the content represented by pins in
-        // the removed page. erasePage remaps them to the next page below but
-        // only the line-limit caller knows that their original content is
-        // gone, so mark them as garbage here.
-        for (self.tracked_pins.keys()) |p| {
-            if (p.node == first) p.garbage = true;
-        }
-
-        // erasePage updates the list, pin targets, and byte accounting.
-        // Row accounting belongs to the caller because erasePage is also used
-        // by paths that already adjusted total_rows.
-        self.erasePage(first);
-        self.total_rows -= first_rows;
-        removed += first_rows;
-    }
-
-    // Reconcile viewport mode and cached row offsets with the combined prefix
-    // removal only after every page and pin points into the final list.
-    if (removed > 0) self.fixupViewport(removed);
+    self.limits.set(.lines, max);
+    self.limits.enforce(self, .lines);
 }
 
 /// Grow the active area by exactly one row.
@@ -3679,7 +3544,7 @@ pub fn grow(self: *PageList) Allocator.Error!?*List.Node {
 
         // Growing inside the last page moves the active boundary without
         // allocating; that alone can make the first page wholly historical.
-        self.enforceMaxLines();
+        self.limits.enforce(self, .lines);
         return null;
     }
 
@@ -3699,7 +3564,7 @@ pub fn grow(self: *PageList) Allocator.Error!?*List.Node {
     // initial allocation.
     if (self.pages.first != null and
         self.pages.first != self.pages.last and
-        self.page_size + PagePool.item_size > self.maxSize())
+        self.page_size + PagePool.item_size > self.limits.max(.bytes))
     prune: {
         const first = self.pages.popFirst().?;
         assert(first != last);
@@ -3784,7 +3649,7 @@ pub fn grow(self: *PageList) Allocator.Error!?*List.Node {
 
         // Byte-limit recycling may leave history above the independent line
         // limit, so enforce it after the recycled page becomes the new tail.
-        self.enforceMaxLines();
+        self.limits.enforce(self, .lines);
         return first;
     }
 
@@ -3805,7 +3670,7 @@ pub fn grow(self: *PageList) Allocator.Error!?*List.Node {
 
     // Appending a page can cross the line limit and can make the oldest
     // active-boundary page wholly historical.
-    self.enforceMaxLines();
+    self.limits.enforce(self, .lines);
     return next_node;
 }
 
@@ -6345,6 +6210,190 @@ pub fn isDirty(self: *const PageList, pt: point.Point) bool {
 fn markDirty(self: *PageList, pt: point.Point) void {
     self.pin(pt).?.markDirty();
 }
+
+/// Runtime-configurable byte and line limits for a PageList.
+const Limits = struct {
+    bytes: Limit,
+    lines: Limit,
+
+    /// The limit keys.
+    pub const Key = std.meta.FieldEnum(Limits);
+
+    pub const Limit = struct {
+        /// Explicit is the specified maximum value for this limit
+        /// by the user or maxInt otherwise.
+        explicit: usize = std.math.maxInt(usize),
+
+        /// Min is the minimum valid maximum for this entry, so if
+        /// explicit is lower than this then min wins.
+        min: usize,
+    };
+
+    /// Return unlimited limits with minimums for the given PageList size.
+    pub fn init(cols: size.CellCountInt, rows: size.CellCountInt) Limits {
+        return .{
+            .bytes = .{ .min = minMaxSize(cols, rows) },
+            .lines = .{ .min = minMaxLines(cols) },
+        };
+    }
+
+    /// Set an explicit limit. Null means unlimited. This does not enforce the
+    /// new value automatically; the caller must still call `enforce`.
+    pub fn set(
+        self: *Limits,
+        comptime key: Key,
+        value: ?usize,
+    ) void {
+        switch (key) {
+            .bytes => self.bytes.explicit = value orelse std.math.maxInt(usize),
+            .lines => self.lines.explicit = value orelse std.math.maxInt(usize),
+        }
+    }
+
+    /// Recalculate the effective minimums for a new PageList size.
+    ///
+    /// This must be called whenever either PageList dimension changes so the
+    /// effective byte and line limits remain valid for the new size.
+    pub fn resize(
+        self: *Limits,
+        cols: size.CellCountInt,
+        rows: size.CellCountInt,
+    ) void {
+        self.bytes.min = minMaxSize(cols, rows);
+        self.lines.min = minMaxLines(cols);
+    }
+
+    /// Return the effective maximum for a limit.
+    pub fn max(self: *const Limits, key: Key) usize {
+        return switch (key) {
+            .bytes => @max(self.bytes.explicit, self.bytes.min),
+            .lines => @max(self.lines.explicit, self.lines.min),
+        };
+    }
+
+    /// Whether the given limit is currently exceeded. Both limits are
+    /// heuristics: complete historical pages are the smallest unit that
+    /// enforcement removes.
+    pub fn exceeded(
+        self: *const Limits,
+        pagelist: *const PageList,
+        limit: Key,
+    ) bool {
+        return switch (limit) {
+            .bytes => pagelist.page_size > self.max(.bytes),
+            .lines => pagelist.total_rows > pagelist.rows and
+                pagelist.total_rows - pagelist.rows > self.max(.lines),
+        };
+    }
+
+    /// Prune complete historical pages until the selected limit is satisfied
+    /// or the oldest remaining page overlaps the active area.
+    pub fn enforce(
+        self: *const Limits,
+        pagelist: *PageList,
+        key: Key,
+    ) void {
+        if (!self.exceeded(pagelist, key)) return;
+
+        // A partially constructed clone can temporarily contain fewer rows than
+        // its active area. It has no scrollback to prune.
+        if (pagelist.total_rows <= pagelist.rows) return;
+
+        // Accumulate the row delta so viewport offsets are fixed up once
+        // after all eligible pages have been removed.
+        var removed: usize = 0;
+        while (self.exceeded(pagelist, key)) {
+            const first = pagelist.pages.first.?;
+
+            // The page containing the active top may also contain history. Keep
+            // that boundary page whole even if its history exceeds the heuristic.
+            if (first == pagelist.getTopLeft(.active).node) break;
+
+            if (removed == 0) pagelist.page_compression.markActivity();
+
+            const first_rows = first.rows();
+
+            // Automatic pruning invalidates the content represented by pins in
+            // the removed page. erasePage remaps them to the next page below but
+            // only the enforcing caller knows that their original content is gone,
+            // so mark them as garbage here.
+            for (pagelist.tracked_pins.keys()) |p| {
+                if (p.node == first) p.garbage = true;
+            }
+
+            // erasePage updates the list, pin targets, and byte accounting.
+            // Row accounting belongs to the caller because erasePage is also used
+            // by paths that already adjusted total_rows.
+            pagelist.erasePage(first);
+            pagelist.total_rows -= first_rows;
+            removed += first_rows;
+        }
+
+        // Reconcile viewport mode and cached row offsets with the combined prefix
+        // removal only after every page and pin points into the final list.
+        if (removed > 0) pagelist.fixupViewport(removed);
+    }
+
+    /// Returns the minimum valid "max size" for a given number of rows and cols
+    /// such that we can fit the active area AND at least two pages. Note we
+    /// need the two pages for algorithms to work properly (such as grow) but
+    /// we don't need to fit double the active area.
+    ///
+    /// This min size may not be totally correct in the case that a large
+    /// number of other dimensions makes our row size in a page very small.
+    /// But this gives us a nice fast heuristic for determining min/max size.
+    /// Therefore, if the page size is violated you should always also verify
+    /// that we have enough space for the active area.
+    fn minMaxSize(cols: size.CellCountInt, rows: size.CellCountInt) usize {
+        // Invariant required to ensure our divCeil below cannot overflow.
+        comptime {
+            const max_rows = std.math.maxInt(size.CellCountInt);
+            _ = std.math.divCeil(usize, max_rows, 1) catch unreachable;
+        }
+
+        // Get our capacity to fit our rows. If the cols are too big, it may
+        // force less rows than we want meaning we need more than one page to
+        // represent a viewport.
+        const cap = initialCapacity(cols);
+
+        // Calculate the number of standard sized pages we need to represent
+        // an active area.
+        const pages_exact = if (cap.rows >= rows) 1 else std.math.divCeil(
+            usize,
+            rows,
+            cap.rows,
+        ) catch {
+            // Not possible:
+            // - initialCapacity guarantees at least 1 row
+            // - numerator/denominator can't overflow because of comptime check above
+            unreachable;
+        };
+
+        // We always need at least one page extra so that we
+        // can fit partial pages to spread our active area across two pages.
+        // Even for caps that can't fit all rows in a single page, we add one
+        // because the most extra space we need at any given time is only
+        // the partial amount of one page.
+        const pages = pages_exact + 1;
+        assert(pages >= 2);
+
+        // log.debug("minMaxSize cols={} rows={} cap={} pages={}", .{
+        //     cols,
+        //     rows,
+        //     cap,
+        //     pages,
+        // });
+
+        return PagePool.item_size * pages;
+    }
+
+    /// Returns the minimum line limit for a given column count. Line limits are
+    /// page-granular, so we always permit at least one standard page worth of
+    /// scrollback rows.
+    fn minMaxLines(cols: size.CellCountInt) usize {
+        return initialCapacity(cols).rows;
+    }
+};
 
 /// Represents an exact x/y coordinate within the screen. This is called
 /// a "pin" because it is a fixed point within the pagelist direct to
@@ -9755,6 +9804,216 @@ test "PageList Cell screenPoint supports long scrollback" {
     } }, cell.screenPoint());
 }
 
+test "PageList set max bytes prunes immediately and can be raised" {
+    const testing = std.testing;
+    const cols: size.CellCountInt = 80;
+    const page_rows: usize = initialCapacity(cols).rows;
+
+    var s = try init(testing.allocator, .{
+        .cols = cols,
+        .rows = 1,
+        .max_size = null,
+    });
+    defer s.deinit();
+
+    // Build four complete pages of history followed by the active row.
+    try s.growRows(4 * page_rows);
+    try testing.expectEqual(@as(usize, 5), s.totalPages());
+
+    const removed = s.pages.first.?;
+    const retained = s.pages.last.?.prev.?;
+    const removed_pin = try s.trackPin(.{ .node = removed });
+    defer s.untrackPin(removed_pin);
+    const retained_pin = try s.trackPin(.{ .node = retained });
+    defer s.untrackPin(retained_pin);
+
+    s.scroll(.{ .pin = retained_pin.* });
+    try testing.expectEqual(3 * page_rows, s.scrollbar().offset);
+
+    // The active-area minimum is two pages. Lowering below that immediately
+    // removes all older complete historical pages.
+    s.setMaxBytes(PagePool.item_size);
+    try testing.expectEqual(PagePool.item_size, s.limits.bytes.explicit);
+    try testing.expectEqual(2 * PagePool.item_size, s.limits.max(.bytes));
+    try testing.expectEqual(s.limits.max(.bytes), s.page_size);
+    try testing.expectEqual(@as(usize, 2), s.totalPages());
+    try testing.expectEqual(page_rows, s.total_rows - s.rows);
+    try testing.expectEqual(retained, s.pages.first.?);
+    try testing.expectEqual(retained, removed_pin.node);
+    try testing.expect(removed_pin.garbage);
+    try testing.expectEqual(retained, retained_pin.node);
+    try testing.expect(!retained_pin.garbage);
+    try testing.expectEqual(@as(usize, 0), s.scrollbar().offset);
+
+    // Raising the limit doesn't allocate or otherwise change retained data,
+    // but subsequent growth can exceed the previous effective limit.
+    const limited_size = s.page_size;
+    const limited_rows = s.total_rows;
+    s.setMaxBytes(8 * PagePool.item_size);
+    try testing.expectEqual(limited_size, s.page_size);
+    try testing.expectEqual(limited_rows, s.total_rows);
+    try s.growRows(2 * page_rows);
+    try testing.expect(s.page_size > limited_size);
+
+    // Null restores unlimited growth and likewise preserves current data.
+    const raised_size = s.page_size;
+    const raised_rows = s.total_rows;
+    s.setMaxBytes(null);
+    try testing.expectEqual(
+        std.math.maxInt(usize),
+        s.limits.bytes.explicit,
+    );
+    try testing.expectEqual(raised_size, s.page_size);
+    try testing.expectEqual(raised_rows, s.total_rows);
+    try s.growRows(5 * page_rows);
+    try testing.expect(s.page_size > 8 * PagePool.item_size);
+}
+
+test "PageList set max bytes zero preserves active boundary" {
+    const testing = std.testing;
+
+    var s = try init(testing.allocator, .{
+        .cols = 80,
+        .rows = 1,
+        .max_size = null,
+    });
+    defer s.deinit();
+
+    // Make the sole page larger than the effective zero-byte limit. Its first
+    // row will be history, but the same indivisible page also contains active.
+    while (s.page_size <= s.limits.bytes.min) {
+        _ = try s.increaseCapacity(s.pages.first.?, .grapheme_bytes);
+    }
+    _ = try s.grow();
+    try testing.expectEqual(@as(usize, 1), s.totalPages());
+    try testing.expectEqual(s.pages.first.?, s.getTopLeft(.active).node);
+    try testing.expect(s.getTopLeft(.active).y > 0);
+
+    s.scroll(.top);
+    try testing.expect(s.viewport == .top);
+
+    s.setMaxBytes(0);
+    try testing.expectEqual(@as(usize, 0), s.limits.bytes.explicit);
+    try testing.expect(s.page_size > s.limits.max(.bytes));
+    try testing.expectEqual(@as(usize, 1), s.totalPages());
+    try testing.expect(s.viewport == .active);
+    try testing.expectEqual(Scrollbar{
+        .total = s.rows,
+        .offset = 0,
+        .len = s.rows,
+    }, s.scrollbar());
+
+    // No-scrollback mode cannot be moved back into the retained boundary row.
+    s.scroll(.top);
+    try testing.expect(s.viewport == .active);
+}
+
+test "PageList set max lines prunes immediately and can be raised" {
+    const testing = std.testing;
+    const cols: size.CellCountInt = 80;
+    const page_rows: usize = initialCapacity(cols).rows;
+    const lowered_lines = page_rows + page_rows / 2;
+
+    var s = try init(testing.allocator, .{
+        .cols = cols,
+        .rows = 1,
+        .max_size = null,
+        .max_lines = null,
+    });
+    defer s.deinit();
+
+    try s.growRows(4 * page_rows);
+    try testing.expectEqual(@as(usize, 5), s.totalPages());
+
+    const removed = s.pages.first.?;
+    const retained = s.pages.last.?.prev.?;
+    const removed_pin = try s.trackPin(.{ .node = removed });
+    defer s.untrackPin(removed_pin);
+    const retained_pin = try s.trackPin(.{ .node = retained });
+    defer s.untrackPin(retained_pin);
+
+    s.scroll(.{ .pin = retained_pin.* });
+    try testing.expectEqual(3 * page_rows, s.scrollbar().offset);
+
+    // Whole-page enforcement undershoots a non-page-aligned line limit.
+    s.setMaxLines(lowered_lines);
+    try testing.expectEqual(lowered_lines, s.limits.lines.explicit);
+    try testing.expectEqual(lowered_lines, s.limits.max(.lines));
+    try testing.expectEqual(page_rows, s.total_rows - s.rows);
+    try testing.expectEqual(@as(usize, 2), s.totalPages());
+    try testing.expectEqual(retained, s.pages.first.?);
+    try testing.expectEqual(retained, removed_pin.node);
+    try testing.expect(removed_pin.garbage);
+    try testing.expectEqual(retained, retained_pin.node);
+    try testing.expect(!retained_pin.garbage);
+    try testing.expectEqual(@as(usize, 0), s.scrollbar().offset);
+
+    const limited_size = s.page_size;
+    const limited_rows = s.total_rows;
+    s.setMaxLines(4 * page_rows);
+    try testing.expectEqual(limited_size, s.page_size);
+    try testing.expectEqual(limited_rows, s.total_rows);
+    try s.growRows(2 * page_rows);
+    try testing.expect(s.total_rows - s.rows > lowered_lines);
+
+    const raised_size = s.page_size;
+    const raised_rows = s.total_rows;
+    s.setMaxLines(null);
+    try testing.expectEqual(
+        std.math.maxInt(usize),
+        s.limits.lines.explicit,
+    );
+    try testing.expectEqual(raised_size, s.page_size);
+    try testing.expectEqual(raised_rows, s.total_rows);
+    try s.growRows(3 * page_rows);
+    try testing.expect(s.total_rows - s.rows > 4 * page_rows);
+}
+
+test "PageList set max limits remain independent" {
+    const testing = std.testing;
+    const cols: size.CellCountInt = 80;
+    const page_rows: usize = initialCapacity(cols).rows;
+    const byte_limit = 3 * PagePool.item_size;
+    const line_limit = page_rows / 2;
+
+    var s = try init(testing.allocator, .{
+        .cols = cols,
+        .rows = 1,
+        .max_size = null,
+        .max_lines = null,
+    });
+    defer s.deinit();
+
+    try s.growRows(4 * page_rows);
+
+    // The byte setter leaves the line limit unlimited.
+    s.setMaxBytes(byte_limit);
+    try testing.expectEqual(byte_limit, s.limits.bytes.explicit);
+    try testing.expectEqual(
+        std.math.maxInt(usize),
+        s.limits.lines.explicit,
+    );
+    try testing.expectEqual(@as(usize, 3), s.totalPages());
+    try testing.expectEqual(2 * page_rows, s.total_rows - s.rows);
+
+    // The smaller runtime line limit prunes one more complete page without
+    // changing the configured byte limit. Its effective value is raised to
+    // the existing one-page minimum.
+    s.setMaxLines(line_limit);
+    try testing.expectEqual(byte_limit, s.limits.bytes.explicit);
+    try testing.expectEqual(line_limit, s.limits.lines.explicit);
+    try testing.expectEqual(page_rows, s.limits.max(.lines));
+    try testing.expectEqual(@as(usize, 2), s.totalPages());
+    try testing.expectEqual(page_rows, s.total_rows - s.rows);
+
+    // Removing only the line limit leaves byte enforcement in effect.
+    s.setMaxLines(null);
+    try s.growRows(3 * page_rows);
+    try testing.expectEqual(byte_limit, s.page_size);
+    try testing.expectEqual(@as(usize, 3), s.totalPages());
+    try testing.expect(s.total_rows - s.rows > page_rows);
+}
+
 test "PageList max lines uses one-page minimum" {
     const testing = std.testing;
     const cols: size.CellCountInt = 80;
@@ -9767,7 +10026,7 @@ test "PageList max lines uses one-page minimum" {
     });
     defer s.deinit();
 
-    try testing.expectEqual(page_rows, s.maxLines());
+    try testing.expectEqual(page_rows, s.limits.max(.lines));
 
     // The requested limit is below one page, so a complete page of history
     // remains valid.
@@ -9803,7 +10062,7 @@ test "PageList max lines does not round larger limits" {
     });
     defer s.deinit();
 
-    try testing.expectEqual(max_lines, s.maxLines());
+    try testing.expectEqual(max_lines, s.limits.max(.lines));
     try s.growRows(max_lines);
     try testing.expectEqual(max_lines, s.total_rows - s.rows);
 
@@ -9854,9 +10113,11 @@ test "PageList max lines and max size enforce the smaller limit" {
         defer s.deinit();
 
         try s.growRows(4 * page_rows);
-        try testing.expect(s.total_rows - s.rows <= s.maxLines());
+        try testing.expect(
+            s.total_rows - s.rows <= s.limits.max(.lines),
+        );
         try testing.expect(s.totalPages() <= 2);
-        try testing.expect(s.page_size < s.maxSize());
+        try testing.expect(s.page_size < s.limits.max(.bytes));
     }
 
     // A two-page byte limit prunes before the larger line limit is reached.
@@ -9870,8 +10131,10 @@ test "PageList max lines and max size enforce the smaller limit" {
         defer s.deinit();
 
         try s.growRows(2 * page_rows);
-        try testing.expect(s.total_rows - s.rows < s.maxLines());
-        try testing.expectEqual(s.maxSize(), s.page_size);
+        try testing.expect(
+            s.total_rows - s.rows < s.limits.max(.lines),
+        );
+        try testing.expectEqual(s.limits.max(.bytes), s.page_size);
     }
 }
 
@@ -9903,7 +10166,10 @@ test "PageList max lines applies to resize and clone" {
 
     const new_cols: size.CellCountInt = cols + 1;
     try s.resize(.{ .cols = new_cols, .reflow = true });
-    try testing.expectEqual(minMaxLines(new_cols), s.min_max_lines);
+    try testing.expectEqual(
+        Limits.minMaxLines(new_cols),
+        s.limits.lines.min,
+    );
 
     // Exercise the same active-row shrink through the reflow path. Reflow
     // completes before the newly historical complete page is pruned.
@@ -9927,9 +10193,13 @@ test "PageList max lines applies to resize and clone" {
             .rows = 1,
             .reflow = true,
         });
-        try testing.expectEqual(minMaxLines(new_cols), reflowed.min_max_lines);
+        try testing.expectEqual(
+            Limits.minMaxLines(new_cols),
+            reflowed.limits.lines.min,
+        );
         try testing.expect(
-            reflowed.total_rows - reflowed.rows <= reflowed.maxLines() or
+            reflowed.total_rows - reflowed.rows <=
+                reflowed.limits.max(.lines) or
                 reflowed.pages.first.? ==
                     reflowed.getTopLeft(.active).node,
         );
@@ -9940,13 +10210,11 @@ test "PageList max lines applies to resize and clone" {
     });
     defer cloned.deinit();
 
-    try testing.expectEqual(s.explicit_max_lines, cloned.explicit_max_lines);
-    try testing.expectEqual(s.min_max_lines, cloned.min_max_lines);
-    try testing.expectEqual(s.maxLines(), cloned.maxLines());
+    try testing.expectEqual(s.limits, cloned.limits);
 
-    try cloned.growRows(2 * cloned.maxLines());
+    try cloned.growRows(2 * cloned.limits.max(.lines));
     try testing.expect(
-        cloned.total_rows - cloned.rows <= cloned.maxLines() or
+        cloned.total_rows - cloned.rows <= cloned.limits.max(.lines) or
             cloned.pages.first.? == cloned.getTopLeft(.active).node,
     );
 }
@@ -17142,7 +17410,7 @@ test "PageList grow reuses non-standard page without leak" {
     try testing.expect(s.pages.first != s.pages.last);
 
     // Continue growing until we exceed max_size AND the last page is full
-    while (s.page_size + PagePool.item_size <= s.maxSize() or
+    while (s.page_size + PagePool.item_size <= s.limits.max(.bytes) or
         s.pages.last.?.rows() < s.pages.last.?.capacity().rows)
     {
         _ = try s.grow();
@@ -17242,7 +17510,9 @@ test "PageList grow non-standard page prune protection" {
 
     // Verify prune path conditions are met
     try testing.expect(s.pages.first != s.pages.last);
-    try testing.expect(s.page_size + PagePool.item_size > s.maxSize());
+    try testing.expect(
+        s.page_size + PagePool.item_size > s.limits.max(.bytes),
+    );
     try testing.expect(s.totalRows() >= s.rows);
 
     // Verify last page is at capacity (so grow must prune or allocate new)

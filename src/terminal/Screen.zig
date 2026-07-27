@@ -3796,9 +3796,9 @@ test "Screen forwards optional scrollback limits" {
 
     try testing.expectEqual(
         std.math.maxInt(usize),
-        s.pages.explicit_max_size,
+        s.pages.limits.bytes.explicit,
     );
-    try testing.expectEqual(max_lines, s.pages.explicit_max_lines);
+    try testing.expectEqual(max_lines, s.pages.limits.lines.explicit);
     try testing.expect(!s.no_scrollback);
 }
 
