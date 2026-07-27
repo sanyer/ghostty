@@ -41,6 +41,7 @@ const ClipboardCodepointMap = @import("ClipboardCodepointMap.zig");
 const KeyRemapSet = @import("../input/key_mods.zig").RemapSet;
 pub const WindowPaddingBalance = @import("../renderer/size.zig").PaddingBalance;
 const string = @import("string.zig");
+const Limit = @import("limit.zig").Limit;
 
 // We do this instead of importing all of terminal/main.zig to
 // limit the dependency graph. This is important because some things
@@ -1383,10 +1384,10 @@ input: RepeatableReadableIO = .{},
 /// are set, then the first one reached will determine when scrollback is
 /// removed.
 ///
-/// It is not currently possible to set an unlimited byte limit.
+/// The default is 50 MB. Set this to `unlimited` to remove the byte limit.
 ///
 /// This can be changed at runtime but will only affect new terminal surfaces.
-@"scrollback-limit-bytes": usize = 50_000_000, // 50MB
+@"scrollback-limit-bytes": Limit(usize, 50_000_000) = .default,
 
 /// The maximum number of lines of scrollback to retain. This excludes
 /// the active screen. Soft-wrapped lines count as multiple lines.
@@ -1399,12 +1400,12 @@ input: RepeatableReadableIO = .{},
 /// This means that the actual limited lines will likely be slightly
 /// higher in practice.
 ///
-/// If this is unset, then no line limit will be applied. A separate maximum
-/// can be set with `scrollback-limit-bytes`; if both limits are set, then the
-/// first one reached will determine when scrollback is removed.
+/// The default is `unlimited`. A separate maximum can be set with
+/// `scrollback-limit-bytes`; if both limits are set, then the first one reached
+/// will determine when scrollback is removed.
 ///
 /// This can be changed at runtime but will only affect new terminal surfaces.
-@"scrollback-limit-lines": ?usize = null,
+@"scrollback-limit-lines": Limit(usize, std.math.maxInt(usize)) = .default,
 
 /// Whether to compress scrollback pages while the terminal is idle.
 ///
@@ -10856,6 +10857,15 @@ test "scrollback limits" {
 
     var cfg = try Config.default(alloc);
     defer cfg.deinit();
+    try testing.expectEqual(
+        @as(usize, 50_000_000),
+        cfg.@"scrollback-limit-bytes".value,
+    );
+    try testing.expectEqual(
+        std.math.maxInt(usize),
+        cfg.@"scrollback-limit-lines".value,
+    );
+
     var it: TestIterator = .{ .data = &.{
         "--scrollback-limit-bytes=1234",
         "--scrollback-limit-lines=567",
@@ -10864,21 +10874,41 @@ test "scrollback limits" {
 
     try testing.expectEqual(
         @as(usize, 1234),
-        cfg.@"scrollback-limit-bytes",
+        cfg.@"scrollback-limit-bytes".value,
     );
     try testing.expectEqual(
-        @as(?usize, 567),
-        cfg.@"scrollback-limit-lines",
+        @as(usize, 567),
+        cfg.@"scrollback-limit-lines".value,
     );
 
-    var unset_it: TestIterator = .{ .data = &.{
+    var unlimited_it: TestIterator = .{ .data = &.{
+        "--scrollback-limit-bytes=unlimited",
+        "--scrollback-limit-lines=unlimited",
+    } };
+    try cfg.loadIter(alloc, &unlimited_it);
+
+    try testing.expectEqual(
+        std.math.maxInt(usize),
+        cfg.@"scrollback-limit-bytes".value,
+    );
+    try testing.expectEqual(
+        std.math.maxInt(usize),
+        cfg.@"scrollback-limit-lines".value,
+    );
+
+    var reset_it: TestIterator = .{ .data = &.{
+        "--scrollback-limit-bytes=",
         "--scrollback-limit-lines=",
     } };
-    try cfg.loadIter(alloc, &unset_it);
+    try cfg.loadIter(alloc, &reset_it);
 
     try testing.expectEqual(
-        @as(?usize, null),
-        cfg.@"scrollback-limit-lines",
+        @as(usize, 50_000_000),
+        cfg.@"scrollback-limit-bytes".value,
+    );
+    try testing.expectEqual(
+        std.math.maxInt(usize),
+        cfg.@"scrollback-limit-lines".value,
     );
 }
 
@@ -10895,7 +10925,17 @@ test "compatibility: scrollback-limit renamed to bytes" {
 
     try testing.expectEqual(
         @as(usize, 1234),
-        cfg.@"scrollback-limit-bytes",
+        cfg.@"scrollback-limit-bytes".value,
+    );
+
+    var unlimited_it: TestIterator = .{ .data = &.{
+        "--scrollback-limit=unlimited",
+    } };
+    try cfg.loadIter(alloc, &unlimited_it);
+
+    try testing.expectEqual(
+        std.math.maxInt(usize),
+        cfg.@"scrollback-limit-bytes".value,
     );
 }
 
