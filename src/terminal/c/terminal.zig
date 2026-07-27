@@ -92,16 +92,8 @@ pub const DesktopNotification = extern struct {
     body: lib.String,
 };
 
-/// State of a terminal progress report.
-///
 /// C: GhosttyTerminalProgressState
-pub const ProgressState = enum(c_int) {
-    remove = 0,
-    set = 1,
-    @"error" = 2,
-    indeterminate = 3,
-    pause = 4,
-};
+pub const ProgressState = osc.Command.ProgressReport.State;
 
 /// A progress report emitted by the running program.
 ///
