@@ -884,8 +884,7 @@ typedef enum GHOSTTY_ENUM_TYPED {
    * Set the maximum number of physical lines retained in scrollback.
    *
    * Lowering the limit immediately removes eligible complete historical
-   * pages. The effective limit retains the active-area and page-granularity
-   * minimums. A NULL value pointer removes the line limit.
+   * pages. A NULL value pointer removes the line limit.
    *
    * Input type: size_t*
    */
@@ -1217,6 +1216,28 @@ typedef enum GHOSTTY_ENUM_TYPED {
    * Output type: bool *
    */
   GHOSTTY_TERMINAL_DATA_VT_PROCESSING_ERROR = 33,
+
+  /**
+   * The configured maximum scrollback allocation in bytes.
+   *
+   * This always reports the primary screen's configured value, including
+   * while an alternate screen is active. Returns GHOSTTY_NO_VALUE when the
+   * configured byte limit is unlimited.
+   *
+   * Output type: size_t *
+   */
+  GHOSTTY_TERMINAL_DATA_SCROLLBACK_MAX_BYTES = 34,
+
+  /**
+   * The configured maximum number of physical scrollback lines.
+   *
+   * This always reports the primary screen's configured value, including
+   * while an alternate screen is active. Returns GHOSTTY_NO_VALUE when the
+   * configured line limit is unlimited.
+   *
+   * Output type: size_t *
+   */
+  GHOSTTY_TERMINAL_DATA_SCROLLBACK_MAX_LINES = 35,
   GHOSTTY_TERMINAL_DATA_MAX_VALUE = GHOSTTY_ENUM_MAX_VALUE,
 } GhosttyTerminalData;
 

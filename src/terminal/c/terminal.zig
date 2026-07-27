@@ -782,6 +782,8 @@ pub const TerminalData = enum(c_int) {
     selection = 31,
     viewport_active = 32,
     vt_processing_error = 33,
+    scrollback_max_bytes = 34,
+    scrollback_max_lines = 35,
 
     /// Output type expected for querying the data of the given kind.
     pub fn OutType(comptime self: TerminalData) type {
@@ -799,7 +801,11 @@ pub const TerminalData = enum(c_int) {
             .scrollbar => TerminalScrollbar,
             .cursor_style => style_c.Style,
             .title, .pwd => lib.String,
-            .total_rows, .scrollback_rows => usize,
+            .total_rows,
+            .scrollback_rows,
+            .scrollback_max_bytes,
+            .scrollback_max_lines,
+            => usize,
             .width_px, .height_px => u32,
             .color_foreground,
             .color_background,
@@ -935,6 +941,16 @@ fn getTyped(
         ),
         .viewport_active => out.* = t.screens.active.pages.viewport == .active,
         .vt_processing_error => out.* = wrapper.stream.handler.semantic_failure,
+        .scrollback_max_bytes => {
+            const max = t.screens.get(.primary).?.pages.limits.bytes.explicit;
+            if (max == std.math.maxInt(usize)) return .no_value;
+            out.* = max;
+        },
+        .scrollback_max_lines => {
+            const max = t.screens.get(.primary).?.pages.limits.lines.explicit;
+            if (max == std.math.maxInt(usize)) return .no_value;
+            out.* = max;
+        },
     }
 
     return .success;
@@ -1805,6 +1821,80 @@ test "get scrollback_rows" {
 
     try testing.expectEqual(Result.success, get(t, .scrollback_rows, @ptrCast(&scrollback)));
     try testing.expectEqual(@as(usize, 2), scrollback);
+}
+
+test "get configured scrollback limits" {
+    var t: Terminal = null;
+    try testing.expectEqual(Result.success, new(
+        &lib.alloc.test_allocator,
+        &t,
+        80,
+        3,
+    ));
+    defer free(t);
+
+    var value: usize = undefined;
+    try testing.expectEqual(
+        Result.success,
+        get(t, .scrollback_max_bytes, @ptrCast(&value)),
+    );
+    try testing.expectEqual(@as(usize, 10_000), value);
+    try testing.expectEqual(
+        Result.no_value,
+        get(t, .scrollback_max_lines, @ptrCast(&value)),
+    );
+
+    const max_bytes: usize = 0;
+    const max_lines: usize = 12;
+    try testing.expectEqual(
+        Result.success,
+        set(t, .scrollback_max_bytes, &max_bytes),
+    );
+    try testing.expectEqual(
+        Result.success,
+        set(t, .scrollback_max_lines, &max_lines),
+    );
+    try testing.expectEqual(
+        Result.success,
+        get(t, .scrollback_max_bytes, @ptrCast(&value)),
+    );
+    try testing.expectEqual(max_bytes, value);
+    try testing.expectEqual(
+        Result.success,
+        get(t, .scrollback_max_lines, @ptrCast(&value)),
+    );
+    try testing.expectEqual(max_lines, value);
+
+    // The configured limits belong to the primary screen and remain
+    // readable while an alternate screen is active.
+    vt_write(t, "\x1b[?1049h", 8);
+    try testing.expectEqual(
+        Result.success,
+        get(t, .scrollback_max_bytes, @ptrCast(&value)),
+    );
+    try testing.expectEqual(max_bytes, value);
+    try testing.expectEqual(
+        Result.success,
+        get(t, .scrollback_max_lines, @ptrCast(&value)),
+    );
+    try testing.expectEqual(max_lines, value);
+
+    try testing.expectEqual(
+        Result.success,
+        set(t, .scrollback_max_bytes, null),
+    );
+    try testing.expectEqual(
+        Result.success,
+        set(t, .scrollback_max_lines, null),
+    );
+    try testing.expectEqual(
+        Result.no_value,
+        get(t, .scrollback_max_bytes, @ptrCast(&value)),
+    );
+    try testing.expectEqual(
+        Result.no_value,
+        get(t, .scrollback_max_lines, @ptrCast(&value)),
+    );
 }
 
 test "get invalid" {
