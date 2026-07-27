@@ -74,6 +74,11 @@ pub const Handler = struct {
         /// Called when the bell is rung (BEL).
         bell: ?*const fn (*Handler) void,
 
+        /// Called when the running program requests a desktop notification
+        /// via OSC 9 or OSC 777. The title and body are borrowed and only
+        /// valid for the duration of the callback.
+        desktop_notification: ?*const fn (*Handler, Action.ShowDesktopNotification) void,
+
         /// Called in response to a color scheme DSR query (CSI ? 996 n).
         /// Returns the current color scheme. Return null to silently
         /// ignore the query.
@@ -131,6 +136,7 @@ pub const Handler = struct {
             .bell = null,
             .clipboard_write = null,
             .color_scheme = null,
+            .desktop_notification = null,
             .device_attributes = null,
             .enquiry = null,
             .size = null,
@@ -314,6 +320,7 @@ pub const Handler = struct {
 
             // Effect-based handlers
             .bell => self.bell(),
+            .show_desktop_notification => self.desktopNotification(value),
             .device_attributes => self.reportDeviceAttributes(value),
             .device_status => self.deviceStatus(value.request),
             .enquiry => self.reportEnquiry(),
@@ -337,7 +344,6 @@ pub const Handler = struct {
             .dcs_unhook => try self.dcsUnhook(),
 
             // Have no terminal-modifying effect
-            .show_desktop_notification,
             .progress_report,
             .title_push,
             .title_pop,
@@ -394,6 +400,14 @@ pub const Handler = struct {
     fn bell(self: *Handler) void {
         const func = self.effects.bell orelse return;
         func(self);
+    }
+
+    fn desktopNotification(
+        self: *Handler,
+        notification: Action.ShowDesktopNotification,
+    ) void {
+        const func = self.effects.desktop_notification orelse return;
+        func(self, notification);
     }
 
     fn clipboardContents(self: *Handler, kind: u8, data: []const u8) !void {
@@ -2033,6 +2047,63 @@ test "bell effect callback" {
         s.nextSlice("\x07\x07");
         try testing.expectEqual(@as(usize, 3), S.bell_count);
     }
+}
+
+test "desktop_notification effect callback" {
+    var t: Terminal = try .init(testing.io, testing.allocator, .{ .cols = 80, .rows = 24 });
+    defer t.deinit(testing.allocator);
+
+    // A null callback (the default readonly effects) silently ignores
+    // notifications and leaves the terminal usable.
+    {
+        var s: Stream = .initAlloc(testing.allocator, .init(&t));
+        defer s.deinit();
+
+        s.nextSlice("\x1B]9;Ignored\x1B\\AfterNotification");
+        const str = try t.plainString(testing.allocator);
+        defer testing.allocator.free(str);
+        try testing.expectEqualStrings("AfterNotification", str);
+    }
+
+    t.fullReset();
+
+    const S = struct {
+        var count: usize = 0;
+        var last_title: []const u8 = "";
+        var last_body: []const u8 = "";
+
+        fn desktopNotification(
+            _: *Handler,
+            notification: Action.ShowDesktopNotification,
+        ) void {
+            count += 1;
+            last_title = notification.title;
+            last_body = notification.body;
+        }
+    };
+    S.count = 0;
+    S.last_title = "";
+    S.last_body = "";
+
+    var handler: Handler = .init(&t);
+    handler.effects.desktop_notification = &S.desktopNotification;
+
+    var s: Stream = .initAlloc(testing.allocator, handler);
+    defer s.deinit();
+
+    // OSC 9 is split across writes and carries only a body.
+    s.nextSlice("\x1B]9;Build ");
+    try testing.expectEqual(@as(usize, 0), S.count);
+    s.nextSlice("complete\x1B\\");
+    try testing.expectEqual(@as(usize, 1), S.count);
+    try testing.expectEqualStrings("", S.last_title);
+    try testing.expectEqualStrings("Build complete", S.last_body);
+
+    // OSC 777 preserves its separate title and body fields.
+    s.nextSlice("\x1B]777;notify;Codex;Needs attention\x07");
+    try testing.expectEqual(@as(usize, 2), S.count);
+    try testing.expectEqualStrings("Codex", S.last_title);
+    try testing.expectEqualStrings("Needs attention", S.last_body);
 }
 
 test "clipboard_write effect callback" {

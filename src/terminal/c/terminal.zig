@@ -5,6 +5,7 @@ const build_options = @import("terminal_options");
 const lib = @import("../lib.zig");
 const CAllocator = lib.alloc.Allocator;
 pub const ZigTerminal = @import("../Terminal.zig");
+const Action = @import("../stream.zig").Action;
 const Stream = @import("../stream_terminal.zig").Stream;
 const Screen = @import("../Screen.zig");
 const ScreenSet = @import("../ScreenSet.zig");
@@ -81,6 +82,15 @@ pub const ClipboardWrite = extern struct {
     contents_len: usize,
 };
 
+/// A request to show a desktop notification.
+///
+/// C: GhosttyTerminalDesktopNotification
+pub const DesktopNotification = extern struct {
+    size: usize,
+    title: lib.String,
+    body: lib.String,
+};
+
 /// C callback state for terminal effects. Trampolines are always
 /// installed on the stream handler; they check these fields and
 /// no-op when the corresponding callback is null.
@@ -89,6 +99,7 @@ const Effects = struct {
     write_pty: ?WritePtyFn = null,
     bell: ?BellFn = null,
     color_scheme: ?ColorSchemeFn = null,
+    desktop_notification: ?DesktopNotificationFn = null,
     device_attributes_cb: ?DeviceAttributesFn = null,
     enquiry: ?EnquiryFn = null,
     xtversion: ?XtversionFn = null,
@@ -129,6 +140,10 @@ const Effects = struct {
     /// C function pointer type for the clipboard_write callback. The request
     /// and its contents are borrowed and only valid for the callback duration.
     pub const ClipboardWriteFn = *const fn (Terminal, ?*anyopaque, *const ClipboardWrite) callconv(lib.calling_conv) clipboard.WriteResult;
+
+    /// C function pointer type for the desktop_notification callback. The
+    /// request and its strings are borrowed for the callback duration.
+    pub const DesktopNotificationFn = *const fn (Terminal, ?*anyopaque, *const DesktopNotification) callconv(lib.calling_conv) void;
 
     /// C function pointer type for the title_changed callback.
     pub const TitleChangedFn = *const fn (Terminal, ?*anyopaque) callconv(lib.calling_conv) void;
@@ -217,6 +232,26 @@ const Effects = struct {
             .contents_len = contents.len,
         };
         return func(@ptrCast(wrapper), wrapper.effects.userdata, &request);
+    }
+
+    fn desktopNotificationTrampoline(
+        handler: *Handler,
+        notification: Action.ShowDesktopNotification,
+    ) void {
+        const wrapper = TerminalWrapper.fromHandler(handler);
+        const func = wrapper.effects.desktop_notification orelse return;
+        const request: DesktopNotification = .{
+            .size = @sizeOf(DesktopNotification),
+            .title = .{
+                .ptr = notification.title.ptr,
+                .len = notification.title.len,
+            },
+            .body = .{
+                .ptr = notification.body.ptr,
+                .len = notification.body.len,
+            },
+        };
+        func(@ptrCast(wrapper), wrapper.effects.userdata, &request);
     }
 
     fn colorSchemeTrampoline(handler: *Handler) ?device_status.ColorScheme {
@@ -376,6 +411,7 @@ fn new_(
         .write_pty = &Effects.writePtyTrampoline,
         .bell = &Effects.bellTrampoline,
         .color_scheme = &Effects.colorSchemeTrampoline,
+        .desktop_notification = &Effects.desktopNotificationTrampoline,
         .device_attributes = &Effects.deviceAttributesTrampoline,
         .enquiry = &Effects.enquiryTrampoline,
         .xtversion = &Effects.xtversionTrampoline,
@@ -457,6 +493,7 @@ pub const Option = enum(c_int) {
     clipboard_write = 26,
     scrollback_max_bytes = 27,
     scrollback_max_lines = 28,
+    desktop_notification = 29,
 
     /// Input type expected for setting the option.
     pub fn InType(comptime self: Option) type {
@@ -465,6 +502,7 @@ pub const Option = enum(c_int) {
             .write_pty => ?Effects.WritePtyFn,
             .bell => ?Effects.BellFn,
             .color_scheme => ?Effects.ColorSchemeFn,
+            .desktop_notification => ?Effects.DesktopNotificationFn,
             .device_attributes => ?Effects.DeviceAttributesFn,
             .enquiry => ?Effects.EnquiryFn,
             .xtversion => ?Effects.XtversionFn,
@@ -526,6 +564,7 @@ fn setTyped(
         .write_pty => wrapper.effects.write_pty = value,
         .bell => wrapper.effects.bell = value,
         .color_scheme => wrapper.effects.color_scheme = value,
+        .desktop_notification => wrapper.effects.desktop_notification = value,
         .device_attributes => wrapper.effects.device_attributes_cb = value,
         .enquiry => wrapper.effects.enquiry = value,
         .xtversion => wrapper.effects.xtversion = value,
@@ -2841,6 +2880,81 @@ test "title_changed without callback is silent" {
 
     // OSC 2 without a callback should not crash
     vt_write(t, "\x1B]2;Hello\x1B\\", 10);
+}
+
+test "set desktop_notification callback" {
+    var t: Terminal = null;
+    try testing.expectEqual(Result.success, new(
+        &lib.alloc.test_allocator,
+        &t,
+        .{
+            .cols = 80,
+            .rows = 24,
+            .max_scrollback = 0,
+        },
+    ));
+    defer free(t);
+
+    const S = struct {
+        var count: usize = 0;
+        var last_userdata: ?*anyopaque = null;
+        var last_size: usize = 0;
+        var title: [64]u8 = undefined;
+        var title_len: usize = 0;
+        var body: [64]u8 = undefined;
+        var body_len: usize = 0;
+
+        fn desktopNotification(
+            _: Terminal,
+            ud: ?*anyopaque,
+            notification: *const DesktopNotification,
+        ) callconv(lib.calling_conv) void {
+            count += 1;
+            last_userdata = ud;
+            last_size = notification.size;
+            title_len = notification.title.len;
+            body_len = notification.body.len;
+            @memcpy(title[0..title_len], notification.title.ptr[0..title_len]);
+            @memcpy(body[0..body_len], notification.body.ptr[0..body_len]);
+        }
+    };
+    S.count = 0;
+    S.last_userdata = null;
+    S.last_size = 0;
+    S.title_len = 0;
+    S.body_len = 0;
+
+    var sentinel: u8 = 99;
+    try testing.expectEqual(Result.success, set(t, .userdata, @ptrCast(&sentinel)));
+    try testing.expectEqual(Result.success, set(
+        t,
+        .desktop_notification,
+        @ptrCast(&S.desktopNotification),
+    ));
+
+    // Split OSC 777 across writes to exercise the persistent VT parser.
+    const seq_a = "\x1B]777;notify;Codex;";
+    const seq_b = "Needs attention\x1B\\";
+    vt_write(t, seq_a, seq_a.len);
+    try testing.expectEqual(@as(usize, 0), S.count);
+    vt_write(t, seq_b, seq_b.len);
+    try testing.expectEqual(@as(usize, 1), S.count);
+    try testing.expectEqual(@as(?*anyopaque, @ptrCast(&sentinel)), S.last_userdata);
+    try testing.expectEqual(@sizeOf(DesktopNotification), S.last_size);
+    try testing.expectEqualStrings("Codex", S.title[0..S.title_len]);
+    try testing.expectEqualStrings("Needs attention", S.body[0..S.body_len]);
+
+    // OSC 9 has no title and preserves its body.
+    const seq_c = "\x1B]9;Build complete\x07";
+    vt_write(t, seq_c, seq_c.len);
+    try testing.expectEqual(@as(usize, 2), S.count);
+    try testing.expectEqualStrings("", S.title[0..S.title_len]);
+    try testing.expectEqualStrings("Build complete", S.body[0..S.body_len]);
+
+    // Removing the callback takes effect immediately.
+    try testing.expectEqual(Result.success, set(t, .desktop_notification, null));
+    vt_write(t, seq_c, seq_c.len);
+    try testing.expectEqual(@as(usize, 2), S.count);
 }
 
 test "set pwd_changed callback" {
