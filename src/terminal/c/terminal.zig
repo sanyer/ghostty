@@ -2922,11 +2922,8 @@ test "set desktop_notification callback" {
     try testing.expectEqual(Result.success, new(
         &lib.alloc.test_allocator,
         &t,
-        .{
-            .cols = 80,
-            .rows = 24,
-            .max_scrollback = 0,
-        },
+        80,
+        24,
     ));
     defer free(t);
 
@@ -2997,11 +2994,8 @@ test "set progress_report callback" {
     try testing.expectEqual(Result.success, new(
         &lib.alloc.test_allocator,
         &t,
-        .{
-            .cols = 80,
-            .rows = 24,
-            .max_scrollback = 0,
-        },
+        80,
+        24,
     ));
     defer free(t);
 
