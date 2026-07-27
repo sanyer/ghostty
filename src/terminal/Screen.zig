@@ -253,9 +253,10 @@ pub const Options = struct {
     cols: size.CellCountInt,
     rows: size.CellCountInt,
 
-    /// The maximum size of scrollback in bytes. Zero disables scrollback. Any
-    /// other value will be clamped to support a minimum of the active area.
-    max_scrollback_bytes: usize = 0,
+    /// The maximum size of scrollback in bytes. Null is unlimited, zero
+    /// disables scrollback, and any other value is clamped to support a
+    /// minimum of the active area.
+    max_scrollback_bytes: ?usize = 0,
 
     /// The maximum number of physical scrollback rows, excluding the active
     /// area. Null is unlimited. The effective limit permits at least one
@@ -3782,18 +3783,23 @@ pub fn testWriteString(self: *Screen, text: []const u8) !void {
     }
 }
 
-test "Screen forwards max scrollback lines" {
+test "Screen forwards optional scrollback limits" {
     const testing = std.testing;
     const max_lines: usize = 123;
     var s = try init(testing.io, testing.allocator, .{
         .cols = 80,
         .rows = 24,
-        .max_scrollback_bytes = 10_000,
+        .max_scrollback_bytes = null,
         .max_scrollback_lines = max_lines,
     });
     defer s.deinit();
 
+    try testing.expectEqual(
+        std.math.maxInt(usize),
+        s.pages.explicit_max_size,
+    );
     try testing.expectEqual(max_lines, s.pages.explicit_max_lines);
+    try testing.expect(!s.no_scrollback);
 }
 
 test "Screen read and write" {

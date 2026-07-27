@@ -257,8 +257,9 @@ pub const Options = struct {
     cols: size.CellCountInt,
     rows: size.CellCountInt,
 
-    /// The maximum size of scrollback in bytes. Zero disables scrollback.
-    max_scrollback_bytes: usize = 10_000,
+    /// The maximum size of scrollback in bytes. Null is unlimited and zero
+    /// disables scrollback.
+    max_scrollback_bytes: ?usize = 10_000,
 
     /// The maximum number of physical scrollback rows, excluding the active
     /// area. Null is unlimited. The effective limit permits at least one
@@ -3880,15 +3881,20 @@ pub fn resize(
     };
 }
 
-test "Terminal forwards max scrollback lines" {
+test "Terminal forwards optional scrollback limits" {
     const max_lines: usize = 123;
     var t = try init(testing.io, testing.allocator, .{
         .cols = 80,
         .rows = 24,
+        .max_scrollback_bytes = null,
         .max_scrollback_lines = max_lines,
     });
     defer t.deinit(testing.allocator);
 
+    try testing.expectEqual(
+        std.math.maxInt(usize),
+        t.screens.active.pages.explicit_max_size,
+    );
     try testing.expectEqual(
         max_lines,
         t.screens.active.pages.explicit_max_lines,
