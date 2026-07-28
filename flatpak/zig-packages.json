@@ -43,9 +43,9 @@
   },
   {
     "type": "archive",
-    "url": "https://deps.files.ghostty.org/gobject-2026-04-23-26-1.tar.zst",
-    "dest": "vendor/p/gobject-0.3.1-Skun7E1KnwBGMX5nslHYG1yWHaSevywxQO8oM7tTOgIp",
-    "sha256": "642e324b3644c00464a2161e4af497f73cbbe8ce02a4c0edb92aacb365748047"
+    "url": "https://github.com/ghostty-org/zig-gobject/releases/download/0.10.0-2026-07-28-36-1/ghostty-gobject-0.10.0-2026-07-28-36-1.tar.zst",
+    "dest": "vendor/p/gobject-0.3.2-Skun7F6HogCMynX2JqeSHS7xr-8pK4ob-qRFIcEasVi3",
+    "sha256": "9014db570db06e3fbfcfadb7b32aa8addacc6969e701650683c1c74428adba6c"
   },
   {
     "type": "archive",
