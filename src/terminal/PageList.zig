@@ -6806,6 +6806,295 @@ pub const Pin = struct {
     }
 };
 
+/// Build up a PageList manually from a set of Pages.
+///
+/// This data structure is transactional: `deinit` releases every page
+/// until `finish` is called. This keeps the ownership clear: a complete
+/// PageList either owns all its pages or doesn't.
+///
+/// This was specifically built to help facilitate snapshot decoding
+/// which transfers pages directly, but could be generally useful
+/// for other purposes as well.
+pub const Builder = struct {
+    pool: MemoryPool,
+    pages: List = .{},
+    page_serial: u64 = 0,
+    page_size: usize = 0,
+    options: Options,
+
+    /// Initialize an empty builder. The options are the final state
+    /// of the PageList and some validation is done on the finish call
+    /// to ensure you built up a proper PageList according to those options.
+    pub fn init(
+        alloc: Allocator,
+        options: Options,
+    ) Allocator.Error!Builder {
+        return .{
+            .pool = try MemoryPool.init(
+                alloc,
+                pageAllocator(),
+                page_preheat,
+            ),
+            .options = options,
+        };
+    }
+
+    /// Release all pages when restoration does not finish. This MUST NOT
+    /// be called when `finish` is successfully called.
+    pub fn deinit(self: *Builder) void {
+        // Free all our in-progress pages
+        while (self.pages.popFirst()) |node| destroyNodeExt(
+            &self.pool,
+            node,
+            &self.page_size,
+        );
+        // Free memory pool
+        self.pool.deinit();
+        self.* = undefined;
+    }
+
+    /// Allocate a new page into the PageList with the given capacity.
+    ///
+    /// The caller can then take this page and populate it. When `finish`
+    /// is called, ownership is transferred to the resulting PageList.
+    /// Until then, this Builder owns the page.
+    pub fn addPage(
+        self: *Builder,
+        capacity: Capacity,
+    ) Allocator.Error!*Page {
+        const node = try createPageExt(
+            &self.pool,
+            .{ .cap = capacity },
+            &self.page_serial,
+            &self.page_size,
+        );
+        self.pages.append(node);
+        return node.pageAssumeResident();
+    }
+
+    pub const FinishError = Allocator.Error || error{
+        InvalidDimensions,
+        InvalidPageDimensions,
+        NoPages,
+        InsufficientRows,
+    };
+
+    /// Validate the decoded pages and transfer them into a live PageList.
+    /// This also frees all resources associated with the Builder (that
+    /// weren't transferred to the PageList). Do not call deinit after
+    /// this.
+    pub fn finish(self: *Builder) FinishError!PageList {
+        // These are basic validations but they're cheap to do and
+        // we want to be careful we don't let corruption from untrusted
+        // sources into our PageList which asserts this.
+        if (self.options.cols == 0 or self.options.rows == 0) {
+            return error.InvalidDimensions;
+        }
+        if (self.pages.first == null) return error.NoPages;
+
+        // Manually count our total rows at this point which we'll
+        // need for our PageList cache as well as a safety check.
+        const total_rows: usize = total_rows: {
+            var total_rows: usize = 0;
+            var node = self.pages.first;
+            while (node) |current| : (node = current.next) {
+                if (current.cols() == 0 or current.rows() == 0) {
+                    return error.InvalidPageDimensions;
+                }
+                total_rows += current.rows();
+            }
+            if (total_rows < self.options.rows) return error.InsufficientRows;
+            break :total_rows total_rows;
+        };
+
+        // Get our active pin
+        const active_top: Pin = active_top: {
+            var rem = self.options.rows;
+            var node = self.pages.last;
+            while (node) |current| : (node = current.prev) {
+                if (rem <= current.rows()) break :active_top .{
+                    .node = current,
+                    .y = current.rows() - rem,
+                };
+                rem -= current.rows();
+            } else unreachable;
+        };
+
+        // Set our viewport up to the active
+        const viewport_pin = try self.pool.pins.create();
+        errdefer self.pool.pins.destroy(viewport_pin);
+        viewport_pin.* = active_top;
+
+        // Setup our one viewport tracked pin
+        var tracked_pins: PinSet = .{};
+        errdefer tracked_pins.deinit(self.pool.alloc);
+        try tracked_pins.putNoClobber(self.pool.alloc, viewport_pin, {});
+
+        // Initialize limits
+        var limits: Limits = .init(self.options.cols, self.options.rows);
+        limits.set(.bytes, self.options.max_size);
+        limits.set(.lines, self.options.max_lines);
+
+        const result: PageList = .{
+            .cols = self.options.cols,
+            .rows = self.options.rows,
+            .pool = self.pool,
+            .pages = self.pages,
+            .page_serial = self.page_serial,
+            .page_serial_epoch = 0,
+            .page_size = self.page_size,
+            .limits = limits,
+            .total_rows = total_rows,
+            .tracked_pins = tracked_pins,
+            .viewport = .{ .active = {} },
+            .viewport_pin = viewport_pin,
+            .viewport_pin_row_offset = null,
+        };
+        result.assertIntegrity();
+        self.* = undefined;
+        return result;
+    }
+};
+
+test "PageList Builder transfers mixed-width pages" {
+    const testing = std.testing;
+
+    // Build two populated pages whose widths differ from each other and from
+    // the final active-area width. The first page also includes one row of
+    // incidental history above the three-row active area.
+    var result: PageList = result: {
+        var builder = try Builder.init(testing.allocator, .{
+            .cols = 4,
+            .rows = 3,
+            .max_size = null,
+            .max_lines = null,
+        });
+        errdefer builder.deinit();
+
+        const first = try builder.addPage(.{
+            .cols = 2,
+            .rows = 2,
+        });
+        first.size.rows = 2;
+        first.getRowAndCell(0, 0).cell.* = .init('A');
+
+        const second = try builder.addPage(.{
+            .cols = 4,
+            .rows = 2,
+        });
+        second.size.rows = 2;
+        second.getRowAndCell(0, 0).cell.* = .init('B');
+
+        break :result try builder.finish();
+    };
+    defer result.deinit();
+
+    // Successful finish transfers ownership and initializes the PageList's
+    // desired geometry, viewport, and required tracked viewport pin.
+    try testing.expectEqual(@as(size.CellCountInt, 4), result.cols);
+    try testing.expectEqual(@as(size.CellCountInt, 3), result.rows);
+    try testing.expectEqual(@as(usize, 2), result.totalPages());
+    try testing.expectEqual(@as(usize, 1), result.countTrackedPins());
+    try testing.expectEqual(Viewport.active, result.viewport);
+
+    // Complete pages and their contents are preserved in insertion order,
+    // including widths which have not yet been reflowed.
+    const screen_top = result.getTopLeft(.screen);
+    try testing.expectEqual(@as(size.CellCountInt, 2), screen_top.node.cols());
+    try testing.expectEqual(@as(u21, 'A'), screen_top
+        .node.page().getRowAndCell(0, 0).cell.codepoint());
+
+    // The active area is calculated backward from the newest page, so it
+    // begins at row one of the oldest page and leaves row zero as history.
+    const active_top = result.getTopLeft(.active);
+    try testing.expectEqual(screen_top.node, active_top.node);
+    try testing.expectEqual(@as(size.CellCountInt, 1), active_top.y);
+    try testing.expectEqual(@as(size.CellCountInt, 4), active_top
+        .node.next.?.cols());
+    try testing.expectEqual(@as(u21, 'B'), active_top
+        .node.next.?.page().getRowAndCell(0, 0).cell.codepoint());
+
+    result.assertIntegrity();
+}
+
+test "PageList Builder validates the finished list" {
+    const testing = std.testing;
+
+    // The desired PageList geometry must describe a non-empty screen.
+    {
+        var builder = try Builder.init(testing.allocator, .{
+            .cols = 0,
+            .rows = 1,
+        });
+        defer builder.deinit();
+        try testing.expectError(error.InvalidDimensions, builder.finish());
+    }
+
+    // A PageList cannot be finished without any backing pages.
+    {
+        var builder = try Builder.init(testing.allocator, .{
+            .cols = 1,
+            .rows = 1,
+        });
+        defer builder.deinit();
+        try testing.expectError(error.NoPages, builder.finish());
+    }
+
+    // Allocated capacity alone is insufficient: callers must populate a
+    // nonzero logical page size before transferring ownership.
+    {
+        var builder = try Builder.init(testing.allocator, .{
+            .cols = 1,
+            .rows = 1,
+        });
+        defer builder.deinit();
+        const page = try builder.addPage(.{ .cols = 1, .rows = 1 });
+        page.size.rows = 0;
+        try testing.expectError(
+            error.InvalidPageDimensions,
+            builder.finish(),
+        );
+    }
+
+    // The populated pages must contain enough rows to cover the active area.
+    {
+        var builder = try Builder.init(testing.allocator, .{
+            .cols = 1,
+            .rows = 2,
+        });
+        defer builder.deinit();
+        const page = try builder.addPage(.{ .cols = 1, .rows = 1 });
+        page.size.rows = 1;
+        try testing.expectError(error.InsufficientRows, builder.finish());
+    }
+}
+
+test "PageList Builder finish is transactional on allocation failure" {
+    const testing = std.testing;
+
+    // Construct a valid builder so finish reaches its fallible bookkeeping
+    // allocations after all page and geometry validation succeeds.
+    var failing = testing.FailingAllocator.init(testing.allocator, .{});
+    var builder = try Builder.init(failing.allocator(), .{
+        .cols = 1,
+        .rows = 1,
+    });
+    defer builder.deinit();
+    const page = try builder.addPage(.{ .cols = 1, .rows = 1 });
+    page.size.rows = 1;
+
+    // The pools are preheated, so the next general allocation is the tracked
+    // viewport pin map created by finish.
+    failing.fail_index = failing.alloc_index;
+    try testing.expectError(error.OutOfMemory, builder.finish());
+    try testing.expect(failing.has_induced_failure);
+
+    // Failed finish leaves page ownership with the builder so its normal
+    // deinit path can release the still-linked page.
+    try testing.expect(builder.pages.first != null);
+    try testing.expectEqual(builder.pages.first, builder.pages.last);
+}
+
 fn mixedWidthPinListForTest(alloc: Allocator) !PageList {
     var result = try init(alloc, .{ .cols = 2, .rows = 1 });
     errdefer result.deinit();
