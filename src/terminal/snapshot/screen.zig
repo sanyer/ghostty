@@ -200,13 +200,13 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 const hyperlink = @import("hyperlink.zig");
 const io = @import("io.zig");
+const page = @import("page.zig");
 const record = @import("record.zig");
 const style = @import("style.zig");
 const terminal_ansi = @import("../ansi.zig");
 const terminal_charsets = @import("../charsets.zig");
 const terminal_hyperlink = @import("../hyperlink.zig");
 const terminal_kitty = @import("../kitty.zig");
-const terminal_page = @import("../page.zig");
 const TerminalScreen = @import("../Screen.zig");
 const TerminalScreenKey = @import("../ScreenSet.zig").Key;
 const terminal_style = @import("../style.zig");
@@ -224,29 +224,58 @@ const PayloadEncodeError = std.Io.Writer.Error || error{
     InvalidSavedCursorFlags,
 };
 
-/// Errors possible while encoding a complete SCREEN record.
-pub const EncodeError = PayloadEncodeError || record.Writer.FinishError;
+/// Errors possible while encoding a SCREEN and its complete PAGE sequence.
+pub const EncodeError = PayloadEncodeError || page.EncodeError || error{
+    /// The active area spans more pages than the SCREEN header can declare.
+    PageCountOverflow,
+};
 
-/// Encode one complete SCREEN record from a native screen.
+/// Encode one SCREEN and its minimal suffix of complete native pages.
 ///
-/// The caller writes the `page_count` PAGE records immediately afterward.
-/// If encoding fails, the partial SCREEN record is removed while earlier
-/// destination bytes remain.
+/// The suffix begins with the page containing the active area's first row and
+/// ends with the newest page. If encoding any record fails, the entire sequence
+/// is removed while earlier destination bytes remain.
 pub fn encode(
     screen: *const TerminalScreen,
     key: TerminalScreenKey,
-    page_count: u16,
     destination: *std.Io.Writer.Allocating,
 ) EncodeError!void {
-    var record_writer = try record.Writer.init(destination, .screen);
-    errdefer record_writer.cancel();
-    try encodePayload(
-        screen,
-        key,
+    const sequence_start = destination.written().len;
+    errdefer destination.shrinkRetainingCapacity(sequence_start);
+
+    // The active top may fall inside this page, leaving an incidental history
+    // prefix. Every earlier complete page is history and is omitted.
+    const first = screen.pages.getTopLeft(.active).node;
+    var page_count: usize = 0;
+    var node: ?@TypeOf(first) = first;
+    while (node) |current| : (node = current.next) page_count += 1;
+    const encoded_page_count = std.math.cast(
+        u16,
         page_count,
-        record_writer.payloadWriter(),
-    );
-    try record_writer.finish();
+    ) orelse return error.PageCountOverflow;
+
+    // SCREEN declares exactly how many immediately following PAGE records
+    // belong to it.
+    {
+        var record_writer = try record.Writer.init(destination, .screen);
+        errdefer record_writer.cancel();
+        try encodePayload(
+            screen,
+            key,
+            encoded_page_count,
+            record_writer.payloadWriter(),
+        );
+        try record_writer.finish();
+    }
+
+    // PageList never compresses the active-boundary page or any later page.
+    // Encoding this resident suffix therefore does not restore cold history or
+    // otherwise mutate the source screen.
+    node = first;
+    while (node) |current| : (node = current.next) {
+        std.debug.assert(current.pageIfResident() != null);
+        try page.encode(current.pageAssumeResident(), destination);
+    }
 }
 
 /// Errors possible while decoding fixed SCREEN payload fields.
@@ -1535,7 +1564,7 @@ test "cursor hyperlink encoding and decoding" {
     }
 }
 
-test "framed native SCREEN record" {
+test "framed native SCREEN and PAGE sequence" {
     var screen = try TerminalScreen.init(
         std.testing.io,
         std.testing.allocator,
@@ -1609,7 +1638,7 @@ test "framed native SCREEN record" {
     );
     defer destination.deinit();
     try destination.writer.writeAll("prefix");
-    try encode(&screen, .alternate, 0x0203, &destination);
+    try encode(&screen, .alternate, &destination);
 
     try std.testing.expectEqualStrings(
         "prefix",
@@ -1623,6 +1652,7 @@ test "framed native SCREEN record" {
 
     const payload_reader = record_reader.payloadReader();
     var expected_header = testHeader();
+    expected_header.page_count = 1;
     expected_header.cursor_x = 5;
     expected_header.cursor_y = 6;
     try std.testing.expectEqualDeep(
@@ -1645,9 +1675,95 @@ test "framed native SCREEN record" {
     defer actual_hyperlink.deinit(std.testing.allocator);
     try expectHyperlinkEqual(expected_hyperlink, actual_hyperlink);
     try record_reader.finish();
+
+    var decoded_page = try page.decode(&source, std.testing.allocator);
+    defer decoded_page.deinit();
+    try std.testing.expectEqual(@as(u16, 8), decoded_page.size.cols);
+    try std.testing.expectEqual(@as(u16, 8), decoded_page.size.rows);
+    try std.testing.expectError(error.EndOfStream, source.takeByte());
 }
 
-test "framed SCREEN encoding failure preserves preceding bytes" {
+test "SCREEN encodes the minimal complete-page active suffix" {
+    var probe = try TerminalScreen.init(
+        std.testing.io,
+        std.testing.allocator,
+        .{ .cols = 80, .rows = 1, .max_scrollback_bytes = 0 },
+    );
+    const page_rows = probe.pages.getTopLeft(.screen).node.capacity().rows;
+    probe.deinit();
+    const screen_rows = page_rows + 1;
+
+    var screen = try TerminalScreen.init(
+        std.testing.io,
+        std.testing.allocator,
+        .{
+            .cols = 80,
+            .rows = screen_rows,
+            .max_scrollback_bytes = null,
+        },
+    );
+    defer screen.deinit();
+
+    // Create one complete historical page followed by a mixed page whose
+    // first row is history and whose remaining rows begin the active area.
+    screen.cursorAbsolute(0, screen_rows - 1);
+    for (0..screen_rows) |_| try screen.testWriteString("\n");
+    try std.testing.expectEqual(@as(usize, 3), screen.pages.totalPages());
+
+    const active_top = screen.pages.getTopLeft(.active);
+    const historical = screen.pages.getTopLeft(.screen).node;
+    const mixed = historical.next.?;
+    const newest = mixed.next.?;
+    try std.testing.expectEqual(mixed, active_top.node);
+    try std.testing.expectEqual(@as(u16, 1), active_top.y);
+    try std.testing.expectEqual(null, newest.next);
+
+    // Mark each native page so the encoded sequence proves both omission and
+    // oldest-to-newest ordering. The mixed page's marker is in its incidental
+    // history prefix and must survive because complete pages are encoded.
+    historical.page().getRowAndCell(0, 0).cell.* = .init('A');
+    mixed.page().getRowAndCell(0, 0).cell.* = .init('B');
+    newest.page().getRowAndCell(0, 0).cell.* = .init('C');
+
+    var destination: std.Io.Writer.Allocating = .init(
+        std.testing.allocator,
+    );
+    defer destination.deinit();
+    try encode(&screen, .primary, &destination);
+
+    var source: std.Io.Reader = .fixed(destination.written());
+    var screen_record: record.Reader = undefined;
+    try screen_record.init(&source);
+    try std.testing.expectEqual(record.Tag.screen, screen_record.header.tag);
+
+    const payload_reader = screen_record.payloadReader();
+    const header = try Header.decode(payload_reader);
+    try std.testing.expectEqual(Key.primary, header.key);
+    try std.testing.expectEqual(@as(u16, 2), header.page_count);
+    try std.testing.expect(!header.saved_cursor_present);
+    try std.testing.expectEqual(
+        null,
+        try decodeCursorHyperlink(payload_reader, std.testing.allocator),
+    );
+    try screen_record.finish();
+
+    var decoded_mixed = try page.decode(&source, std.testing.allocator);
+    defer decoded_mixed.deinit();
+    try std.testing.expectEqual(
+        @as(u21, 'B'),
+        decoded_mixed.getRowAndCell(0, 0).cell.codepoint(),
+    );
+
+    var decoded_newest = try page.decode(&source, std.testing.allocator);
+    defer decoded_newest.deinit();
+    try std.testing.expectEqual(
+        @as(u21, 'C'),
+        decoded_newest.getRowAndCell(0, 0).cell.codepoint(),
+    );
+    try std.testing.expectError(error.EndOfStream, source.takeByte());
+}
+
+test "SCREEN sequence failure preserves preceding bytes" {
     var screen = try TerminalScreen.init(
         std.testing.io,
         std.testing.allocator,
@@ -1661,7 +1777,7 @@ test "framed SCREEN encoding failure preserves preceding bytes" {
     );
     var destination = try std.Io.Writer.Allocating.initCapacity(
         failing.allocator(),
-        6 + record.Header.len,
+        6 + record.Header.len + Header.len + 1,
     );
     defer destination.deinit();
     try destination.writer.writeAll("prefix");
@@ -1669,7 +1785,7 @@ test "framed SCREEN encoding failure preserves preceding bytes" {
     failing.fail_index = failing.alloc_index;
     try std.testing.expectError(
         error.WriteFailed,
-        encode(&screen, .primary, 1, &destination),
+        encode(&screen, .primary, &destination),
     );
     try std.testing.expectEqualStrings("prefix", destination.written());
 }

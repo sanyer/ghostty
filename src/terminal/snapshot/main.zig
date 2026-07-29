@@ -52,20 +52,17 @@
 //! defer output.deinit();
 //!
 //! try envelope.encode(&output.writer);
-//! try page.encode(&terminal_page, &output);
+//! try screen.encode(&terminal_screen, .primary, &output);
 //!
 //! const snapshot = output.written();
 //! ```
 //!
-//! Record codecs reserve and backpatch their own framing, so callers do not
-//! calculate payload lengths or checksums. `written` borrows the completed
-//! bytes from the allocating writer. Use `toOwnedSlice` instead when ownership
-//! must be transferred to the caller.
+//! We have to use an allocating writer because record formats require
+//! encoding the length and CRC in the header, so we need a seekable
+//! format.
 //!
-//! `page.encode` currently appends one complete framed PAGE record. Its
-//! lower-level payload codec is intentionally private. `page.decode` consumes
-//! and validates one complete PAGE record, including its payload boundary,
-//! checksum, and restored page integrity.
+//! Each record type usually exposes an `encode` function that encodes
+//! a complete record, such as `screen.encode`.
 
 pub const envelope = @import("envelope.zig");
 pub const grid = @import("grid.zig");
