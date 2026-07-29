@@ -197,6 +197,7 @@
 //! bump.
 
 const std = @import("std");
+const build_options = @import("terminal_options");
 const Allocator = std.mem.Allocator;
 const hyperlink = @import("hyperlink.zig");
 const io = @import("io.zig");
@@ -207,6 +208,8 @@ const terminal_ansi = @import("../ansi.zig");
 const terminal_charsets = @import("../charsets.zig");
 const terminal_hyperlink = @import("../hyperlink.zig");
 const terminal_kitty = @import("../kitty.zig");
+const terminal_page = @import("../page.zig");
+const TerminalPageList = @import("../PageList.zig");
 const TerminalScreen = @import("../Screen.zig");
 const TerminalScreenKey = @import("../ScreenSet.zig").Key;
 const terminal_style = @import("../style.zig");
@@ -278,8 +281,233 @@ pub fn encode(
     }
 }
 
+/// Errors possible while restoring a SCREEN and its declared PAGE sequence.
+pub const DecodeError = PayloadDecodeError ||
+    hyperlink.DecodeError ||
+    page.DecodeError ||
+    record.Reader.InitError ||
+    record.Reader.FinishError ||
+    TerminalPageList.Builder.FinishError ||
+    TerminalPageList.IncreaseCapacityError ||
+    error{
+        /// The next record is valid but is not a SCREEN.
+        UnexpectedRecordTag,
+
+        /// The SCREEN key does not match the caller-selected native screen.
+        UnexpectedScreenKey,
+
+        /// A SCREEN must declare at least one PAGE.
+        InvalidPageCount,
+
+        /// The cursor is outside the restored active area.
+        InvalidCursorPosition,
+    };
+
+/// Restore one SCREEN and its declared PAGE records into native terminal state.
+///
+/// The caller supplies terminal-wide dimensions and policy. The record sequence
+/// is decoded transactionally: on failure, all page, pin, hyperlink, and
+/// temporary allocations are released and no partially restored Screen escapes.
+pub fn decode(
+    source: *std.Io.Reader,
+    io_: std.Io,
+    alloc: Allocator,
+    expected_key: TerminalScreenKey,
+    options: TerminalScreen.Options,
+) DecodeError!TerminalScreen {
+    // Decode and finish the self-contained SCREEN record before consuming any
+    // of the PAGE records which follow it.
+    var record_reader: record.Reader = undefined;
+    try record_reader.init(source);
+    if (record_reader.header.tag != .screen) {
+        return error.UnexpectedRecordTag;
+    }
+
+    // The optional saved cursor and cursor hyperlink are both part of the
+    // SCREEN payload. Keep ownership of the decoded hyperlink locally until it
+    // has been copied into the native Screen.
+    const payload_reader = record_reader.payloadReader();
+    const header = try Header.decode(payload_reader);
+    const saved_cursor = if (header.saved_cursor_present)
+        try SavedCursor.decode(payload_reader)
+    else
+        null;
+    var cursor_hyperlink = try decodeCursorHyperlink(
+        payload_reader,
+        alloc,
+    );
+    defer if (cursor_hyperlink) |*value| value.deinit(alloc);
+    try record_reader.finish();
+
+    // Reject a structurally valid SCREEN which does not describe the native
+    // screen selected by the caller.
+    if (header.key.terminal() != expected_key) {
+        return error.UnexpectedScreenKey;
+    }
+    if (header.page_count == 0) return error.InvalidPageCount;
+
+    // Dimensions are terminal-wide state supplied by the enclosing snapshot.
+    // Validate them, and all cursor invariants which depend on them, before
+    // allocating the declared pages.
+    if (options.cols == 0 or options.rows == 0) {
+        return error.InvalidDimensions;
+    }
+    if (header.cursor_x >= options.cols or
+        header.cursor_y >= options.rows or
+        (header.cursor_flags.pending_wrap and
+            header.cursor_x != options.cols - 1))
+    {
+        return error.InvalidCursorPosition;
+    }
+
+    // Build the native page list transactionally. Alternate screens never
+    // retain scrollback, while primary screens inherit the caller's limits.
+    var result: TerminalScreen = result: {
+        var builder = try TerminalPageList.Builder.init(alloc, .{
+            .cols = options.cols,
+            .rows = options.rows,
+            .max_size = if (expected_key == .alternate)
+                0
+            else
+                options.max_scrollback_bytes,
+            .max_lines = if (expected_key == .alternate)
+                0
+            else
+                options.max_scrollback_lines,
+        });
+        defer builder.deinit();
+
+        // Allocate each PAGE at its declared capacity and decode directly into
+        // builder-owned storage, avoiding an intermediate page representation.
+        for (0..header.page_count) |_| {
+            var decoder: page.Decoder = undefined;
+            try decoder.init(source);
+            const native_page = try builder.allocatePage(decoder.capacity());
+            try decoder.decode(native_page, alloc);
+        }
+
+        // Finishing validates that the decoded suffix covers the active area
+        // and establishes the PageList's active viewport.
+        var pages = try builder.finish();
+        errdefer pages.deinit();
+
+        // Convert the payload-relative cursor position into the tracked native
+        // pin and page-local row/cell pointers required by TerminalScreen.
+        const cursor_pin_value = pages.pin(.{ .active = .{
+            .x = header.cursor_x,
+            .y = header.cursor_y,
+        } }) orelse return error.InvalidCursorPosition;
+        const cursor_pin = try pages.trackPin(cursor_pin_value);
+        const cursor_rac = cursor_pin.rowAndCell();
+
+        // Assemble the remaining native state from stable snapshot registries.
+        // Derived state and page-local table references are repaired below.
+        break :result .{
+            .io = io_,
+            .alloc = alloc,
+            .pages = pages,
+            .no_scrollback = expected_key == .alternate or
+                options.max_scrollback_bytes == 0,
+            .cursor = .{
+                .x = header.cursor_x,
+                .y = header.cursor_y,
+                .cursor_style = header.cursor_style.terminal(),
+                .pending_wrap = header.cursor_flags.pending_wrap,
+                .protected = header.cursor_flags.protected,
+                .style = header.cursor_pen,
+                .hyperlink_implicit_id = header.hyperlink_implicit_id,
+                .semantic_content = header.cursor_flags.semantic_content
+                    .terminal(),
+                .semantic_content_clear_eol = header.cursor_flags
+                    .semantic_content_clear_eol,
+                .page_pin = cursor_pin,
+                .page_row = cursor_rac.row,
+                .page_cell = cursor_rac.cell,
+            },
+            .saved_cursor = if (saved_cursor) |value|
+                value.terminal()
+            else
+                null,
+            .charset = header.charset.terminal(),
+            .protected_mode = header.protected_mode.terminal(),
+            .kitty_keyboard = header.kitty_keyboard.terminal(),
+            .semantic_prompt = .{
+                .seen = false,
+                .click = header.semantic_click.terminal(),
+            },
+        };
+    };
+    errdefer result.deinit();
+
+    // Reinsert the concrete cursor style into its page-local style table. This
+    // existing Screen path grows or splits the page when the decoded table is
+    // already full.
+    try result.manualStyleUpdate();
+
+    // Reinsert the cursor hyperlink into its page-local hyperlink table. For an
+    // implicit link, temporarily seed the counter with the encoded link ID,
+    // then restore the independent next-ID counter from the header.
+    if (cursor_hyperlink) |value| {
+        switch (value.id) {
+            .explicit => |id| try result.startHyperlink(value.uri, id),
+            .implicit => |id| {
+                result.cursor.hyperlink_implicit_id = id;
+                try result.startHyperlink(value.uri, null);
+                result.cursor.hyperlink_implicit_id =
+                    header.hyperlink_implicit_id;
+            },
+        }
+    }
+
+    // `seen` is derived state. Only resident prompt metadata participates
+    // because omitted history is outside the restored Screen model.
+    result.semantic_prompt.seen = seen: {
+        if (result.cursor.semantic_content == .prompt) break :seen true;
+
+        var node = result.pages.getTopLeft(.screen).node;
+        while (true) {
+            const native_page = node.pageAssumeResident();
+            const rows = native_page.rows.ptr(
+                native_page.memory,
+            )[0..native_page.size.rows];
+            for (rows) |row| {
+                if (row.semantic_prompt != .none) break :seen true;
+
+                const cells = row.cells.ptr(
+                    native_page.memory,
+                )[0..native_page.size.cols];
+                for (cells) |cell| {
+                    if (cell.semantic_content == .prompt) break :seen true;
+                }
+            }
+
+            node = node.next orelse break :seen false;
+        }
+
+        unreachable;
+    };
+
+    // Kitty image payloads are outside this record, but the restored Screen
+    // must still receive the caller's terminal-wide storage policy.
+    if (comptime build_options.kitty_graphics) {
+        result.kitty_images.setLimit(
+            io_,
+            alloc,
+            &result,
+            options.kitty_image_storage_limit,
+        ) catch unreachable;
+        result.kitty_images.image_limits = options.kitty_image_loading_limits;
+    }
+
+    // All fallible reconstruction is complete; verify the native invariants
+    // before transferring ownership to the caller.
+    result.pages.assertIntegrity();
+    result.assertIntegrity();
+    return result;
+}
+
 /// Errors possible while decoding fixed SCREEN payload fields.
-pub const DecodeError = style.DecodeError || error{
+const PayloadDecodeError = style.DecodeError || error{
     InvalidKey,
     InvalidCursorStyle,
     InvalidCursorFlags,
@@ -304,6 +532,13 @@ pub const Key = enum(u16) {
             .alternate => .alternate,
         };
     }
+
+    fn terminal(self: Key) TerminalScreenKey {
+        return switch (self) {
+            .primary => .primary,
+            .alternate => .alternate,
+        };
+    }
 };
 
 /// Snapshot registry for the cursor's visual shape.
@@ -315,6 +550,15 @@ pub const CursorStyle = enum(u8) {
 
     fn init(value: TerminalScreen.CursorStyle) CursorStyle {
         return switch (value) {
+            .bar => .bar,
+            .block => .block,
+            .underline => .underline,
+            .block_hollow => .block_hollow,
+        };
+    }
+
+    fn terminal(self: CursorStyle) TerminalScreen.CursorStyle {
+        return switch (self) {
             .bar => .bar,
             .block => .block,
             .underline => .underline,
@@ -337,6 +581,15 @@ pub const CursorFlags = packed struct(u8) {
         input = 1,
         prompt = 2,
         invalid = 3,
+
+        fn terminal(self: SemanticContent) terminal_page.Cell.SemanticContent {
+            return switch (self) {
+                .output => .output,
+                .input => .input,
+                .prompt => .prompt,
+                .invalid => unreachable,
+            };
+        }
     };
 
     fn init(cursor: *const TerminalScreen.Cursor) CursorFlags {
@@ -354,7 +607,7 @@ pub const CursorFlags = packed struct(u8) {
     }
 
     /// Decode and validate the cursor flag registry.
-    pub fn decode(reader: *std.Io.Reader) DecodeError!CursorFlags {
+    pub fn decode(reader: *std.Io.Reader) PayloadDecodeError!CursorFlags {
         const result: CursorFlags = @bitCast(try reader.takeByte());
         if (result._padding != 0) return error.InvalidCursorFlags;
         if (result.semantic_content == .invalid) {
@@ -381,6 +634,15 @@ pub const CharsetState = packed struct(u16) {
         ascii = 1,
         british = 2,
         dec_special = 3,
+
+        fn terminal(self: Charset) terminal_charsets.Charset {
+            return switch (self) {
+                .utf8 => .utf8,
+                .ascii => .ascii,
+                .british => .british,
+                .dec_special => .dec_special,
+            };
+        }
     };
 
     /// Snapshot registry for a G0 through G3 charset slot.
@@ -389,6 +651,15 @@ pub const CharsetState = packed struct(u16) {
         g1 = 1,
         g2 = 2,
         g3 = 3,
+
+        fn terminal(self: Slot) terminal_charsets.Slots {
+            return switch (self) {
+                .g0 => .G0,
+                .g1 => .G1,
+                .g2 => .G2,
+                .g3 => .G3,
+            };
+        }
     };
 
     /// Snapshot registry for the single-shift charset slot.
@@ -399,6 +670,17 @@ pub const CharsetState = packed struct(u16) {
         g2 = 3,
         g3 = 4,
         _,
+
+        fn terminal(self: SingleShift) ?terminal_charsets.Slots {
+            return switch (self) {
+                .none => null,
+                .g0 => .G0,
+                .g1 => .G1,
+                .g2 => .G2,
+                .g3 => .G3,
+                _ => unreachable,
+            };
+        }
     };
 
     fn init(value: TerminalScreen.CharsetState) CharsetState {
@@ -421,6 +703,19 @@ pub const CharsetState = packed struct(u16) {
         };
     }
 
+    fn terminal(self: CharsetState) TerminalScreen.CharsetState {
+        var result: TerminalScreen.CharsetState = .{
+            .gl = self.gl.terminal(),
+            .gr = self.gr.terminal(),
+            .single_shift = self.single_shift.terminal(),
+        };
+        result.charsets.set(.G0, self.g0.terminal());
+        result.charsets.set(.G1, self.g1.terminal());
+        result.charsets.set(.G2, self.g2.terminal());
+        result.charsets.set(.G3, self.g3.terminal());
+        return result;
+    }
+
     fn charset(value: terminal_charsets.Charset) Charset {
         return switch (value) {
             .utf8 => .utf8,
@@ -440,7 +735,7 @@ pub const CharsetState = packed struct(u16) {
     }
 
     /// Decode and validate the packed charset registry.
-    pub fn decode(reader: *std.Io.Reader) DecodeError!CharsetState {
+    pub fn decode(reader: *std.Io.Reader) PayloadDecodeError!CharsetState {
         const result: CharsetState = @bitCast(try io.readInt(reader, u16));
         if (result._padding != 0) return error.InvalidCharsetState;
         switch (result.single_shift) {
@@ -464,6 +759,14 @@ pub const ProtectedMode = enum(u8) {
             .dec => .dec,
         };
     }
+
+    fn terminal(self: ProtectedMode) terminal_ansi.ProtectedMode {
+        return switch (self) {
+            .off => .off,
+            .iso => .iso,
+            .dec => .dec,
+        };
+    }
 };
 
 /// The complete fixed-size Kitty keyboard stack.
@@ -481,7 +784,7 @@ pub const KittyKeyboard = struct {
         _padding: u3 = 0,
 
         /// Decode and validate one Kitty keyboard flag byte.
-        pub fn decode(reader: *std.Io.Reader) DecodeError!Flags {
+        pub fn decode(reader: *std.Io.Reader) PayloadDecodeError!Flags {
             const result: Flags = @bitCast(try reader.takeByte());
             if (result._padding != 0) {
                 return error.InvalidKittyKeyboardFlags;
@@ -504,8 +807,24 @@ pub const KittyKeyboard = struct {
         return result;
     }
 
+    fn terminal(self: KittyKeyboard) terminal_kitty.KeyFlagStack {
+        var result: terminal_kitty.KeyFlagStack = .{
+            .idx = @intCast(self.index),
+        };
+        for (self.flags, &result.flags) |snapshot, *native| {
+            native.* = .{
+                .disambiguate = snapshot.disambiguate,
+                .report_events = snapshot.report_events,
+                .report_alternates = snapshot.report_alternates,
+                .report_all = snapshot.report_all,
+                .report_associated = snapshot.report_associated,
+            };
+        }
+        return result;
+    }
+
     /// Decode and validate the complete fixed Kitty keyboard stack.
-    pub fn decode(reader: *std.Io.Reader) DecodeError!KittyKeyboard {
+    pub fn decode(reader: *std.Io.Reader) PayloadDecodeError!KittyKeyboard {
         const index = try reader.takeByte();
         if (index >= 8) return error.InvalidKittyKeyboardIndex;
 
@@ -564,8 +883,26 @@ pub const SemanticClick = union(SemanticClickKind) {
         };
     }
 
+    fn terminal(
+        self: SemanticClick,
+    ) TerminalScreen.SemanticPrompt.SemanticClick {
+        return switch (self) {
+            .none => .none,
+            .click_events => |value| .{ .click_events = switch (value) {
+                .absolute => .absolute,
+                .relative => .relative,
+            } },
+            .cl => |value| .{ .cl = switch (value) {
+                .line => .line,
+                .multiple => .multiple,
+                .conservative_vertical => .conservative_vertical,
+                .smart_vertical => .smart_vertical,
+            } },
+        };
+    }
+
     /// Decode and validate the semantic-click kind and value bytes.
-    pub fn decode(reader: *std.Io.Reader) DecodeError!SemanticClick {
+    pub fn decode(reader: *std.Io.Reader) PayloadDecodeError!SemanticClick {
         const kind_raw = try reader.takeByte();
         const value_raw = try reader.takeByte();
         const kind = std.enums.fromInt(
@@ -613,7 +950,7 @@ pub const SavedCursor = struct {
         _padding: u5 = 0,
 
         /// Decode and validate saved cursor flags.
-        pub fn decode(reader: *std.Io.Reader) DecodeError!Flags {
+        pub fn decode(reader: *std.Io.Reader) PayloadDecodeError!Flags {
             const result: Flags = @bitCast(try reader.takeByte());
             if (result._padding != 0) return error.InvalidSavedCursorFlags;
             return result;
@@ -631,6 +968,18 @@ pub const SavedCursor = struct {
                 .origin = value.origin,
             },
             .charset = .init(value.charset),
+        };
+    }
+
+    fn terminal(self: SavedCursor) TerminalScreen.SavedCursor {
+        return .{
+            .x = self.x,
+            .y = self.y,
+            .style = self.pen,
+            .protected = self.flags.protected,
+            .pending_wrap = self.flags.pending_wrap,
+            .origin = self.flags.origin,
+            .charset = self.charset.terminal(),
         };
     }
 
@@ -656,7 +1005,7 @@ pub const SavedCursor = struct {
     }
 
     /// Decode and validate one optional saved cursor value.
-    pub fn decode(reader: *std.Io.Reader) DecodeError!SavedCursor {
+    pub fn decode(reader: *std.Io.Reader) PayloadDecodeError!SavedCursor {
         return .{
             .x = try io.readInt(reader, u16),
             .y = try io.readInt(reader, u16),
@@ -803,7 +1152,7 @@ pub const Header = struct {
     }
 
     /// Decode and validate the fixed SCREEN payload header.
-    pub fn decode(reader: *std.Io.Reader) DecodeError!Header {
+    pub fn decode(reader: *std.Io.Reader) PayloadDecodeError!Header {
         // Screen identity and cursor position.
         const key = std.enums.fromInt(
             Key,
@@ -1573,7 +1922,7 @@ test "framed native SCREEN and PAGE sequence" {
     defer screen.deinit();
 
     // Configure the live cursor state represented by the fixed header.
-    screen.cursorAbsolute(5, 6);
+    screen.cursorAbsolute(7, 6);
     screen.cursor.cursor_style = .block_hollow;
     screen.cursor.pending_wrap = true;
     screen.cursor.protected = false;
@@ -1631,7 +1980,7 @@ test "framed native SCREEN and PAGE sequence" {
         .origin = true,
         .charset = charset,
     };
-    try screen.startHyperlink("cursor-uri", "cursor-id");
+    try screen.startHyperlink("cursor-uri", null);
 
     var destination: std.Io.Writer.Allocating = .init(
         std.testing.allocator,
@@ -1653,8 +2002,9 @@ test "framed native SCREEN and PAGE sequence" {
     const payload_reader = record_reader.payloadReader();
     var expected_header = testHeader();
     expected_header.page_count = 1;
-    expected_header.cursor_x = 5;
+    expected_header.cursor_x = 7;
     expected_header.cursor_y = 6;
+    expected_header.hyperlink_implicit_id = 0x0a0b0c0e;
     try std.testing.expectEqualDeep(
         expected_header,
         try Header.decode(payload_reader),
@@ -1665,7 +2015,7 @@ test "framed native SCREEN and PAGE sequence" {
     );
 
     const expected_hyperlink: TerminalHyperlink = .{
-        .id = .{ .explicit = "cursor-id" },
+        .id = .{ .implicit = 0x0a0b0c0d },
         .uri = "cursor-uri",
     };
     var actual_hyperlink = (try decodeCursorHyperlink(
@@ -1681,6 +2031,87 @@ test "framed native SCREEN and PAGE sequence" {
     try std.testing.expectEqual(@as(u16, 8), decoded_page.size.cols);
     try std.testing.expectEqual(@as(u16, 8), decoded_page.size.rows);
     try std.testing.expectError(error.EndOfStream, source.takeByte());
+
+    // The complete sequence restores directly into native Screen/PageList
+    // state, including page-local cursor references.
+    var restore_source: std.Io.Reader = .fixed(destination.written()[6..]);
+    var restored = try decode(
+        &restore_source,
+        std.testing.io,
+        std.testing.allocator,
+        .alternate,
+        .{ .cols = 8, .rows = 8, .max_scrollback_bytes = 0 },
+    );
+    defer restored.deinit();
+
+    try std.testing.expect(restored.no_scrollback);
+    try std.testing.expectEqual(@as(u16, 7), restored.cursor.x);
+    try std.testing.expectEqual(@as(u16, 6), restored.cursor.y);
+    try std.testing.expectEqual(
+        TerminalScreen.CursorStyle.block_hollow,
+        restored.cursor.cursor_style,
+    );
+    try std.testing.expect(restored.cursor.pending_wrap);
+    try std.testing.expectEqual(
+        terminal_page.Cell.SemanticContent.prompt,
+        restored.cursor.semantic_content,
+    );
+    try std.testing.expect(
+        restored.cursor.style.eql(testHeader().cursor_pen),
+    );
+    try std.testing.expect(restored.cursor.style_id != terminal_style.default_id);
+    try std.testing.expectEqual(
+        @as(u32, 0x0a0b0c0e),
+        restored.cursor.hyperlink_implicit_id,
+    );
+    try expectHyperlinkEqual(
+        expected_hyperlink,
+        restored.cursor.hyperlink.?.*,
+    );
+
+    const restored_saved = restored.saved_cursor.?;
+    try std.testing.expectEqual(@as(u16, 0x0102), restored_saved.x);
+    try std.testing.expectEqual(@as(u16, 0x0304), restored_saved.y);
+    try std.testing.expect(restored_saved.protected);
+    try std.testing.expect(restored_saved.pending_wrap);
+    try std.testing.expect(restored_saved.origin);
+    try std.testing.expectEqual(
+        terminal_charsets.Charset.ascii,
+        restored.charset.charsets.get(.G1),
+    );
+    try std.testing.expectEqual(
+        terminal_ansi.ProtectedMode.dec,
+        restored.protected_mode,
+    );
+    try std.testing.expectEqual(@as(u8, 7), restored.kitty_keyboard.idx);
+    try std.testing.expect(restored.semantic_prompt.seen);
+    try std.testing.expectEqual(
+        TerminalScreen.SemanticPrompt.SemanticClick{
+            .cl = .smart_vertical,
+        },
+        restored.semantic_prompt.click,
+    );
+
+    // Restored page-local cursor IDs are immediately usable by normal writes.
+    try restored.testWriteString("Z");
+    const written = restored.pages.getCell(.{ .active = .{
+        .x = 0,
+        .y = 7,
+    } }).?;
+    try std.testing.expectEqual(@as(u21, 'Z'), written.cell.codepoint());
+    try std.testing.expectEqual(
+        restored.cursor.style_id,
+        written.cell.style_id,
+    );
+    try std.testing.expectEqual(
+        restored.cursor.hyperlink_id,
+        written.node.page().lookupHyperlink(written.cell).?,
+    );
+    try std.testing.expectEqual(
+        terminal_page.Cell.SemanticContent.prompt,
+        written.cell.semantic_content,
+    );
+    try std.testing.expectError(error.EndOfStream, restore_source.takeByte());
 }
 
 test "SCREEN encodes the minimal complete-page active suffix" {
@@ -1761,6 +2192,136 @@ test "SCREEN encodes the minimal complete-page active suffix" {
         decoded_newest.getRowAndCell(0, 0).cell.codepoint(),
     );
     try std.testing.expectError(error.EndOfStream, source.takeByte());
+
+    // Native restoration keeps the incidental history prefix and positions
+    // the active top within the first decoded page.
+    var restore_source: std.Io.Reader = .fixed(destination.written());
+    var restored = try decode(
+        &restore_source,
+        std.testing.io,
+        std.testing.allocator,
+        .primary,
+        .{
+            .cols = 80,
+            .rows = screen_rows,
+            .max_scrollback_bytes = null,
+        },
+    );
+    defer restored.deinit();
+
+    try std.testing.expectEqual(@as(usize, 2), restored.pages.totalPages());
+    const restored_top = restored.pages.getTopLeft(.active);
+    try std.testing.expectEqual(@as(u16, 1), restored_top.y);
+    try std.testing.expectEqual(
+        @as(u21, 'B'),
+        restored.pages.getTopLeft(.screen).node
+            .page().getRowAndCell(0, 0).cell.codepoint(),
+    );
+    try std.testing.expectEqual(
+        @as(u21, 'C'),
+        restored.pages.getTopLeft(.screen).node.next.?
+            .page().getRowAndCell(0, 0).cell.codepoint(),
+    );
+
+    // The restored PageList resumes ordinary scrolling and row growth.
+    try restored.testWriteString("\n");
+    restored.pages.assertIntegrity();
+    restored.assertIntegrity();
+    try std.testing.expectError(error.EndOfStream, restore_source.takeByte());
+}
+
+test "SCREEN restoration rejects invalid and incomplete sequences" {
+    var screen = try TerminalScreen.init(
+        std.testing.io,
+        std.testing.allocator,
+        .{ .cols = 2, .rows = 2, .max_scrollback_bytes = 0 },
+    );
+    defer screen.deinit();
+
+    var destination: std.Io.Writer.Allocating = .init(
+        std.testing.allocator,
+    );
+    defer destination.deinit();
+    try encode(&screen, .primary, &destination);
+
+    // The caller selects which native screen receives the record.
+    {
+        var source: std.Io.Reader = .fixed(destination.written());
+        try std.testing.expectError(
+            error.UnexpectedScreenKey,
+            decode(
+                &source,
+                std.testing.io,
+                std.testing.allocator,
+                .alternate,
+                .{ .cols = 2, .rows = 2, .max_scrollback_bytes = 0 },
+            ),
+        );
+    }
+
+    // Every truncation must fail without leaking a partially restored
+    // PageList, cursor pin, or cursor-owned state.
+    for (0..destination.written().len) |fixture_len| {
+        var source: std.Io.Reader = .fixed(
+            destination.written()[0..fixture_len],
+        );
+        var restored = decode(
+            &source,
+            std.testing.io,
+            std.testing.allocator,
+            .primary,
+            .{ .cols = 2, .rows = 2, .max_scrollback_bytes = 0 },
+        ) catch continue;
+        restored.deinit();
+        try std.testing.expect(false);
+    }
+
+    // Native PageList construction is transactional on allocation failure.
+    {
+        var failing = std.testing.FailingAllocator.init(
+            std.testing.allocator,
+            .{ .fail_index = 0 },
+        );
+        var source: std.Io.Reader = .fixed(destination.written());
+        try std.testing.expectError(
+            error.OutOfMemory,
+            decode(
+                &source,
+                std.testing.io,
+                failing.allocator(),
+                .primary,
+                .{ .cols = 2, .rows = 2, .max_scrollback_bytes = 0 },
+            ),
+        );
+    }
+
+    // A syntactically valid SCREEN cannot declare an empty PAGE sequence.
+    var empty_sequence: std.Io.Writer.Allocating = .init(
+        std.testing.allocator,
+    );
+    defer empty_sequence.deinit();
+    {
+        var record_writer = try record.Writer.init(
+            &empty_sequence,
+            .screen,
+        );
+        try Header.init(&screen, .primary, 0).encode(
+            record_writer.payloadWriter(),
+        );
+        try record_writer.payloadWriter().writeByte(0);
+        try record_writer.finish();
+    }
+    var empty_source: std.Io.Reader = .fixed(empty_sequence.written());
+    try std.testing.expectError(
+        error.InvalidPageCount,
+        decode(
+            &empty_source,
+            std.testing.io,
+            std.testing.allocator,
+            .primary,
+            .{ .cols = 2, .rows = 2, .max_scrollback_bytes = 0 },
+        ),
+    );
 }
 
 test "SCREEN sequence failure preserves preceding bytes" {

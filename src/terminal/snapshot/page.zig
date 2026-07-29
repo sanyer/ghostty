@@ -144,6 +144,9 @@ const PayloadDecodeError = style.DecodeError ||
 
         /// Native page backing memory could not be allocated.
         OutOfMemory,
+
+        /// The caller-provided page does not have the advertised capacity.
+        InvalidDestinationCapacity,
     };
 
 /// Errors possible while encoding a complete PAGE record.
@@ -183,16 +186,69 @@ pub fn decode(
     reader: *std.Io.Reader,
     alloc: Allocator,
 ) DecodeError!TerminalPage {
-    var record_reader: record.Reader = undefined;
-    try record_reader.init(reader);
-    if (record_reader.header.tag != .page) return error.UnexpectedRecordTag;
+    var decoder: Decoder = undefined;
+    try decoder.init(reader);
 
-    var page = try decodePayload(record_reader.payloadReader(), alloc);
+    var page = TerminalPage.init(decoder.capacity()) catch
+        return error.OutOfMemory;
     errdefer page.deinit();
-    try record_reader.finish();
-    try page.verifyIntegrity(alloc);
+    try decoder.decode(&page, alloc);
     return page;
 }
+
+/// PAGE record decoder where the caller is responsible for owning
+/// the Page memory. This is particularly useful paired with
+/// PageList.Builder so you can build up a proper PageList with
+/// valid memory ownership.
+pub const Decoder = struct {
+    record_reader: record.Reader,
+    header: Header,
+
+    /// Begin decoding one PAGE record and expose its required capacity.
+    /// After this, call `capacity` to get the capacity to allocate
+    /// the page properly, then `decode` into it.
+    pub fn init(self: *Decoder, reader: *std.Io.Reader) DecodeError!void {
+        try self.record_reader.init(reader);
+        if (self.record_reader.header.tag != .page) {
+            return error.UnexpectedRecordTag;
+        }
+
+        self.header = try Header.decode(self.record_reader.payloadReader());
+        _ = try self.header.pageCapacity();
+    }
+
+    /// Return the exact native capacity advertised by the PAGE header.
+    pub fn capacity(self: *const Decoder) TerminalPageCapacity {
+        return self.header.pageCapacity() catch unreachable;
+    }
+
+    /// Decode the remaining payload into caller-owned native page storage.
+    ///
+    /// The destination must be freshly initialized with `capacity`. `alloc`
+    /// is used only for temporary ID remaps and integrity-check storage.
+    pub fn decode(
+        self: *Decoder,
+        destination: *TerminalPage,
+        alloc: Allocator,
+    ) DecodeError!void {
+        if (!std.meta.eql(destination.capacity, self.capacity())) {
+            return error.InvalidDestinationCapacity;
+        }
+
+        destination.size = .{
+            .cols = self.header.columns,
+            .rows = self.header.rows,
+        };
+        try decodePayloadBody(
+            self.record_reader.payloadReader(),
+            alloc,
+            destination,
+            self.header,
+        );
+        try self.record_reader.finish();
+        try destination.verifyIntegrity(alloc);
+    }
+};
 
 /// Encode a PAGE payload directly from a native page.
 fn encodePayload(
@@ -228,12 +284,23 @@ fn decodePayload(
     reader: *std.Io.Reader,
     alloc: Allocator,
 ) PayloadDecodeError!TerminalPage {
-    // Decode the header, validate capacities, init page
     const header = try Header.decode(reader);
     const capacity = try header.pageCapacity();
     var page = TerminalPage.init(capacity) catch
         return error.OutOfMemory;
     errdefer page.deinit();
+    try decodePayloadBody(reader, alloc, &page, header);
+    return page;
+}
+
+/// Decode PAGE tables and grid after the header into initialized native page
+/// storage with the exact advertised capacity and dimensions.
+fn decodePayloadBody(
+    reader: *std.Io.Reader,
+    alloc: Allocator,
+    page: *TerminalPage,
+    header: Header,
+) PayloadDecodeError!void {
     page.pauseIntegrityChecks(true);
     defer page.pauseIntegrityChecks(false);
 
@@ -293,7 +360,7 @@ fn decodePayload(
         }
 
         const decoded_id = hyperlink.decodePage(
-            &page,
+            page,
             reader,
         ) catch |err| switch (err) {
             error.StringsOutOfMemory => return error.InvalidStringCapacity,
@@ -314,13 +381,11 @@ fn decodePayload(
 
     // Rows and cells
     try grid.decode(
-        &page,
+        page,
         reader,
         &style_remap,
         &hyperlink_remap,
     );
-
-    return page;
 }
 
 /// The fixed logical dimensions, table counts, and allocation hints at the
