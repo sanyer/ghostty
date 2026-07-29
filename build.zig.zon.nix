@@ -161,11 +161,11 @@ in
       };
     }
     {
-      name = "gobject-0.3.1-Skun7E1KnwBGMX5nslHYG1yWHaSevywxQO8oM7tTOgIp";
+      name = "gobject-0.3.2-Skun7F6HogCMynX2JqeSHS7xr-8pK4ob-qRFIcEasVi3";
       path = fetchZigArtifact {
         name = "gobject";
-        url = "https://deps.files.ghostty.org/gobject-2026-04-23-26-1.tar.zst";
-        hash = "sha256-cZGf9a1+sDeORKWYIdzQ/5KLT7l/9pgPc2cIbqfBc4o=";
+        url = "https://github.com/ghostty-org/zig-gobject/releases/download/0.10.0-2026-07-28-36-1/ghostty-gobject-0.10.0-2026-07-28-36-1.tar.zst";
+        hash = "sha256-dyCfm2XjiAk30zccjD6AgKFBdE7IRsJuoqnscfvnWSQ=";
         unpack = true;
       };
     }
