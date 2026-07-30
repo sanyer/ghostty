@@ -30,8 +30,8 @@ class UpdateViewModel: ObservableObject {
             return "Downloading…"
         case .extracting(let extracting):
             return String(format: "Preparing: %.0f%%", extracting.progress * 100)
-        case .installing(let install):
-            return install.isAutoUpdate ? "Restart to Complete Update" : "Installing…"
+        case let .installing(install):
+            return install.appcastItem != nil ? "Restart to Complete Update" : "Installing…"
         case .notFound:
             return "No Updates Available"
         case .error(let err):
@@ -93,7 +93,11 @@ class UpdateViewModel: ObservableObject {
         case .extracting:
             return "Extracting and preparing the update"
         case let .installing(install):
-            return install.isAutoUpdate ? "Restart to Complete Update" : "Installing update and preparing to restart"
+            if let item = install.appcastItem {
+                return "The update is ready. Version: \(item.displayVersionString)"
+            } else {
+                return "Installing update and preparing to restart"
+            }
         case .notFound:
             return "You are running the latest version"
         case .error:
@@ -185,8 +189,22 @@ enum UpdateState: Equatable {
     case extracting(Extracting)
     case installing(Installing)
 
+    /// True if we're installing an update triggered manually.
+    var shouldTerminateWithoutWarning: Bool {
+        if case .installing(let installing) = self {
+            return installing.appcastItem == nil
+        } else {
+            return false
+        }
+    }
+
     var isHidden: Bool {
         if case .idle = self { return true }
+        if case .installing(let installing) = self {
+            // Hide the update pill when installing is triggered by auto update.
+            // There will be an alert when users check the updates themselves.
+            return installing.appcastItem != nil
+        }
         return false
     }
 
@@ -239,10 +257,17 @@ enum UpdateState: Equatable {
     /// Confirms or accepts the current update state.
     /// - For available updates: begins installation
     /// - For ready-to-install: proceeds with installation
-    func confirm() {
+    /// - For installing: suppress termination warnings and restart
+    mutating func confirm() {
         switch self {
         case .updateAvailable(let available):
             available.reply(.install)
+        case .installing(let installing):
+            // Remove appcastItem so we can restart without any other alerts.
+            var suppressTerminationWarnings = installing
+            suppressTerminationWarnings.appcastItem = nil
+            self = .installing(suppressTerminationWarnings)
+            installing.retryTerminatingApplication()
         default:
             break
         }
@@ -266,8 +291,8 @@ enum UpdateState: Equatable {
             return lDown.progress == rDown.progress && lDown.expectedLength == rDown.expectedLength
         case (.extracting(let lExt), .extracting(let rExt)):
             return lExt.progress == rExt.progress
-        case (.installing(let lInstall), .installing(let rInstall)):
-            return lInstall.isAutoUpdate == rInstall.isAutoUpdate
+        case (.installing(let lhs), .installing(let rhs)):
+            return lhs.appcastItem?.displayVersionString == rhs.appcastItem?.displayVersionString
         default:
             return false
         }
@@ -378,9 +403,14 @@ enum UpdateState: Equatable {
     }
 
     struct Installing {
-        /// True if this state is triggered by ``Ghostty/UpdateDriver/updater(_:willInstallUpdateOnQuit:immediateInstallationBlock:)``
-        var isAutoUpdate = false
+        /// Non-nil if this state is triggered by auto update
+        var appcastItem: SUAppcastItem?
         let retryTerminatingApplication: () -> Void
-        let dismiss: () -> Void
+
+        var releaseNotes: ReleaseNotes? {
+            guard let appcastItem else { return nil }
+            let currentCommit = Bundle.main.infoDictionary?["GhosttyCommit"] as? String
+            return ReleaseNotes(displayVersionString: appcastItem.displayVersionString, currentCommit: currentCommit)
+        }
     }
 }
