@@ -46,6 +46,7 @@
 //! Underline values 6 and 7 are invalid in snapshot version 1.
 
 const std = @import("std");
+const test_fixture = @import("fixture.zig");
 const io = @import("io.zig");
 const sgr = @import("../sgr.zig");
 const terminal_style = @import("../style.zig");
@@ -215,6 +216,10 @@ fn computeLen() usize {
     }
 }
 
+const test_golden_fixture = test_fixture.parse(
+    @embedFile("testdata/style-v1.hex"),
+);
+
 test "golden encoding and decoding" {
     const value: terminal_style.Style = .{
         .fg_color = .none,
@@ -236,18 +241,18 @@ test "golden encoding and decoding" {
             .underline = .curly,
         },
     };
-    const fixture =
-        "\x00\x00\x00\x00" ++
-        "\x01\x7f\x00\x00" ++
-        "\x02\x12\x34\x56" ++
-        "\xff\x03\x00\x00";
-
     var buf: [len]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buf);
     try encode(value, &writer);
-    try std.testing.expectEqualStrings(fixture, writer.buffered());
+    try test_fixture.expectEqual(
+        .bytes,
+        "src/terminal/snapshot/testdata/style-v1.hex",
+        "snapshot_fixture-style-v1.hex",
+        &test_golden_fixture,
+        writer.buffered(),
+    );
 
-    var source: std.Io.Reader = .fixed(fixture);
+    var source: std.Io.Reader = .fixed(&test_golden_fixture);
     var read_buf: [1]u8 = undefined;
     var limited = source.limited(.unlimited, &read_buf);
     try std.testing.expect(value.eql(try decode(&limited.interface)));

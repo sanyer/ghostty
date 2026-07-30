@@ -239,6 +239,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const test_fixture = @import("fixture.zig");
 const io = @import("io.zig");
 const record = @import("record.zig");
 const terminal_ansi = @import("../ansi.zig");
@@ -1180,20 +1181,9 @@ const test_header: Header = header: {
     };
 };
 
-const test_header_fixture =
-    "\x02\x01\x04\x03\x08\x07\x06\x05\x0c\x0b\x0a\x09" ++
-    "\x01\x00\x02\x00\x03\x00\x04\x00" ++
-    "\x01\x01\x00\x02\x00\x41\x00\x00\x00" ++
-    "\x01\x03\x02" ++
-    "\x02\x01\x04\x04\x01\x21\x01" ++
-    "\x01\x00\x00\x00\x00\x00\x00\x00" ++
-    "\x00\x00\x00\x00\x00\x02\x00\x00" ++
-    "\x01\x00\x00\x00\x00\x02\x00\x00" ++
-    "\x01\x01\x02\x03\x00\x00\x00\x00" ++
-    "\x00\x00\x00\x00\x01\x04\x05\x06" ++
-    "\x01\x07\x08\x09\x01\x0a\x0b\x0c" ++
-    "\xff\xff\xff\xff\xff\xff\xff\xff" ++
-    "\x08\x07\x06\x05\x04\x03\x02\x01";
+const test_header_fixture = test_fixture.parse(
+    @embedFile("testdata/terminal-header-v1.hex"),
+);
 
 test "TERMINAL mode bit layout" {
     try std.testing.expectEqual(
@@ -1231,15 +1221,21 @@ test "TERMINAL mode bit layout" {
 
 test "TERMINAL header golden encoding and decoding" {
     const testing = std.testing;
-    try testing.expectEqual(Header.len, test_header_fixture.len);
 
     var encoded: [Header.len]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&encoded);
     try test_header.encode(&writer);
-    try testing.expectEqualStrings(test_header_fixture, writer.buffered());
+    try test_fixture.expectEqual(
+        .bytes,
+        "src/terminal/snapshot/testdata/terminal-header-v1.hex",
+        "snapshot_fixture-terminal-header-v1.hex",
+        &test_header_fixture,
+        writer.buffered(),
+    );
+    try testing.expectEqual(Header.len, test_header_fixture.len);
 
     // Exercise the streaming path with less buffered data than every integer.
-    var source: std.Io.Reader = .fixed(test_header_fixture);
+    var source: std.Io.Reader = .fixed(&test_header_fixture);
     var buffer: [1]u8 = undefined;
     var limited = source.limited(.unlimited, &buffer);
     try testing.expectEqualDeep(
@@ -1306,14 +1302,14 @@ test "TERMINAL header rejects invalid values" {
         .{ .offset = 68, .value = 1, .expected = error.InvalidDynamicRGB },
     };
     for (byte_cases) |case| {
-        var fixture = test_header_fixture.*;
+        var fixture = test_header_fixture;
         fixture[case.offset] = case.value;
         var reader: std.Io.Reader = .fixed(&fixture);
         try testing.expectError(case.expected, Header.decode(&reader));
     }
 
     // Cross-field and multi-byte invariants are validated after decoding.
-    var invalid_screen_count = test_header_fixture.*;
+    var invalid_screen_count = test_header_fixture;
     invalid_screen_count[23] = 3;
     var screen_count_reader: std.Io.Reader = .fixed(&invalid_screen_count);
     try testing.expectError(
@@ -1321,7 +1317,7 @@ test "TERMINAL header rejects invalid values" {
         Header.decode(&screen_count_reader),
     );
 
-    var missing_active_screen = test_header_fixture.*;
+    var missing_active_screen = test_header_fixture;
     missing_active_screen[23] = 1;
     var active_screen_reader: std.Io.Reader = .fixed(&missing_active_screen);
     try testing.expectError(
@@ -1329,7 +1325,7 @@ test "TERMINAL header rejects invalid values" {
         Header.decode(&active_screen_reader),
     );
 
-    var invalid_scrolling_region = test_header_fixture.*;
+    var invalid_scrolling_region = test_header_fixture;
     invalid_scrolling_region[14] = 0x04;
     invalid_scrolling_region[15] = 0x03;
     var scrolling_region_reader: std.Io.Reader = .fixed(
@@ -1340,7 +1336,7 @@ test "TERMINAL header rejects invalid values" {
         Header.decode(&scrolling_region_reader),
     );
 
-    var invalid_codepoint = test_header_fixture.*;
+    var invalid_codepoint = test_header_fixture;
     invalid_codepoint[25] = 0x00;
     invalid_codepoint[26] = 0xd8;
     invalid_codepoint[27] = 0x00;

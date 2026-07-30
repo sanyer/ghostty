@@ -17,6 +17,7 @@
 //! |      8 |    2 | Version (`u16`)      |
 
 const std = @import("std");
+const test_fixture = @import("fixture.zig");
 const io = @import("io.zig");
 
 /// Identifies a Ghostty terminal snapshot and rejects unrelated input before
@@ -65,15 +66,25 @@ fn computeLen() usize {
     }
 }
 
+const test_golden_fixture = test_fixture.parse(
+    @embedFile("testdata/envelope-v1.hex"),
+);
+
 test "golden encoding" {
     var buf: [encoded_len]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buf);
     try encode(&writer);
 
-    try std.testing.expectEqualStrings(
-        "GHOSTSNP\x01\x00",
+    try test_fixture.expectEqual(
+        .bytes,
+        "src/terminal/snapshot/testdata/envelope-v1.hex",
+        "snapshot_fixture-envelope-v1.hex",
+        &test_golden_fixture,
         writer.buffered(),
     );
+
+    var reader: std.Io.Reader = .fixed(&test_golden_fixture);
+    try decode(&reader);
 }
 
 test "reject invalid magic and version" {
@@ -88,9 +99,8 @@ test "reject invalid magic and version" {
 }
 
 test "reject every truncation" {
-    const fixture = "GHOSTSNP\x01\x00";
     for (0..encoded_len) |len| {
-        var reader: std.Io.Reader = .fixed(fixture[0..len]);
+        var reader: std.Io.Reader = .fixed(test_golden_fixture[0..len]);
         try std.testing.expectError(error.EndOfStream, decode(&reader));
     }
 }

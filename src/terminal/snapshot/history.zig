@@ -65,6 +65,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const test_fixture = @import("fixture.zig");
 const io = @import("io.zig");
 const page = @import("page.zig");
 const record = @import("record.zig");
@@ -334,6 +335,10 @@ fn hasSemanticPrompt(terminal_page: *const TerminalPage) bool {
     return false;
 }
 
+const test_header_fixture = test_fixture.parse(
+    @embedFile("testdata/history-header-v1.hex"),
+);
+
 test "HISTORY header golden encoding and decoding" {
     const expected: Header = .{
         .key = .alternate,
@@ -341,20 +346,24 @@ test "HISTORY header golden encoding and decoding" {
         .total_rows = 0x0102030405060708,
         .screen_overlap_rows = 0x090a,
     };
-    const fixture =
-        "\x01\x00\x04\x03\x02\x01" ++
-        "\x08\x07\x06\x05\x04\x03\x02\x01\x0a\x09";
-
-    try std.testing.expectEqual(Header.len, fixture.len);
     var encoded: [Header.len]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&encoded);
     try expected.encode(&writer);
-    try std.testing.expectEqualStrings(fixture, writer.buffered());
+    try test_fixture.expectEqual(
+        .bytes,
+        "src/terminal/snapshot/testdata/history-header-v1.hex",
+        "snapshot_fixture-history-header-v1.hex",
+        &test_header_fixture,
+        writer.buffered(),
+    );
+    try std.testing.expectEqual(Header.len, test_header_fixture.len);
 
-    var reader: std.Io.Reader = .fixed(fixture);
+    var reader: std.Io.Reader = .fixed(&test_header_fixture);
     try std.testing.expectEqualDeep(expected, try Header.decode(&reader));
     for (0..Header.len) |fixture_len| {
-        var truncated: std.Io.Reader = .fixed(fixture[0..fixture_len]);
+        var truncated: std.Io.Reader = .fixed(
+            test_header_fixture[0..fixture_len],
+        );
         try std.testing.expectError(
             error.EndOfStream,
             Header.decode(&truncated),

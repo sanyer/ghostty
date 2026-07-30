@@ -42,6 +42,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const test_fixture = @import("fixture.zig");
 const io = @import("io.zig");
 const terminal_hyperlink = @import("../hyperlink.zig");
 const terminal_page = @import("../page.zig");
@@ -270,6 +271,14 @@ fn decodePageString(
     };
 }
 
+const test_implicit_fixture = test_fixture.parse(
+    @embedFile("testdata/hyperlink-implicit-v1.hex"),
+);
+
+const test_explicit_fixture = test_fixture.parse(
+    @embedFile("testdata/hyperlink-explicit-v1.hex"),
+);
+
 test "golden implicit encoding" {
     const value: terminal_hyperlink.Hyperlink = .{
         .id = .{ .implicit = 0x01020304 },
@@ -280,10 +289,18 @@ test "golden implicit encoding" {
     var writer: std.Io.Writer = .fixed(&buf);
     try encode(value, &writer);
 
-    try std.testing.expectEqualStrings(
-        "\x01\x04\x03\x02\x01\x03\x00\x00\x00uri",
+    try test_fixture.expectEqual(
+        .bytes,
+        "src/terminal/snapshot/testdata/hyperlink-implicit-v1.hex",
+        "snapshot_fixture-hyperlink-implicit-v1.hex",
+        &test_implicit_fixture,
         writer.buffered(),
     );
+
+    var reader: std.Io.Reader = .fixed(&test_implicit_fixture);
+    var decoded = try decode(&reader, std.testing.allocator);
+    defer decoded.deinit(std.testing.allocator);
+    try std.testing.expectEqualDeep(value, decoded);
 }
 
 test "golden explicit encoding" {
@@ -296,10 +313,18 @@ test "golden explicit encoding" {
     var writer: std.Io.Writer = .fixed(&buf);
     try encode(value, &writer);
 
-    try std.testing.expectEqualStrings(
-        "\x02\x02\x00\x00\x00id\x03\x00\x00\x00uri",
+    try test_fixture.expectEqual(
+        .bytes,
+        "src/terminal/snapshot/testdata/hyperlink-explicit-v1.hex",
+        "snapshot_fixture-hyperlink-explicit-v1.hex",
+        &test_explicit_fixture,
         writer.buffered(),
     );
+
+    var reader: std.Io.Reader = .fixed(&test_explicit_fixture);
+    var decoded = try decode(&reader, std.testing.allocator);
+    defer decoded.deinit(std.testing.allocator);
+    try std.testing.expectEqualDeep(value, decoded);
 }
 
 test "decode rejects empty strings" {
@@ -369,9 +394,7 @@ test "reject invalid kinds" {
 
 test "decode allocation failure" {
     {
-        var reader: std.Io.Reader = .fixed(
-            "\x01\x04\x03\x02\x01\x03\x00\x00\x00uri",
-        );
+        var reader: std.Io.Reader = .fixed(&test_implicit_fixture);
         var failing = std.testing.FailingAllocator.init(
             std.testing.allocator,
             .{ .fail_index = 0 },
@@ -387,9 +410,7 @@ test "decode allocation failure" {
             std.testing.allocator,
             .{ .fail_index = fail_index },
         );
-        var reader: std.Io.Reader = .fixed(
-            "\x02\x02\x00\x00\x00id\x03\x00\x00\x00uri",
-        );
+        var reader: std.Io.Reader = .fixed(&test_explicit_fixture);
         try std.testing.expectError(
             error.OutOfMemory,
             decode(&reader, failing.allocator()),
@@ -399,8 +420,8 @@ test "decode allocation failure" {
 
 test "reject every truncation" {
     const fixtures: [2][]const u8 = .{
-        "\x01\x04\x03\x02\x01\x03\x00\x00\x00uri",
-        "\x02\x02\x00\x00\x00id\x03\x00\x00\x00uri",
+        &test_implicit_fixture,
+        &test_explicit_fixture,
     };
 
     for (fixtures) |fixture| {

@@ -19,6 +19,7 @@
 //! Supported tags are in `Tag`.
 
 const std = @import("std");
+const test_fixture = @import("fixture.zig");
 const io = @import("io.zig");
 
 /// CRC32C as specified by the snapshot format. Zig names this standard
@@ -295,6 +296,10 @@ fn encodeChecksumPrefix(
     try io.writeInt(writer, u32, payload_len);
 }
 
+const test_page_header_fixture = test_fixture.parse(
+    @embedFile("testdata/record-page-header-v1.hex"),
+);
+
 test "golden PAGE record header and checksum" {
     const page_header =
         "\x50\x00\x18\x00\x00\x00\x00\x00" ++
@@ -314,10 +319,16 @@ test "golden PAGE record header and checksum" {
     var writer: std.Io.Writer = .fixed(&buf);
     try header.encode(&writer);
 
-    try std.testing.expectEqualStrings(
-        "\x03\x00\x18\x00\x00\x00\x1b\x44\x78\x71",
+    try test_fixture.expectEqual(
+        .bytes,
+        "src/terminal/snapshot/testdata/record-page-header-v1.hex",
+        "snapshot_fixture-record-page-header-v1.hex",
+        &test_page_header_fixture,
         writer.buffered(),
     );
+
+    var reader: std.Io.Reader = .fixed(&test_page_header_fixture);
+    try std.testing.expectEqual(header, try Header.decode(&reader));
 }
 
 test "reject invalid tags" {
@@ -330,9 +341,10 @@ test "reject invalid tags" {
 }
 
 test "reject every header truncation" {
-    const fixture = "\x03\x00\x18\x00\x00\x00\x1b\x44\x78\x71";
     for (0..Header.len) |len| {
-        var reader: std.Io.Reader = .fixed(fixture[0..len]);
+        var reader: std.Io.Reader = .fixed(
+            test_page_header_fixture[0..len],
+        );
         try std.testing.expectError(error.EndOfStream, Header.decode(&reader));
     }
 }

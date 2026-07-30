@@ -201,6 +201,7 @@ const std = @import("std");
 const build_options = @import("terminal_options");
 const Allocator = std.mem.Allocator;
 const hyperlink = @import("hyperlink.zig");
+const test_fixture = @import("fixture.zig");
 const io = @import("io.zig");
 const page = @import("page.zig");
 const record = @import("record.zig");
@@ -1116,19 +1117,13 @@ pub fn decodeCursorHyperlink(
     return try hyperlink.decode(reader, alloc);
 }
 
-const test_header_fixture =
-    "\x01\x00\x03\x02\x05\x04\x07\x06\x03\x19" ++
-    "\x00\x00\x00\x00\x01\x7f\x00\x00" ++
-    "\x02\x12\x34\x56\xff\x03\x00\x00" ++
-    "\x0d\x0c\x0b\x0a\xe4\x3d\x02\x07" ++
-    "\x01\x02\x04\x08\x10\x1f\x00\x11" ++
-    "\x02\x03\x01";
+const test_header_fixture = test_fixture.parse(
+    @embedFile("testdata/screen-header-v1.hex"),
+);
 
-const test_saved_cursor_fixture =
-    "\x02\x01\x04\x03" ++
-    "\x00\x00\x00\x00\x00\x00\x00\x00" ++
-    "\x00\x00\x00\x00\x00\x00\x00\x00" ++
-    "\x07\xe4\x3d";
+const test_saved_cursor_fixture = test_fixture.parse(
+    @embedFile("testdata/screen-saved-cursor-v1.hex"),
+);
 
 fn testCharsetState() TerminalScreen.CharsetState {
     var result: TerminalScreen.CharsetState = .{
@@ -1220,18 +1215,20 @@ fn testSavedCursor() SavedCursor {
 }
 
 test "SCREEN header golden encoding and decoding" {
-    try std.testing.expectEqual(Header.len, test_header_fixture.len);
-
     var encoded: [Header.len]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&encoded);
     try testHeader().encode(&writer);
 
-    try std.testing.expectEqualStrings(
-        test_header_fixture,
+    try test_fixture.expectEqual(
+        .bytes,
+        "src/terminal/snapshot/testdata/screen-header-v1.hex",
+        "snapshot_fixture-screen-header-v1.hex",
+        &test_header_fixture,
         writer.buffered(),
     );
+    try std.testing.expectEqual(Header.len, test_header_fixture.len);
 
-    var source: std.Io.Reader = .fixed(test_header_fixture);
+    var source: std.Io.Reader = .fixed(&test_header_fixture);
     var buffer: [1]u8 = undefined;
     var limited = source.limited(.unlimited, &buffer);
 
@@ -1601,20 +1598,22 @@ test "native SCREEN payload omits absent optional state" {
 }
 
 test "saved cursor golden encoding and decoding" {
+    var encoded: [SavedCursor.len]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&encoded);
+    try testSavedCursor().encode(&writer);
+    try test_fixture.expectEqual(
+        .bytes,
+        "src/terminal/snapshot/testdata/screen-saved-cursor-v1.hex",
+        "snapshot_fixture-screen-saved-cursor-v1.hex",
+        &test_saved_cursor_fixture,
+        writer.buffered(),
+    );
     try std.testing.expectEqual(
         SavedCursor.len,
         test_saved_cursor_fixture.len,
     );
 
-    var encoded: [SavedCursor.len]u8 = undefined;
-    var writer: std.Io.Writer = .fixed(&encoded);
-    try testSavedCursor().encode(&writer);
-    try std.testing.expectEqualStrings(
-        test_saved_cursor_fixture,
-        writer.buffered(),
-    );
-
-    var source: std.Io.Reader = .fixed(test_saved_cursor_fixture);
+    var source: std.Io.Reader = .fixed(&test_saved_cursor_fixture);
     var buffer: [1]u8 = undefined;
     var limited = source.limited(.unlimited, &buffer);
     try std.testing.expectEqualDeep(
