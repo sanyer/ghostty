@@ -103,6 +103,7 @@ pub const page = @import("page.zig");
 pub const record = @import("record.zig");
 pub const screen = @import("screen.zig");
 pub const style = @import("style.zig");
+pub const terminal = @import("terminal.zig");
 
 test {
     @import("std").testing.refAllDecls(@This());
