@@ -3843,6 +3843,123 @@ pub fn increaseCapacity(
     return new_node;
 }
 
+/// Allocate a new page using the PageList's memory pools.
+///
+/// The page is detached: it doesn't contribute to the memory limits or
+/// row counts or anything in the PageList. The caller must call `finalize`
+/// to add it to the PageList at the appropriate place, or `cancel` to
+/// throw it away.
+pub fn allocatePage(
+    self: *PageList,
+    capacity: Capacity,
+) Allocator.Error!PageAllocation {
+    return .{
+        .destination = self,
+        .node = try createPageExt(
+            &self.pool,
+            .{ .cap = capacity },
+            &self.page_serial,
+            null,
+        ),
+    };
+}
+
+/// One PageList-pooled page which has not yet joined the live page sequence.
+pub const PageAllocation = struct {
+    destination: *PageList,
+    node: *List.Node,
+
+    /// Return the fresh page storage for the caller to populate.
+    pub fn page(self: *PageAllocation) *Page {
+        return self.node.pageAssumeResident();
+    }
+
+    /// Release this uncommitted page back to its PageList's pools.
+    ///
+    /// This must not be called after `finalize` succeeds.
+    pub fn cancel(self: *PageAllocation) void {
+        destroyNodeExt(
+            &self.destination.pool,
+            self.node,
+            null,
+        );
+        self.* = undefined;
+    }
+
+    pub const Location = union(enum) {
+        /// Prepend the page to the start of the list (oldest history).
+        prepend,
+    };
+
+    /// Finalize this complete page and transfer its ownership to the PageList.
+    /// The parameter determines where it goes into the PageList.
+    ///
+    /// Existing pages and tracked pins keep their identity. A pinned viewport
+    /// keeps showing the same content while its cached absolute row offset
+    /// moves down by the number of newly inserted rows.
+    pub fn finalize(self: *PageAllocation, location: Location) FinalizeError!void {
+        switch (location) {
+            .prepend => return try self.prepend(),
+        }
+    }
+
+    pub const FinalizeError = error{
+        InvalidPageDimensions,
+        RowCountOverflow,
+        PageSizeOverflow,
+        MaxSizeExceeded,
+        MaxLinesExceeded,
+    };
+
+    fn prepend(self: *PageAllocation) FinalizeError!void {
+        const destination = self.destination;
+        const node = self.node;
+
+        // Validate the populated page and all resulting accounting before
+        // publishing the detached node into the live list.
+        if (node.cols() == 0 or node.rows() == 0) return error.InvalidPageDimensions;
+        const total_rows = std.math.add(
+            usize,
+            destination.total_rows,
+            node.rows(),
+        ) catch return error.RowCountOverflow;
+        const node_size: usize = switch (node.owned) {
+            .pool => PagePool.item_size,
+            .heap => node.pageAssumeResident().memory.len,
+        };
+        const page_size = std.math.add(
+            usize,
+            destination.page_size,
+            node_size,
+        ) catch return error.PageSizeOverflow;
+
+        // Restored history is exact data, so reject a page which cannot
+        // coexist with the receiving PageList's configured limits.
+        if (page_size > destination.limits.max(.bytes)) {
+            return error.MaxSizeExceeded;
+        }
+        if (total_rows - destination.rows > destination.limits.max(.lines)) {
+            return error.MaxLinesExceeded;
+        }
+
+        // No fallible work remains. Publish the page and update every cached
+        // quantity affected by inserting rows above the existing first page.
+        errdefer comptime unreachable;
+        destination.pages.prepend(node);
+        destination.page_size = page_size;
+        destination.total_rows = total_rows;
+        if (destination.viewport == .pin) {
+            if (destination.viewport_pin_row_offset) |*offset| {
+                offset.* += node.rows();
+            }
+        }
+        destination.page_compression.markActivity();
+
+        destination.assertIntegrity();
+        self.* = undefined;
+    }
+};
+
 /// Options for createPage and createPageExt.
 const CreatePage = struct {
     /// The capacity to allocate the page with.
@@ -7093,6 +7210,220 @@ test "PageList Builder finish is transactional on allocation failure" {
     // deinit path can release the still-linked page.
     try testing.expect(builder.pages.first != null);
     try testing.expectEqual(builder.pages.first, builder.pages.last);
+}
+
+test "PageList PageAllocation finalizes pages and preserves live state" {
+    const testing = std.testing;
+
+    // Build an existing list with history, a two-row active area, an external
+    // active pin, and a pinned viewport whose absolute offset is cached.
+    var result: PageList = result: {
+        var builder = try Builder.init(testing.allocator, .{
+            .cols = 4,
+            .rows = 2,
+            .max_size = null,
+            .max_lines = null,
+        });
+        errdefer builder.deinit();
+
+        const first = try builder.addPage(.{ .cols = 3, .rows = 2 });
+        first.size.rows = 2;
+        first.getRowAndCell(0, 0).cell.* = .init('C');
+
+        const second = try builder.addPage(.{ .cols = 4, .rows = 2 });
+        second.size.rows = 2;
+        second.getRowAndCell(0, 0).cell.* = .init('D');
+
+        break :result try builder.finish();
+    };
+    defer result.deinit();
+
+    const old_first = result.pages.first.?;
+    const old_last = result.pages.last.?;
+    const active_top = result.getTopLeft(.active);
+    const tracked_active = try result.trackPin(active_top);
+    result.scroll(.{ .row = 1 });
+    try testing.expectEqual(Viewport.pin, result.viewport);
+    try testing.expectEqual(@as(usize, 1), result.scrollbar().offset);
+
+    // Prepend differently sized historical pages newest-first. Each page is
+    // populated while detached and joins the live list only on success.
+    {
+        var allocation = try result.allocatePage(.{ .cols = 4, .rows = 1 });
+        errdefer allocation.cancel();
+        const page = allocation.page();
+        page.size.rows = 1;
+        page.getRowAndCell(0, 0).cell.* = .init('B');
+        try allocation.finalize(.prepend);
+    }
+    {
+        var allocation = try result.allocatePage(.{ .cols = 2, .rows = 2 });
+        errdefer allocation.cancel();
+        const page = allocation.page();
+        page.size.rows = 2;
+        page.getRowAndCell(0, 0).cell.* = .init('A');
+        try allocation.finalize(.prepend);
+    }
+
+    // Repeated prepends reconstruct oldest-to-newest order without replacing
+    // any existing nodes or tracked pins.
+    try testing.expectEqual(@as(usize, 4), result.totalPages());
+    try testing.expectEqual(@as(usize, 7), result.total_rows);
+    try testing.expectEqual(old_last, result.pages.last.?);
+    try testing.expectEqual(old_first, result.pages.first.?.next.?.next.?);
+    try testing.expectEqual(
+        @as(u21, 'A'),
+        result.pages.first.?.page().getRowAndCell(0, 0).cell.codepoint(),
+    );
+    try testing.expectEqual(
+        @as(u21, 'B'),
+        result.pages.first.?.next.?
+            .page().getRowAndCell(0, 0).cell.codepoint(),
+    );
+    try testing.expect(active_top.eql(result.getTopLeft(.active)));
+    try testing.expect(active_top.eql(tracked_active.*));
+
+    // The viewport remains pinned to the same content, while its cached row
+    // offset and the scrollbar total include the three new historical rows.
+    try testing.expectEqual(Viewport.pin, result.viewport);
+    try testing.expectEqual(old_first, result.viewport_pin.node);
+    try testing.expectEqual(@as(size.CellCountInt, 1), result.viewport_pin.y);
+    const scrollbar_state = result.scrollbar();
+    try testing.expectEqual(@as(usize, 7), scrollbar_state.total);
+    try testing.expectEqual(@as(usize, 4), scrollbar_state.offset);
+    try testing.expectEqual(@as(usize, 2), scrollbar_state.len);
+
+    result.assertIntegrity();
+}
+
+test "PageList PageAllocation stays detached until finalize" {
+    const testing = std.testing;
+
+    var result = try init(testing.allocator, .{
+        .cols = 1,
+        .rows = 1,
+        .max_size = null,
+        .max_lines = null,
+    });
+    defer result.deinit();
+
+    const initial_first = result.pages.first.?;
+    const initial_last = result.pages.last.?;
+    const initial_total_rows = result.total_rows;
+    const initial_page_size = result.page_size;
+
+    // Allocating and populating a detached page does not alter any live list
+    // links or accounting. Cancel returns it to the same PageList pools.
+    var detached = try result.allocatePage(.{ .cols = 1, .rows = 1 });
+    detached.page().size.rows = 1;
+    try testing.expectEqual(initial_first, result.pages.first.?);
+    try testing.expectEqual(initial_last, result.pages.last.?);
+    try testing.expectEqual(initial_total_rows, result.total_rows);
+    try testing.expectEqual(initial_page_size, result.page_size);
+    result.assertIntegrity();
+    detached.cancel();
+    result.assertIntegrity();
+
+    // Invalid populated dimensions leave ownership with the allocation so it
+    // can still be released normally.
+    var invalid = try result.allocatePage(.{ .cols = 1, .rows = 1 });
+    defer invalid.cancel();
+    try testing.expectError(
+        error.InvalidPageDimensions,
+        invalid.finalize(.prepend),
+    );
+
+    try testing.expectEqual(initial_first, result.pages.first.?);
+    try testing.expectEqual(initial_last, result.pages.last.?);
+    try testing.expectEqual(initial_total_rows, result.total_rows);
+    try testing.expectEqual(initial_page_size, result.page_size);
+    result.assertIntegrity();
+}
+
+test "PageList PageAllocation rejects limits before modifying the destination" {
+    const testing = std.testing;
+
+    var result = try init(testing.allocator, .{
+        .cols = 1,
+        .rows = 1,
+        .max_size = 0,
+        .max_lines = null,
+    });
+    defer result.deinit();
+
+    // The effective minimum permits one complete page beyond the active page.
+    // Fill that allowance so the following allocation exceeds the byte limit.
+    {
+        var allocation = try result.allocatePage(.{ .cols = 1, .rows = 1 });
+        errdefer allocation.cancel();
+        allocation.page().size.rows = 1;
+        try allocation.finalize(.prepend);
+    }
+
+    const before_first = result.pages.first.?;
+    const before_total_rows = result.total_rows;
+    const before_page_size = result.page_size;
+
+    var allocation = try result.allocatePage(.{ .cols = 1, .rows = 1 });
+    defer allocation.cancel();
+    allocation.page().size.rows = 1;
+    try testing.expectError(
+        error.MaxSizeExceeded,
+        allocation.finalize(.prepend),
+    );
+
+    try testing.expectEqual(before_first, result.pages.first.?);
+    try testing.expectEqual(before_total_rows, result.total_rows);
+    try testing.expectEqual(before_page_size, result.page_size);
+    result.assertIntegrity();
+}
+
+test "PageList PageAllocation allocation failure leaves list unchanged" {
+    const testing = std.testing;
+
+    var failing = testing.FailingAllocator.init(testing.allocator, .{});
+    var result = try init(failing.allocator(), .{
+        .cols = 1,
+        .rows = 1,
+        .max_size = null,
+        .max_lines = null,
+    });
+    defer result.deinit();
+
+    const initial_first = result.pages.first.?;
+    const initial_total_rows = result.total_rows;
+    const initial_page_size = result.page_size;
+
+    // Existing pool capacity is deliberately an implementation detail. Allow
+    // preheated slots to succeed until allocation reaches node-pool growth.
+    failing.fail_index = failing.alloc_index;
+    var allocations: [64]PageAllocation = undefined;
+    var allocation_count: usize = 0;
+    defer for (allocations[0..allocation_count]) |*allocation| {
+        allocation.cancel();
+    };
+
+    var failed = false;
+    for (0..64) |_| {
+        allocations[allocation_count] = result.allocatePage(.{
+            .cols = 1,
+            .rows = 1,
+        }) catch |err| {
+            try testing.expectEqual(error.OutOfMemory, err);
+            failed = true;
+            break;
+        };
+        allocation_count += 1;
+    }
+    try testing.expect(failed);
+    try testing.expect(failing.has_induced_failure);
+
+    // Detached allocations and failed pool growth never publish into the live
+    // list; the deferred cleanup returns every successful allocation.
+    try testing.expectEqual(initial_first, result.pages.first.?);
+    try testing.expectEqual(initial_total_rows, result.total_rows);
+    try testing.expectEqual(initial_page_size, result.page_size);
+    result.assertIntegrity();
 }
 
 fn mixedWidthPinListForTest(alloc: Allocator) !PageList {
