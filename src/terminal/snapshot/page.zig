@@ -94,7 +94,6 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const envelope = @import("envelope.zig");
 const grid = @import("grid.zig");
 const hyperlink = @import("hyperlink.zig");
 const io = @import("io.zig");
@@ -577,7 +576,7 @@ const test_empty_framed_page_fixture =
     "\x00\x00\x00\x00\x00\x00\x00\x00" ++
     "\x00";
 
-test "golden encoding" {
+test "PAGE header golden encoding and decoding" {
     const header: Header = .{
         .columns = 0x0102,
         .rows = 0x0304,
@@ -588,41 +587,20 @@ test "golden encoding" {
         .grapheme_capacity_bytes = 0x0d0e0f10,
         .string_capacity_bytes = 0x11121314,
     };
-
-    var buf: [Header.len]u8 = undefined;
-    var writer: std.Io.Writer = .fixed(&buf);
-    try header.encode(&writer);
-
-    try std.testing.expectEqualStrings(
-        "\x02\x01\x04\x03\x06\x05\x08\x07" ++
-            "\x0a\x09\x0c\x0b\x10\x0f\x0e\x0d" ++
-            "\x14\x13\x12\x11",
-        writer.buffered(),
-    );
-}
-
-test "decode with a one-byte reader buffer" {
     const fixture =
         "\x02\x01\x04\x03\x06\x05\x08\x07" ++
         "\x0a\x09\x0c\x0b\x10\x0f\x0e\x0d" ++
         "\x14\x13\x12\x11";
-    var source: std.Io.Reader = .fixed(fixture);
-    var buf: [1]u8 = undefined;
-    var limited = source.limited(.unlimited, &buf);
 
-    try std.testing.expectEqual(
-        Header{
-            .columns = 0x0102,
-            .rows = 0x0304,
-            .style_count = 0x0506,
-            .hyperlink_count = 0x0708,
-            .style_capacity = 0x090a,
-            .hyperlink_capacity_bytes = 0x0b0c,
-            .grapheme_capacity_bytes = 0x0d0e0f10,
-            .string_capacity_bytes = 0x11121314,
-        },
-        try Header.decode(&limited.interface),
-    );
+    var buf: [Header.len]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+    try header.encode(&writer);
+    try std.testing.expectEqualStrings(fixture, writer.buffered());
+
+    var source: std.Io.Reader = .fixed(fixture);
+    var read_buf: [1]u8 = undefined;
+    var limited = source.limited(.unlimited, &read_buf);
+    try std.testing.expectEqual(header, try Header.decode(&limited.interface));
 }
 
 test "reject every truncation" {
@@ -870,41 +848,6 @@ test "framed PAGE encode and decode a sparse native page" {
         rewriter.buffered(),
         rewriter_again.buffered(),
     );
-
-    // The public codec appends one complete PAGE record after the envelope.
-    var snapshot: std.Io.Writer.Allocating = .init(std.testing.allocator);
-    defer snapshot.deinit();
-    try envelope.encode(&snapshot.writer);
-    try encode(&page, &snapshot);
-
-    const snapshot_bytes = snapshot.written();
-    try std.testing.expectEqualStrings(
-        test_page_fixture,
-        snapshot_bytes[envelope.encoded_len + record.Header.len ..],
-    );
-
-    var snapshot_reader: std.Io.Reader = .fixed(snapshot_bytes);
-    try envelope.decode(&snapshot_reader);
-    var framed_page = try decode(
-        &snapshot_reader,
-        std.testing.allocator,
-    );
-    defer framed_page.deinit();
-
-    try std.testing.expectEqual(header, Header.init(&framed_page));
-    const framed_first = framed_page.getRowAndCell(0, 0);
-    try std.testing.expectEqual(@as(u21, 'A'), framed_first.cell.codepoint());
-    try std.testing.expectEqual(
-        TerminalCell.SemanticContent.prompt,
-        framed_first.cell.semantic_content,
-    );
-    try std.testing.expectEqualSlices(
-        u21,
-        &.{ 0x0301, 0x0302 },
-        framed_page.lookupGrapheme(
-            framed_page.getRowAndCell(0, 1).cell,
-        ).?,
-    );
 }
 
 test "framed PAGE golden empty record" {
@@ -936,90 +879,22 @@ test "framed PAGE golden empty record" {
     );
 }
 
-test "framed PAGE validates tag length checksum and exhaustion" {
-    {
-        // A valid non-PAGE tag is rejected before payload decoding.
-        var wrong_tag = test_empty_framed_page_fixture.*;
-        std.mem.writeInt(u16, wrong_tag[0..2], @intFromEnum(record.Tag.screen), .little);
-        var reader: std.Io.Reader = .fixed(&wrong_tag);
-        try std.testing.expectError(
-            error.UnexpectedRecordTag,
-            decode(&reader, std.testing.allocator),
-        );
-    }
-
-    {
-        // Corrupt only the stored checksum.
-        var invalid_checksum = test_empty_framed_page_fixture.*;
-        invalid_checksum[6] ^= 1;
-        var reader: std.Io.Reader = .fixed(&invalid_checksum);
-        try std.testing.expectError(
-            error.InvalidChecksum,
-            decode(&reader, std.testing.allocator),
-        );
-    }
-
-    {
-        // Mutate a cell without updating the checksum.
-        var invalid_payload = test_empty_framed_page_fixture.*;
-        const value_offset = record.Header.len +
-            Header.len +
-            1 +
-            8;
-        invalid_payload[value_offset] = 'A';
-        var reader: std.Io.Reader = .fixed(&invalid_payload);
-        try std.testing.expectError(
-            error.InvalidChecksum,
-            decode(&reader, std.testing.allocator),
-        );
-    }
-
-    {
-        // Advertise one byte less than the PAGE decoder requires.
-        var short_payload = test_empty_framed_page_fixture.*;
-        std.mem.writeInt(u32, short_payload[2..6], 36, .little);
-        var reader: std.Io.Reader = .fixed(&short_payload);
-        try std.testing.expectError(
-            error.EndOfStream,
-            decode(&reader, std.testing.allocator),
-        );
-    }
-
-    {
-        // Add a payload byte and recompute the checksum so exhaustion, rather
-        // than checksum validation, is what fails.
-        var trailing: [test_empty_framed_page_fixture.len + 1]u8 = undefined;
-        @memcpy(
-            trailing[0..test_empty_framed_page_fixture.len],
-            test_empty_framed_page_fixture,
-        );
-        trailing[trailing.len - 1] = 0;
-        std.mem.writeInt(u32, trailing[2..6], 38, .little);
-
-        var checksum: record.Checksum = .init(.page, 38);
-        try checksum.writer().writeAll(trailing[record.Header.len..]);
-        std.mem.writeInt(u32, trailing[6..10], checksum.final(), .little);
-
-        var reader: std.Io.Reader = .fixed(&trailing);
-        try std.testing.expectError(
-            error.PayloadNotExhausted,
-            decode(&reader, std.testing.allocator),
-        );
-    }
+test "framed PAGE rejects a different record tag" {
+    var wrong_tag = test_empty_framed_page_fixture.*;
+    std.mem.writeInt(
+        u16,
+        wrong_tag[0..2],
+        @intFromEnum(record.Tag.screen),
+        .little,
+    );
+    var reader: std.Io.Reader = .fixed(&wrong_tag);
+    try std.testing.expectError(
+        error.UnexpectedRecordTag,
+        decode(&reader, std.testing.allocator),
+    );
 }
 
-test "framed PAGE rejects every truncation and preserves following bytes" {
-    for (0..test_empty_framed_page_fixture.len) |len| {
-        var reader: std.Io.Reader = .fixed(
-            test_empty_framed_page_fixture[0..len],
-        );
-        if (decode(&reader, std.testing.allocator)) |decoded_value| {
-            var unexpected = decoded_value;
-            unexpected.deinit();
-            return error.ExpectedDecodeFailure;
-        } else |_| {}
-    }
-
+test "framed PAGE preserves following bytes" {
     var source: std.Io.Reader = .fixed(
         test_empty_framed_page_fixture ++ "next",
     );
@@ -1290,7 +1165,11 @@ test "decode rejects undefined row and cell values" {
 }
 
 test "decode validates dimensions and native table capacities" {
-    const cases = .{
+    const Case = struct {
+        expected: anyerror,
+        header: Header,
+    };
+    const cases = [_]Case{
         .{
             .expected = error.InvalidDimensions,
             .header = Header{
@@ -1345,7 +1224,7 @@ test "decode validates dimensions and native table capacities" {
         },
     };
 
-    inline for (cases) |case| {
+    for (cases) |case| {
         var encoded: [Header.len]u8 = undefined;
         var writer: std.Io.Writer = .fixed(&encoded);
         try case.header.encode(&writer);

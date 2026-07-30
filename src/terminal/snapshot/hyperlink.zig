@@ -357,7 +357,7 @@ test "decodePage ignores empty strings" {
 }
 
 test "reject invalid kinds" {
-    inline for (.{ 0, 3, std.math.maxInt(u8) }) |kind| {
+    for ([_]u8{ 0, 3, std.math.maxInt(u8) }) |kind| {
         var fixture: [1]u8 = .{kind};
         var reader: std.Io.Reader = .fixed(&fixture);
         try std.testing.expectError(

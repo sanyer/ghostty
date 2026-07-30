@@ -84,6 +84,9 @@ pub const DecodeError = std.Io.Reader.Error || error{
     /// A color kind is not defined by snapshot version 1.
     InvalidColorKind,
 
+    /// Bytes unused by the selected color kind are not zero.
+    InvalidColor,
+
     /// The encoded underline kind is not defined by snapshot version 1.
     InvalidUnderline,
 
@@ -187,8 +190,14 @@ fn decodeColor(
     };
 
     return switch (kind) {
-        .none => .none,
-        .palette => .{ .palette = encoded[1] },
+        .none => if (std.mem.eql(u8, encoded[1..], &.{ 0, 0, 0 }))
+            .none
+        else
+            error.InvalidColor,
+        .palette => if (encoded[2] == 0 and encoded[3] == 0)
+            .{ .palette = encoded[1] }
+        else
+            error.InvalidColor,
         .rgb => .{ .rgb = .{
             .r = encoded[1],
             .g = encoded[2],
@@ -206,7 +215,7 @@ fn computeLen() usize {
     }
 }
 
-test "golden encoding" {
+test "golden encoding and decoding" {
     const value: terminal_style.Style = .{
         .fg_color = .none,
         .bg_color = .{ .palette = 0x7f },
@@ -227,103 +236,100 @@ test "golden encoding" {
             .underline = .curly,
         },
     };
-
-    var buf: [len]u8 = undefined;
-    var writer: std.Io.Writer = .fixed(&buf);
-    try encode(value, &writer);
-
-    try std.testing.expectEqualStrings(
-        "\x00\x00\x00\x00" ++
-            "\x01\x7f\x00\x00" ++
-            "\x02\x12\x34\x56" ++
-            "\xff\x03\x00\x00",
-        writer.buffered(),
-    );
-}
-
-test "flag bit layout" {
-    const cases = .{
-        .{ Flags{ .bold = true }, @as(u16, 1 << 0) },
-        .{ Flags{ .italic = true }, @as(u16, 1 << 1) },
-        .{ Flags{ .faint = true }, @as(u16, 1 << 2) },
-        .{ Flags{ .blink = true }, @as(u16, 1 << 3) },
-        .{ Flags{ .inverse = true }, @as(u16, 1 << 4) },
-        .{ Flags{ .invisible = true }, @as(u16, 1 << 5) },
-        .{ Flags{ .strikethrough = true }, @as(u16, 1 << 6) },
-        .{ Flags{ .overline = true }, @as(u16, 1 << 7) },
-        .{
-            Flags{ .underline = @intFromEnum(sgr.Attribute.Underline.single) },
-            @as(u16, 1 << 8),
-        },
-        .{
-            Flags{ .underline = @intFromEnum(sgr.Attribute.Underline.double) },
-            @as(u16, 2 << 8),
-        },
-        .{
-            Flags{ .underline = @intFromEnum(sgr.Attribute.Underline.curly) },
-            @as(u16, 3 << 8),
-        },
-        .{
-            Flags{ .underline = @intFromEnum(sgr.Attribute.Underline.dotted) },
-            @as(u16, 4 << 8),
-        },
-        .{
-            Flags{ .underline = @intFromEnum(sgr.Attribute.Underline.dashed) },
-            @as(u16, 5 << 8),
-        },
-        .{ Flags{ .reserved = 1 }, @as(u16, 1 << 11) },
-    };
-
-    inline for (cases) |case| {
-        try std.testing.expectEqual(case[1], @as(u16, @bitCast(case[0])));
-    }
-}
-
-test "decoding" {
     const fixture =
         "\x00\x00\x00\x00" ++
         "\x01\x7f\x00\x00" ++
         "\x02\x12\x34\x56" ++
         "\xff\x03\x00\x00";
-    var source: std.Io.Reader = .fixed(fixture);
-    var buf: [1]u8 = undefined;
-    var limited = source.limited(.unlimited, &buf);
 
-    const expected: terminal_style.Style = .{
-        .fg_color = .none,
-        .bg_color = .{ .palette = 0x7f },
-        .underline_color = .{ .rgb = .{
-            .r = 0x12,
-            .g = 0x34,
-            .b = 0x56,
-        } },
-        .flags = .{
-            .bold = true,
-            .italic = true,
-            .faint = true,
-            .blink = true,
-            .inverse = true,
-            .invisible = true,
-            .strikethrough = true,
-            .overline = true,
-            .underline = .curly,
-        },
-    };
-    const actual = try decode(&limited.interface);
-    try std.testing.expect(expected.eql(actual));
+    var buf: [len]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&buf);
+    try encode(value, &writer);
+    try std.testing.expectEqualStrings(fixture, writer.buffered());
+
+    var source: std.Io.Reader = .fixed(fixture);
+    var read_buf: [1]u8 = undefined;
+    var limited = source.limited(.unlimited, &read_buf);
+    try std.testing.expect(value.eql(try decode(&limited.interface)));
 }
 
-test "reject invalid color kinds" {
-    inline for (.{ 0, 4, 8 }) |offset| {
+test "flag bit layout" {
+    const Case = struct {
+        value: Flags,
+        expected: u16,
+    };
+    const cases = [_]Case{
+        .{ .value = .{ .bold = true }, .expected = 1 << 0 },
+        .{ .value = .{ .italic = true }, .expected = 1 << 1 },
+        .{ .value = .{ .faint = true }, .expected = 1 << 2 },
+        .{ .value = .{ .blink = true }, .expected = 1 << 3 },
+        .{ .value = .{ .inverse = true }, .expected = 1 << 4 },
+        .{ .value = .{ .invisible = true }, .expected = 1 << 5 },
+        .{ .value = .{ .strikethrough = true }, .expected = 1 << 6 },
+        .{ .value = .{ .overline = true }, .expected = 1 << 7 },
+        .{
+            .value = .{
+                .underline = @intFromEnum(sgr.Attribute.Underline.single),
+            },
+            .expected = 1 << 8,
+        },
+        .{
+            .value = .{
+                .underline = @intFromEnum(sgr.Attribute.Underline.double),
+            },
+            .expected = 2 << 8,
+        },
+        .{
+            .value = .{
+                .underline = @intFromEnum(sgr.Attribute.Underline.curly),
+            },
+            .expected = 3 << 8,
+        },
+        .{
+            .value = .{
+                .underline = @intFromEnum(sgr.Attribute.Underline.dotted),
+            },
+            .expected = 4 << 8,
+        },
+        .{
+            .value = .{
+                .underline = @intFromEnum(sgr.Attribute.Underline.dashed),
+            },
+            .expected = 5 << 8,
+        },
+        .{ .value = .{ .reserved = 1 }, .expected = 1 << 11 },
+    };
+
+    for (cases) |case| {
+        try std.testing.expectEqual(
+            case.expected,
+            @as(u16, @bitCast(case.value)),
+        );
+    }
+}
+
+test "reject invalid colors" {
+    for ([_]usize{ 0, 4, 8 }) |offset| {
         var invalid_kind: [len]u8 = @splat(0);
         invalid_kind[offset] = 3;
         var reader: std.Io.Reader = .fixed(&invalid_kind);
         try std.testing.expectError(error.InvalidColorKind, decode(&reader));
     }
+
+    var invalid_none: [len]u8 = @splat(0);
+    invalid_none[1] = 1;
+    var none_reader: std.Io.Reader = .fixed(&invalid_none);
+    try std.testing.expectError(error.InvalidColor, decode(&none_reader));
+
+    var invalid_palette: [len]u8 = @splat(0);
+    invalid_palette[0] = @intFromEnum(ColorKind.palette);
+    invalid_palette[2] = 1;
+    var palette_reader: std.Io.Reader = .fixed(&invalid_palette);
+    try std.testing.expectError(error.InvalidColor, decode(&palette_reader));
 }
 
 test "reject invalid flags and reserved field" {
-    inline for (.{ 6, 7 }) |underline| {
+    for ([_]u16{ 6, 7 }) |underline| {
         var invalid_underline: [len]u8 = @splat(0);
         std.mem.writeInt(
             u16,

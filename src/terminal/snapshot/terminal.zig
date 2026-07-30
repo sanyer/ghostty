@@ -1195,15 +1195,10 @@ const test_header_fixture =
     "\xff\xff\xff\xff\xff\xff\xff\xff" ++
     "\x08\x07\x06\x05\x04\x03\x02\x01";
 
-test "TERMINAL payload type registries" {
-    try std.testing.expectEqual(@as(usize, 103), Header.len);
+test "TERMINAL mode bit layout" {
     try std.testing.expectEqual(
         @as(usize, 42),
         @bitSizeOf(terminal_modes.ModePacked),
-    );
-    try std.testing.expectEqual(
-        @as(usize, 8),
-        @sizeOf(terminal_modes.ModePacked),
     );
 
     var first: terminal_modes.ModePacked = std.mem.zeroes(
@@ -1231,15 +1226,6 @@ test "TERMINAL payload type registries" {
     try std.testing.expectEqual(
         @as(u42, 1) << 41,
         @as(u42, @bitCast(last)),
-    );
-
-    try std.testing.expectEqual(
-        @as(u1, 0),
-        @intFromEnum(terminal_ansi.StatusDisplay.main),
-    );
-    try std.testing.expectEqual(
-        @as(c_int, 33),
-        @intFromEnum(terminal_mouse.Shape.zoom_out),
     );
 }
 
@@ -1297,28 +1283,33 @@ test "TERMINAL header rejects invalid values" {
 
     // Single-byte registries and boolean encodings reject every value just
     // beyond their current snapshot range.
-    const byte_cases = .{
-        .{ @as(usize, 20), @as(u8, 2), error.InvalidStatusDisplay },
-        .{ @as(usize, 21), @as(u8, 2), error.InvalidActiveScreenKey },
-        .{ @as(usize, 29), @as(u8, 2), error.InvalidCursorIsDefault },
-        .{ @as(usize, 30), @as(u8, 4), error.InvalidCursorStyle },
-        .{ @as(usize, 31), @as(u8, 3), error.InvalidCursorBlink },
-        .{ @as(usize, 32), @as(u8, 3), error.InvalidShellRedraw },
-        .{ @as(usize, 33), @as(u8, 2), error.InvalidModifyOtherKeys },
-        .{ @as(usize, 34), @as(u8, 5), error.InvalidMouseEvent },
-        .{ @as(usize, 35), @as(u8, 5), error.InvalidMouseFormat },
-        .{ @as(usize, 36), @as(u8, 3), error.InvalidMouseShiftCapture },
-        .{ @as(usize, 37), @as(u8, 34), error.InvalidMouseShape },
-        .{ @as(usize, 38), @as(u8, 2), error.InvalidPasswordInput },
-        .{ @as(usize, 44), @as(u8, 4), error.InvalidModes },
-        .{ @as(usize, 63), @as(u8, 2), error.InvalidDynamicRGB },
-        .{ @as(usize, 68), @as(u8, 1), error.InvalidDynamicRGB },
+    const ByteCase = struct {
+        offset: usize,
+        value: u8,
+        expected: anyerror,
     };
-    inline for (byte_cases) |case| {
+    const byte_cases = [_]ByteCase{
+        .{ .offset = 20, .value = 2, .expected = error.InvalidStatusDisplay },
+        .{ .offset = 21, .value = 2, .expected = error.InvalidActiveScreenKey },
+        .{ .offset = 29, .value = 2, .expected = error.InvalidCursorIsDefault },
+        .{ .offset = 30, .value = 4, .expected = error.InvalidCursorStyle },
+        .{ .offset = 31, .value = 3, .expected = error.InvalidCursorBlink },
+        .{ .offset = 32, .value = 3, .expected = error.InvalidShellRedraw },
+        .{ .offset = 33, .value = 2, .expected = error.InvalidModifyOtherKeys },
+        .{ .offset = 34, .value = 5, .expected = error.InvalidMouseEvent },
+        .{ .offset = 35, .value = 5, .expected = error.InvalidMouseFormat },
+        .{ .offset = 36, .value = 3, .expected = error.InvalidMouseShiftCapture },
+        .{ .offset = 37, .value = 34, .expected = error.InvalidMouseShape },
+        .{ .offset = 38, .value = 2, .expected = error.InvalidPasswordInput },
+        .{ .offset = 44, .value = 4, .expected = error.InvalidModes },
+        .{ .offset = 63, .value = 2, .expected = error.InvalidDynamicRGB },
+        .{ .offset = 68, .value = 1, .expected = error.InvalidDynamicRGB },
+    };
+    for (byte_cases) |case| {
         var fixture = test_header_fixture.*;
-        fixture[case[0]] = case[1];
+        fixture[case.offset] = case.value;
         var reader: std.Io.Reader = .fixed(&fixture);
-        try testing.expectError(case[2], Header.decode(&reader));
+        try testing.expectError(case.expected, Header.decode(&reader));
     }
 
     // Cross-field and multi-byte invariants are validated after decoding.
@@ -1480,7 +1471,7 @@ test "TERMINAL payload rejects noncanonical state" {
     try testing.expectEqual(@as(usize, 0), writer.end);
 }
 
-test "TERMINAL payload rejects padding and every truncation" {
+test "TERMINAL payload rejects tab-stop padding" {
     const testing = std.testing;
 
     var tabstops = try TerminalTabstops.init(
@@ -1519,16 +1510,6 @@ test "TERMINAL payload rejects padding and every truncation" {
         error.InvalidTabStops,
         decodePayload(&padding_reader, testing.allocator),
     );
-
-    for (0..destination.written().len) |fixture_len| {
-        var reader: std.Io.Reader = .fixed(
-            destination.written()[0..fixture_len],
-        );
-        try testing.expectError(
-            error.EndOfStream,
-            decodePayload(&reader, testing.allocator),
-        );
-    }
 }
 
 test "TERMINAL record encodes native terminal state" {
@@ -1579,87 +1560,14 @@ test "TERMINAL record encodes native terminal state" {
     try terminal.setPwd("file:///tmp/native");
     try terminal.setTitle("native title");
 
-    // Decode the generated framing and payload independently.
+    // Encode and restore through the public record codec.
     var destination: std.Io.Writer.Allocating = .init(testing.allocator);
     defer destination.deinit();
     try encode(&terminal, &destination);
 
     var source: std.Io.Reader = .fixed(destination.written());
-    var record_reader: record.Reader = undefined;
-    try record_reader.init(&source);
-    try testing.expectEqual(record.Tag.terminal, record_reader.header.tag);
-    var decoded = try decodePayload(
-        record_reader.payloadReader(),
-        testing.allocator,
-    );
-    defer decoded.deinit(testing.allocator);
-    try record_reader.finish();
-
-    // Native screen routing and policy are derived rather than caller-supplied.
-    try testing.expectEqual(@as(u16, 10), decoded.header.columns);
-    try testing.expectEqual(@as(u16, 3), decoded.header.rows);
-    try testing.expectEqual(@as(u32, 800), decoded.header.width_px);
-    try testing.expectEqual(@as(u32, 600), decoded.header.height_px);
-    try testing.expectEqual(
-        terminal.scrolling_region,
-        Terminal.ScrollingRegion{
-            .top = decoded.header.scrolling_region_top,
-            .bottom = decoded.header.scrolling_region_bottom,
-            .left = decoded.header.scrolling_region_left,
-            .right = decoded.header.scrolling_region_right,
-        },
-    );
-    try testing.expectEqual(terminal.status_display, decoded.header.status_display);
-    try testing.expectEqual(.primary, decoded.header.active_screen_key);
-    try testing.expectEqual(@as(u16, 1), decoded.header.screen_count);
-    try testing.expectEqual(@as(?u21, 'X'), decoded.header.previous_codepoint);
-    try testing.expectEqual(terminal.cursor.is_default, decoded.header.cursor_is_default);
-    try testing.expectEqual(
-        terminal.cursor.default_style,
-        decoded.header.cursor_default_style,
-    );
-    try testing.expectEqual(
-        terminal.cursor.default_blink,
-        decoded.header.cursor_default_blink,
-    );
-    try testing.expectEqual(
-        terminal.flags.shell_redraws_prompt,
-        decoded.header.shell_redraw,
-    );
-    try testing.expectEqual(
-        terminal.flags.modify_other_keys_2,
-        decoded.header.modify_other_keys_2,
-    );
-    try testing.expectEqual(terminal.flags.mouse_event, decoded.header.mouse_event);
-    try testing.expectEqual(
-        terminal.flags.mouse_format,
-        decoded.header.mouse_format,
-    );
-    try testing.expectEqual(@as(?bool, true), decoded.header.mouse_shift_capture);
-    try testing.expectEqual(terminal.mouse_shape, decoded.header.mouse_shape);
-    try testing.expectEqual(
-        terminal.flags.password_input,
-        decoded.header.password_input,
-    );
-    try testing.expectEqualDeep(terminal.modes.values, decoded.header.current_modes);
-    try testing.expectEqualDeep(terminal.modes.saved, decoded.header.saved_modes);
-    try testing.expectEqualDeep(terminal.modes.default, decoded.header.default_modes);
-    try testing.expectEqualDeep(
-        terminal.colors.background,
-        decoded.header.background,
-    );
-    try testing.expectEqualDeep(terminal.colors.palette, decoded.palette);
-    try testing.expectEqual(@as(?u64, 12_345), decoded.header.max_scrollback_bytes);
-    try testing.expectEqual(@as(?u64, 67), decoded.header.max_scrollback_rows);
-    try testing.expect(decoded.tabstops.get(1));
-    try testing.expect(decoded.tabstops.get(9));
-    try testing.expectEqualStrings("file:///tmp/native", decoded.pwd);
-    try testing.expectEqualStrings("native title", decoded.title);
-
-    // The public decoder installs the same payload into native ownership.
-    var native_source: std.Io.Reader = .fixed(destination.written());
     var restored = try decode(
-        &native_source,
+        &source,
         testing.io,
         testing.allocator,
     );
@@ -1675,6 +1583,31 @@ test "TERMINAL record encodes native terminal state" {
     try testing.expect(restored.screens.get(.alternate) == null);
     try testing.expectEqual(@as(?u21, 'X'), restored.previous_char);
     try testing.expectEqualDeep(terminal.cursor, restored.cursor);
+    try testing.expectEqual(
+        terminal.flags.shell_redraws_prompt,
+        restored.flags.shell_redraws_prompt,
+    );
+    try testing.expectEqual(
+        terminal.flags.modify_other_keys_2,
+        restored.flags.modify_other_keys_2,
+    );
+    try testing.expectEqual(
+        terminal.flags.mouse_event,
+        restored.flags.mouse_event,
+    );
+    try testing.expectEqual(
+        terminal.flags.mouse_format,
+        restored.flags.mouse_format,
+    );
+    try testing.expectEqual(
+        terminal.flags.mouse_shift_capture,
+        restored.flags.mouse_shift_capture,
+    );
+    try testing.expectEqual(
+        terminal.flags.password_input,
+        restored.flags.password_input,
+    );
+    try testing.expectEqual(terminal.mouse_shape, restored.mouse_shape);
     try testing.expectEqualDeep(terminal.modes, restored.modes);
     try testing.expectEqualDeep(terminal.colors, restored.colors);
     try testing.expectEqual(

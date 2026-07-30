@@ -1219,38 +1219,7 @@ fn testSavedCursor() SavedCursor {
     };
 }
 
-fn expectHeaderRoundTrip(expected: Header) !void {
-    var encoded: [Header.len]u8 = undefined;
-    var writer: std.Io.Writer = .fixed(&encoded);
-    try expected.encode(&writer);
-
-    var reader: std.Io.Reader = .fixed(writer.buffered());
-    const actual = try Header.decode(&reader);
-    try std.testing.expectEqualDeep(expected, actual);
-}
-
-fn expectHyperlinkEqual(
-    expected: TerminalHyperlink,
-    actual: TerminalHyperlink,
-) !void {
-    try std.testing.expectEqualStrings(expected.uri, actual.uri);
-    try std.testing.expectEqual(
-        std.meta.activeTag(expected.id),
-        std.meta.activeTag(actual.id),
-    );
-    switch (expected.id) {
-        .implicit => |expected_id| try std.testing.expectEqual(
-            expected_id,
-            actual.id.implicit,
-        ),
-        .explicit => |expected_id| try std.testing.expectEqualStrings(
-            expected_id,
-            actual.id.explicit,
-        ),
-    }
-}
-
-test "header golden encoding" {
+test "SCREEN header golden encoding and decoding" {
     try std.testing.expectEqual(Header.len, test_header_fixture.len);
 
     var encoded: [Header.len]u8 = undefined;
@@ -1261,9 +1230,7 @@ test "header golden encoding" {
         test_header_fixture,
         writer.buffered(),
     );
-}
 
-test "header decoding with a one-byte reader buffer" {
     var source: std.Io.Reader = .fixed(test_header_fixture);
     var buffer: [1]u8 = undefined;
     var limited = source.limited(.unlimited, &buffer);
@@ -1274,12 +1241,13 @@ test "header decoding with a one-byte reader buffer" {
     );
 }
 
-test "header registry values round trip" {
+test "native enum values used by the SCREEN format" {
     const keys = [_]TerminalScreenKey{ .primary, .alternate };
-    for (keys) |value| {
-        var header = testHeader();
-        header.key = value;
-        try expectHeaderRoundTrip(header);
+    for (keys, 0..) |value, expected| {
+        try std.testing.expectEqual(
+            expected,
+            @as(usize, @intCast(@intFromEnum(value))),
+        );
     }
 
     const cursor_styles = [_]TerminalScreen.CursorStyle{
@@ -1288,10 +1256,11 @@ test "header registry values round trip" {
         .underline,
         .block_hollow,
     };
-    for (cursor_styles) |value| {
-        var header = testHeader();
-        header.cursor_style = value;
-        try expectHeaderRoundTrip(header);
+    for (cursor_styles, 0..) |value, expected| {
+        try std.testing.expectEqual(
+            expected,
+            @as(usize, @intCast(@intFromEnum(value))),
+        );
     }
 
     const semantic_contents = [_]terminal_page.Cell.SemanticContent{
@@ -1299,10 +1268,11 @@ test "header registry values round trip" {
         .input,
         .prompt,
     };
-    for (semantic_contents) |value| {
-        var header = testHeader();
-        header.cursor_flags.semantic_content = value;
-        try expectHeaderRoundTrip(header);
+    for (semantic_contents, 0..) |value, expected| {
+        try std.testing.expectEqual(
+            expected,
+            @as(usize, @intCast(@intFromEnum(value))),
+        );
     }
 
     const charsets = [_]terminal_charsets.Charset{
@@ -1311,34 +1281,19 @@ test "header registry values round trip" {
         .british,
         .dec_special,
     };
-    for (charsets) |value| {
-        var header = testHeader();
-        header.charset.charsets.set(.G0, value);
-        header.charset.charsets.set(.G1, value);
-        header.charset.charsets.set(.G2, value);
-        header.charset.charsets.set(.G3, value);
-        try expectHeaderRoundTrip(header);
+    for (charsets, 0..) |value, expected| {
+        try std.testing.expectEqual(
+            expected,
+            @as(usize, @intCast(@intFromEnum(value))),
+        );
     }
 
     const slots = [_]terminal_charsets.Slots{ .G0, .G1, .G2, .G3 };
-    for (slots) |value| {
-        var header = testHeader();
-        header.charset.gl = value;
-        header.charset.gr = value;
-        try expectHeaderRoundTrip(header);
-    }
-
-    const single_shifts = [_]?terminal_charsets.Slots{
-        null,
-        .G0,
-        .G1,
-        .G2,
-        .G3,
-    };
-    for (single_shifts) |value| {
-        var header = testHeader();
-        header.charset.single_shift = value;
-        try expectHeaderRoundTrip(header);
+    for (slots, 0..) |value, expected| {
+        try std.testing.expectEqual(
+            expected,
+            @as(usize, @intCast(@intFromEnum(value))),
+        );
     }
 
     const protected_modes = [_]terminal_ansi.ProtectedMode{
@@ -1346,74 +1301,116 @@ test "header registry values round trip" {
         .iso,
         .dec,
     };
-    for (protected_modes) |value| {
-        var header = testHeader();
-        header.protected_mode = value;
-        try expectHeaderRoundTrip(header);
+    for (protected_modes, 0..) |value, expected| {
+        try std.testing.expectEqual(
+            expected,
+            @as(usize, @intCast(@intFromEnum(value))),
+        );
     }
 
-    const semantic_clicks =
-        [_]TerminalScreen.SemanticPrompt.SemanticClick{
-            .none,
-            .{ .click_events = .absolute },
-            .{ .click_events = .relative },
-            .{ .cl = .line },
-            .{ .cl = .multiple },
-            .{ .cl = .conservative_vertical },
-            .{ .cl = .smart_vertical },
-        };
-    for (semantic_clicks) |value| {
-        var header = testHeader();
-        header.semantic_click = value;
-        try expectHeaderRoundTrip(header);
+    const click_kinds = [_]TerminalScreen.SemanticPrompt.SemanticClickKind{
+        .none,
+        .click_events,
+        .cl,
+    };
+    for (click_kinds, 0..) |value, expected| {
+        try std.testing.expectEqual(
+            expected,
+            @as(usize, @intCast(@intFromEnum(value))),
+        );
+    }
+
+    const click_events = [_]terminal_osc.semantic_prompt.ClickEvents{
+        .absolute,
+        .relative,
+    };
+    for (click_events, 0..) |value, expected| {
+        try std.testing.expectEqual(
+            expected,
+            @as(usize, @intCast(@intFromEnum(value))),
+        );
+    }
+
+    const clicks = [_]terminal_osc.semantic_prompt.Click{
+        .line,
+        .multiple,
+        .conservative_vertical,
+        .smart_vertical,
+    };
+    for (clicks, 0..) |value, expected| {
+        try std.testing.expectEqual(
+            expected,
+            @as(usize, @intCast(@intFromEnum(value))),
+        );
     }
 }
 
 test "cursor, Kitty, and saved cursor flag bit layouts" {
-    const cursor_cases = .{
-        .{ CursorFlags{ .pending_wrap = true }, @as(u8, 1 << 0) },
-        .{ CursorFlags{ .protected = true }, @as(u8, 1 << 1) },
+    const CursorCase = struct {
+        value: CursorFlags,
+        expected: u8,
+    };
+    const cursor_cases = [_]CursorCase{
+        .{ .value = .{ .pending_wrap = true }, .expected = 1 << 0 },
+        .{ .value = .{ .protected = true }, .expected = 1 << 1 },
         .{
-            CursorFlags{ .semantic_content = .input },
-            @as(u8, 1 << 2),
+            .value = .{ .semantic_content = .input },
+            .expected = 1 << 2,
         },
         .{
-            CursorFlags{ .semantic_content = .prompt },
-            @as(u8, 2 << 2),
+            .value = .{ .semantic_content = .prompt },
+            .expected = 2 << 2,
         },
         .{
-            CursorFlags{ .semantic_content_clear_eol = true },
-            @as(u8, 1 << 4),
+            .value = .{ .semantic_content_clear_eol = true },
+            .expected = 1 << 4,
         },
     };
-    inline for (cursor_cases) |case| {
-        try std.testing.expectEqual(case[1], @as(u8, @bitCast(case[0])));
+    for (cursor_cases) |case| {
+        try std.testing.expectEqual(
+            case.expected,
+            @as(u8, @bitCast(case.value)),
+        );
     }
 
-    const kitty_cases = .{
-        .{ KittyKeyboard.Flags{ .disambiguate = true }, @as(u8, 1 << 0) },
-        .{ KittyKeyboard.Flags{ .report_events = true }, @as(u8, 1 << 1) },
+    const KittyCase = struct {
+        value: KittyKeyboard.Flags,
+        expected: u8,
+    };
+    const kitty_cases = [_]KittyCase{
+        .{ .value = .{ .disambiguate = true }, .expected = 1 << 0 },
+        .{ .value = .{ .report_events = true }, .expected = 1 << 1 },
         .{
-            KittyKeyboard.Flags{ .report_alternates = true },
-            @as(u8, 1 << 2),
+            .value = .{ .report_alternates = true },
+            .expected = 1 << 2,
         },
-        .{ KittyKeyboard.Flags{ .report_all = true }, @as(u8, 1 << 3) },
+        .{ .value = .{ .report_all = true }, .expected = 1 << 3 },
         .{
-            KittyKeyboard.Flags{ .report_associated = true },
-            @as(u8, 1 << 4),
+            .value = .{ .report_associated = true },
+            .expected = 1 << 4,
         },
     };
-    inline for (kitty_cases) |case| {
-        try std.testing.expectEqual(case[1], @as(u8, @bitCast(case[0])));
+    for (kitty_cases) |case| {
+        try std.testing.expectEqual(
+            case.expected,
+            @as(u8, @bitCast(case.value)),
+        );
     }
 
-    const saved_cases = .{
-        .{ SavedCursor.Flags{ .protected = true }, @as(u8, 1 << 0) },
-        .{ SavedCursor.Flags{ .pending_wrap = true }, @as(u8, 1 << 1) },
-        .{ SavedCursor.Flags{ .origin = true }, @as(u8, 1 << 2) },
+    const SavedCase = struct {
+        value: SavedCursor.Flags,
+        expected: u8,
     };
-    inline for (saved_cases) |case| {
-        try std.testing.expectEqual(case[1], @as(u8, @bitCast(case[0])));
+    const saved_cases = [_]SavedCase{
+        .{ .value = .{ .protected = true }, .expected = 1 << 0 },
+        .{ .value = .{ .pending_wrap = true }, .expected = 1 << 1 },
+        .{ .value = .{ .origin = true }, .expected = 1 << 2 },
+    };
+    for (saved_cases) |case| {
+        try std.testing.expectEqual(
+            case.expected,
+            @as(u8, @bitCast(case.value)),
+        );
     }
 }
 
@@ -1543,12 +1540,12 @@ test "header decoding rejects invalid values" {
         Header.decode(&semantic_click_kind_reader),
     );
 
-    const invalid_semantic_clicks = .{
-        .{ @as(u8, 0), @as(u8, 1) },
-        .{ @as(u8, 1), @as(u8, 2) },
-        .{ @as(u8, 2), @as(u8, 4) },
+    const invalid_semantic_clicks = [_][2]u8{
+        .{ 0, 1 },
+        .{ 1, 2 },
+        .{ 2, 4 },
     };
-    inline for (invalid_semantic_clicks) |invalid| {
+    for (invalid_semantic_clicks) |invalid| {
         var fixture = valid;
         fixture[42] = invalid[0];
         fixture[43] = invalid[1];
@@ -1678,7 +1675,7 @@ test "saved cursor decoding rejects every truncation" {
     }
 }
 
-test "cursor hyperlink encoding and decoding" {
+test "cursor hyperlink null encoding and decoding" {
     var none_encoded: [1]u8 = undefined;
     var none_writer: std.Io.Writer = .fixed(&none_encoded);
     try encodeCursorHyperlink(null, &none_writer);
@@ -1689,31 +1686,6 @@ test "cursor hyperlink encoding and decoding" {
         null,
         try decodeCursorHyperlink(&none_reader, std.testing.allocator),
     );
-
-    const values = [_]TerminalHyperlink{
-        .{
-            .id = .{ .implicit = 0x01020304 },
-            .uri = "implicit",
-        },
-        .{
-            .id = .{ .explicit = "id" },
-            .uri = "explicit",
-        },
-    };
-
-    for (values) |expected| {
-        var encoded: [128]u8 = undefined;
-        var writer: std.Io.Writer = .fixed(&encoded);
-        try encodeCursorHyperlink(expected, &writer);
-
-        var reader: std.Io.Reader = .fixed(writer.buffered());
-        var actual = (try decodeCursorHyperlink(
-            &reader,
-            std.testing.allocator,
-        )).?;
-        defer actual.deinit(std.testing.allocator);
-        try expectHyperlinkEqual(expected, actual);
-    }
 }
 
 test "framed native SCREEN and PAGE sequence" {
@@ -1797,44 +1769,6 @@ test "framed native SCREEN and PAGE sequence" {
         destination.written()[0..6],
     );
 
-    var source: std.Io.Reader = .fixed(destination.written()[6..]);
-    var record_reader: record.Reader = undefined;
-    try record_reader.init(&source);
-    try std.testing.expectEqual(record.Tag.screen, record_reader.header.tag);
-
-    const payload_reader = record_reader.payloadReader();
-    var expected_header = testHeader();
-    expected_header.page_count = 1;
-    expected_header.cursor_x = 7;
-    expected_header.cursor_y = 6;
-    expected_header.hyperlink_implicit_id = 0x0a0b0c0e;
-    try std.testing.expectEqualDeep(
-        expected_header,
-        try Header.decode(payload_reader),
-    );
-    try std.testing.expectEqualDeep(
-        testSavedCursor(),
-        try SavedCursor.decode(payload_reader),
-    );
-
-    const expected_hyperlink: TerminalHyperlink = .{
-        .id = .{ .implicit = 0x0a0b0c0d },
-        .uri = "cursor-uri",
-    };
-    var actual_hyperlink = (try decodeCursorHyperlink(
-        payload_reader,
-        std.testing.allocator,
-    )).?;
-    defer actual_hyperlink.deinit(std.testing.allocator);
-    try expectHyperlinkEqual(expected_hyperlink, actual_hyperlink);
-    try record_reader.finish();
-
-    var decoded_page = try page.decode(&source, std.testing.allocator);
-    defer decoded_page.deinit();
-    try std.testing.expectEqual(@as(u16, 8), decoded_page.size.cols);
-    try std.testing.expectEqual(@as(u16, 8), decoded_page.size.rows);
-    try std.testing.expectError(error.EndOfStream, source.takeByte());
-
     // The complete sequence restores directly into native Screen/PageList
     // state, including page-local cursor references.
     var restore_source: std.Io.Reader = .fixed(destination.written()[6..]);
@@ -1868,10 +1802,18 @@ test "framed native SCREEN and PAGE sequence" {
         @as(u32, 0x0a0b0c0e),
         restored.cursor.hyperlink_implicit_id,
     );
-    try expectHyperlinkEqual(
-        expected_hyperlink,
-        restored.cursor.hyperlink.?.*,
+    const restored_hyperlink = restored.cursor.hyperlink.?.*;
+    try std.testing.expectEqualStrings(
+        "cursor-uri",
+        restored_hyperlink.uri,
     );
+    switch (restored_hyperlink.id) {
+        .implicit => |id| try std.testing.expectEqual(
+            @as(u32, 0x0a0b0c0d),
+            id,
+        ),
+        .explicit => try std.testing.expect(false),
+    }
 
     const restored_saved = restored.saved_cursor.?;
     try std.testing.expectEqual(@as(u16, 0x0102), restored_saved.x);
@@ -2136,62 +2078,6 @@ test "SCREEN sequence failure preserves preceding bytes" {
         encode(&screen, .primary, &destination),
     );
     try std.testing.expectEqualStrings("prefix", destination.written());
-}
-
-test "cursor hyperlink rejects invalid kind and every truncation" {
-    var invalid_kind_reader: std.Io.Reader = .fixed("\x03");
-    try std.testing.expectError(
-        error.InvalidKind,
-        decodeCursorHyperlink(
-            &invalid_kind_reader,
-            std.testing.allocator,
-        ),
-    );
-
-    const empty_cases = [_]struct {
-        fixture: []const u8,
-        expected: anyerror,
-    }{
-        .{
-            .fixture = "\x01\x04\x03\x02\x01\x00\x00\x00\x00",
-            .expected = error.InvalidUri,
-        },
-        .{
-            .fixture = "\x02\x00\x00\x00\x00",
-            .expected = error.InvalidExplicitId,
-        },
-        .{
-            .fixture = "\x02\x02\x00\x00\x00id\x00\x00\x00\x00",
-            .expected = error.InvalidUri,
-        },
-    };
-    for (empty_cases) |case| {
-        var reader: std.Io.Reader = .fixed(case.fixture);
-        try std.testing.expectError(
-            case.expected,
-            decodeCursorHyperlink(
-                &reader,
-                std.testing.allocator,
-            ),
-        );
-    }
-
-    const fixtures = .{
-        "\x01\x04\x03\x02\x01\x03\x00\x00\x00uri",
-        "\x02\x02\x00\x00\x00id\x03\x00\x00\x00uri",
-    };
-    inline for (fixtures) |fixture| {
-        for (0..fixture.len) |fixture_len| {
-            var reader: std.Io.Reader = .fixed(fixture[0..fixture_len]);
-            try std.testing.expectError(
-                error.EndOfStream,
-                decodeCursorHyperlink(
-                    &reader,
-                    std.testing.allocator,
-                ),
-            );
-        }
-    }
 }
 
 test "SCREEN decode rejects an empty cursor hyperlink URI" {

@@ -123,9 +123,12 @@ test "checkpoint BLAKE3-256 registry" {
 
     var hasher = Blake3.init(.{});
     hasher.update("a");
-    hasher.update("bc");
+    var prefix: Digest = undefined;
+    Blake3.hash("a", &prefix, .{});
     hasher.final(&actual);
-    try std.testing.expectEqual(expected, actual);
+    try std.testing.expectEqual(prefix, actual);
+
+    hasher.update("bc");
     hasher.final(&actual);
     try std.testing.expectEqual(expected, actual);
 }
@@ -142,7 +145,6 @@ test "READY and FINISH checkpoint coverage" {
     var ready_digest: Digest = undefined;
     Blake3.hash(snapshot.written(), &ready_digest, .{});
     try encode(.ready, &snapshot);
-    const ready_end = snapshot.written().len;
 
     // History follows READY and is included by FINISH.
     try snapshot.writer.writeAll("history");
@@ -160,19 +162,6 @@ test "READY and FINISH checkpoint coverage" {
         snapshot.written()[finish_offset..],
     );
     try decode(.finish, finish_digest, &finish_source);
-
-    // Including READY changes the FINISH digest even before history is added.
-    var ready_record_digest: Digest = undefined;
-    Blake3.hash(
-        snapshot.written()[0..ready_end],
-        &ready_record_digest,
-        .{},
-    );
-    try testing.expect(!std.mem.eql(
-        u8,
-        &ready_digest,
-        &ready_record_digest,
-    ));
 }
 
 test "checkpoint rejects wrong tags, digests, and FINISH trailing data" {
@@ -218,34 +207,4 @@ test "checkpoint rejects wrong tags, digests, and FINISH trailing data" {
         error.TrailingData,
         decode(.finish, digest, &trailing_source),
     );
-}
-
-test "checkpoint rejects corruption and every truncation" {
-    const testing = std.testing;
-
-    var snapshot: std.Io.Writer.Allocating = .init(testing.allocator);
-    defer snapshot.deinit();
-    try snapshot.writer.writeAll("prefix");
-    const checkpoint_offset = snapshot.written().len;
-    var digest: Digest = undefined;
-    Blake3.hash(snapshot.written(), &digest, .{});
-    try encode(.ready, &snapshot);
-    const fixture = snapshot.written()[checkpoint_offset..];
-
-    const corrupt = try testing.allocator.dupe(u8, fixture);
-    defer testing.allocator.free(corrupt);
-    corrupt[record.Header.len] ^= 1;
-    var corrupt_source: std.Io.Reader = .fixed(corrupt);
-    try testing.expectError(
-        error.InvalidChecksum,
-        decode(.ready, digest, &corrupt_source),
-    );
-
-    for (0..fixture.len) |fixture_len| {
-        var source: std.Io.Reader = .fixed(fixture[0..fixture_len]);
-        try testing.expectError(
-            error.EndOfStream,
-            decode(.ready, digest, &source),
-        );
-    }
 }

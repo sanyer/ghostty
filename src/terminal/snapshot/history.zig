@@ -668,56 +668,60 @@ test "HISTORY rejects manifest mismatches" {
 
     // Encode a manifest without PAGE records and vary only the fixed fields so
     // each structural validation boundary is exercised in isolation.
-    const cases = .{
+    const Case = struct {
+        header: Header,
+        expected: anyerror,
+    };
+    const cases = [_]Case{
         .{
-            Header{
+            .header = .{
                 .key = .alternate,
                 .page_count = 0,
                 .total_rows = 0,
                 .screen_overlap_rows = 0,
             },
-            error.UnexpectedScreenKey,
+            .expected = error.UnexpectedScreenKey,
         },
         .{
-            Header{
+            .header = .{
                 .key = .primary,
                 .page_count = 0,
                 .total_rows = 1,
                 .screen_overlap_rows = 1,
             },
-            error.InvalidScreenOverlap,
+            .expected = error.InvalidScreenOverlap,
         },
         .{
-            Header{
+            .header = .{
                 .key = .primary,
                 .page_count = 0,
                 .total_rows = 1,
                 .screen_overlap_rows = 0,
             },
-            error.InvalidHistoryRows,
+            .expected = error.InvalidHistoryRows,
         },
         .{
-            Header{
+            .header = .{
                 .key = .primary,
                 .page_count = 1,
                 .total_rows = 1,
                 .screen_overlap_rows = 0,
             },
-            error.EndOfStream,
+            .expected = error.EndOfStream,
         },
     };
-    inline for (cases) |case| {
+    for (cases) |case| {
         var destination: std.Io.Writer.Allocating = .init(
             std.testing.allocator,
         );
         defer destination.deinit();
         var record_writer = try record.Writer.init(&destination, .history);
-        try case[0].encode(record_writer.payloadWriter());
+        try case.header.encode(record_writer.payloadWriter());
         try record_writer.finish();
 
         var source: std.Io.Reader = .fixed(destination.written());
         try std.testing.expectError(
-            case[1],
+            case.expected,
             decode(
                 &source,
                 std.testing.allocator,
