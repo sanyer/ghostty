@@ -37,9 +37,10 @@
 //!  n = page_count
 //! ```
 //!
-//! A later history-capable snapshot version provides the authoritative history
-//! manifest. It counts any incidental prefix above as already resident and
-//! describes older rows that may be loaded after the terminal becomes ready.
+//! The HISTORY record for this screen provides the authoritative history
+//! manifest. It counts any incidental prefix above as the SCREEN overlap, then
+//! sends the older complete pages after the terminal becomes ready. The prefix
+//! is not sent again.
 //!
 //! The SCREEN payload begins with a fixed header. When the header says there is
 //! no saved cursor, the payload is:

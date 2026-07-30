@@ -37,8 +37,8 @@ pub const Tag = enum(u16) {
     /// One complete logical terminal page.
     page = 3,
 
-    /// Unfinished UTF-8 and terminal parser input.
-    continuation = 4,
+    /// One screen's complete history manifest and page sequence.
+    history = 4,
 
     /// Digest marking the validated terminal-state prefix.
     ready = 5,

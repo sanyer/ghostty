@@ -7,11 +7,16 @@
 //!
 //! We call this a "snapshot." The snapshot is purposely laid out in a way
 //! that prioritizes making a terminal functional as quickly as possible.
-//! To do that, it sends down the terminal state, viewport, etc. followed
-//! by a "READY" event. At the READY state, the terminal is functional and
-//! could in theory begin processing pty bytes. After the READY state the
-//! binary format continues transmitting history and extra assets such as
-//! images and so on.
+//! To do that, it sends the active terminal state followed by a READY record,
+//! then complete history.
+//!
+//! READY denotes that enough of the terminal state is down that it can
+//! be fully rendered at that point. This is also the point where live
+//! terminals can also start accepting pty bytes, typically. But the current
+//! snapshot format lacks some of the information necessary to synchronize
+//! pty byte state with an authoritative server.
+//!
+//! After READY, we send history pages (scrollback).
 //!
 //! ## Snapshot Format
 //!
@@ -39,9 +44,35 @@
 //! +------------------+
 //! ```
 //!
-//! Records have a strict order: TERMINAL, the primary SCREEN and its
-//! PAGE records, an optional alternate SCREEN and its PAGE records,
-//! CONTINUATION, READY, and FINISH.
+//! Records have a strict order:
+//!
+//! ```text
+//! +----------------------------------------+
+//! | TERMINAL                               |
+//! +----------------------------------------+
+//! | SCREEN (primary)                       |
+//! | PAGE * screen.page_count               |
+//! +----------------------------------------+
+//! | SCREEN (alternate, when present)       |
+//! | PAGE * screen.page_count               |
+//! +----------------------------------------+
+//! | READY                                  |
+//! +----------------------------------------+
+//! | HISTORY (primary)                      |
+//! | PAGE * history.page_count              |
+//! +----------------------------------------+
+//! | HISTORY (alternate, when present)      |
+//! | PAGE * history.page_count              |
+//! +----------------------------------------+
+//! | FINISH                                 |
+//! +----------------------------------------+
+//! ```
+//!
+//! The SCREEN sequences contain the complete pages needed to restore each
+//! active area. A HISTORY sequence contains the older complete pages for its
+//! screen in newest-to-oldest order so they can be prepended as they arrive.
+//! Every SCREEN has one corresponding HISTORY, even when its history page count
+//! is zero. FINISH is followed by end-of-file.
 //!
 //! ## Encoding
 //!
@@ -66,6 +97,7 @@
 
 pub const envelope = @import("envelope.zig");
 pub const grid = @import("grid.zig");
+pub const history = @import("history.zig");
 pub const hyperlink = @import("hyperlink.zig");
 pub const page = @import("page.zig");
 pub const record = @import("record.zig");
