@@ -74,6 +74,11 @@
 //! Every SCREEN has one corresponding HISTORY, even when its history page count
 //! is zero. FINISH is followed by end-of-file.
 //!
+//! READY and FINISH contain BLAKE3-256 digests of all preceding snapshot bytes.
+//! READY therefore validates the renderable active-state prefix. FINISH covers
+//! READY and all history as well, validating the complete snapshot and its
+//! record ordering.
+//!
 //! ## Encoding
 //!
 //! Encode the envelope once, then append records in the required order:
@@ -95,6 +100,7 @@
 //! Each record type usually exposes an `encode` function that encodes
 //! a complete record, such as `screen.encode`.
 
+pub const checkpoint = @import("checkpoint.zig");
 pub const envelope = @import("envelope.zig");
 pub const grid = @import("grid.zig");
 pub const history = @import("history.zig");
