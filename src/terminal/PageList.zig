@@ -3847,7 +3847,7 @@ pub fn increaseCapacity(
 ///
 /// The page is detached: it doesn't contribute to the memory limits or
 /// row counts or anything in the PageList. The caller must call `finalize`
-/// to add it to the PageList at the appropriate place, or `cancel` to
+/// to add it to the PageList at the appropriate place, or `deinit` to
 /// throw it away.
 pub fn allocatePage(
     self: *PageList,
@@ -3867,23 +3867,25 @@ pub fn allocatePage(
 /// One PageList-pooled page which has not yet joined the live page sequence.
 pub const PageAllocation = struct {
     destination: *PageList,
-    node: *List.Node,
+    node: ?*List.Node,
 
     /// Return the fresh page storage for the caller to populate.
     pub fn page(self: *PageAllocation) *Page {
-        return self.node.pageAssumeResident();
+        return self.node.?.pageAssumeResident();
     }
 
-    /// Release this uncommitted page back to its PageList's pools.
+    /// Release an uncommitted page back to its PageList's pools.
     ///
-    /// This must not be called after `finalize` succeeds.
-    pub fn cancel(self: *PageAllocation) void {
+    /// This is safe to call after `finalize` succeeds, so callers can defer
+    /// it unconditionally.
+    pub fn deinit(self: *PageAllocation) void {
+        const node = self.node orelse return;
         destroyNodeExt(
             &self.destination.pool,
-            self.node,
+            node,
             null,
         );
-        self.* = undefined;
+        self.node = null;
     }
 
     pub const Location = union(enum) {
@@ -3913,7 +3915,7 @@ pub const PageAllocation = struct {
 
     fn prepend(self: *PageAllocation) FinalizeError!void {
         const destination = self.destination;
-        const node = self.node;
+        const node = self.node.?;
 
         // Validate the populated page and all resulting accounting before
         // publishing the detached node into the live list.
@@ -3956,7 +3958,7 @@ pub const PageAllocation = struct {
         destination.page_compression.markActivity();
 
         destination.assertIntegrity();
-        self.* = undefined;
+        self.node = null;
     }
 };
 
@@ -6938,6 +6940,7 @@ pub const Builder = struct {
     page_serial: u64 = 0,
     page_size: usize = 0,
     options: Options,
+    finished: bool = false,
 
     /// Initialize an empty builder. The options are the final state
     /// of the PageList and some validation is done on the finish call
@@ -6956,9 +6959,13 @@ pub const Builder = struct {
         };
     }
 
-    /// Release all pages when restoration does not finish. This MUST NOT
-    /// be called when `finish` is successfully called.
+    /// Release all pages when restoration does not finish.
+    ///
+    /// This is safe to call after `finish` succeeds, so callers can defer it
+    /// unconditionally.
     pub fn deinit(self: *Builder) void {
+        if (self.finished) return;
+
         // Free all our in-progress pages
         while (self.pages.popFirst()) |node| destroyNodeExt(
             &self.pool,
@@ -6975,7 +6982,7 @@ pub const Builder = struct {
     /// The caller can then take this page and populate it. When `finish`
     /// is called, ownership is transferred to the resulting PageList.
     /// Until then, this Builder owns the page.
-    pub fn addPage(
+    pub fn allocatePage(
         self: *Builder,
         capacity: Capacity,
     ) Allocator.Error!*Page {
@@ -6997,9 +7004,8 @@ pub const Builder = struct {
     };
 
     /// Validate the decoded pages and transfer them into a live PageList.
-    /// This also frees all resources associated with the Builder (that
-    /// weren't transferred to the PageList). Do not call deinit after
-    /// this.
+    /// After this succeeds, `deinit` is a no-op because all resources have
+    /// transferred to the PageList.
     pub fn finish(self: *Builder) FinishError!PageList {
         // These are basic validations but they're cheap to do and
         // we want to be careful we don't let corruption from untrusted
@@ -7068,7 +7074,7 @@ pub const Builder = struct {
             .viewport_pin_row_offset = null,
         };
         result.assertIntegrity();
-        self.* = undefined;
+        self.finished = true;
         return result;
     }
 };
@@ -7086,16 +7092,16 @@ test "PageList Builder transfers mixed-width pages" {
             .max_size = null,
             .max_lines = null,
         });
-        errdefer builder.deinit();
+        defer builder.deinit();
 
-        const first = try builder.addPage(.{
+        const first = try builder.allocatePage(.{
             .cols = 2,
             .rows = 2,
         });
         first.size.rows = 2;
         first.getRowAndCell(0, 0).cell.* = .init('A');
 
-        const second = try builder.addPage(.{
+        const second = try builder.allocatePage(.{
             .cols = 4,
             .rows = 2,
         });
@@ -7165,7 +7171,7 @@ test "PageList Builder validates the finished list" {
             .rows = 1,
         });
         defer builder.deinit();
-        const page = try builder.addPage(.{ .cols = 1, .rows = 1 });
+        const page = try builder.allocatePage(.{ .cols = 1, .rows = 1 });
         page.size.rows = 0;
         try testing.expectError(
             error.InvalidPageDimensions,
@@ -7180,7 +7186,7 @@ test "PageList Builder validates the finished list" {
             .rows = 2,
         });
         defer builder.deinit();
-        const page = try builder.addPage(.{ .cols = 1, .rows = 1 });
+        const page = try builder.allocatePage(.{ .cols = 1, .rows = 1 });
         page.size.rows = 1;
         try testing.expectError(error.InsufficientRows, builder.finish());
     }
@@ -7197,7 +7203,7 @@ test "PageList Builder finish is transactional on allocation failure" {
         .rows = 1,
     });
     defer builder.deinit();
-    const page = try builder.addPage(.{ .cols = 1, .rows = 1 });
+    const page = try builder.allocatePage(.{ .cols = 1, .rows = 1 });
     page.size.rows = 1;
 
     // The pools are preheated, so the next general allocation is the tracked
@@ -7224,13 +7230,13 @@ test "PageList PageAllocation finalizes pages and preserves live state" {
             .max_size = null,
             .max_lines = null,
         });
-        errdefer builder.deinit();
+        defer builder.deinit();
 
-        const first = try builder.addPage(.{ .cols = 3, .rows = 2 });
+        const first = try builder.allocatePage(.{ .cols = 3, .rows = 2 });
         first.size.rows = 2;
         first.getRowAndCell(0, 0).cell.* = .init('C');
 
-        const second = try builder.addPage(.{ .cols = 4, .rows = 2 });
+        const second = try builder.allocatePage(.{ .cols = 4, .rows = 2 });
         second.size.rows = 2;
         second.getRowAndCell(0, 0).cell.* = .init('D');
 
@@ -7250,7 +7256,7 @@ test "PageList PageAllocation finalizes pages and preserves live state" {
     // populated while detached and joins the live list only on success.
     {
         var allocation = try result.allocatePage(.{ .cols = 4, .rows = 1 });
-        errdefer allocation.cancel();
+        defer allocation.deinit();
         const page = allocation.page();
         page.size.rows = 1;
         page.getRowAndCell(0, 0).cell.* = .init('B');
@@ -7258,7 +7264,7 @@ test "PageList PageAllocation finalizes pages and preserves live state" {
     }
     {
         var allocation = try result.allocatePage(.{ .cols = 2, .rows = 2 });
-        errdefer allocation.cancel();
+        defer allocation.deinit();
         const page = allocation.page();
         page.size.rows = 2;
         page.getRowAndCell(0, 0).cell.* = .init('A');
@@ -7313,7 +7319,7 @@ test "PageList PageAllocation stays detached until finalize" {
     const initial_page_size = result.page_size;
 
     // Allocating and populating a detached page does not alter any live list
-    // links or accounting. Cancel returns it to the same PageList pools.
+    // links or accounting. Deinit returns it to the same PageList pools.
     var detached = try result.allocatePage(.{ .cols = 1, .rows = 1 });
     detached.page().size.rows = 1;
     try testing.expectEqual(initial_first, result.pages.first.?);
@@ -7321,13 +7327,13 @@ test "PageList PageAllocation stays detached until finalize" {
     try testing.expectEqual(initial_total_rows, result.total_rows);
     try testing.expectEqual(initial_page_size, result.page_size);
     result.assertIntegrity();
-    detached.cancel();
+    detached.deinit();
     result.assertIntegrity();
 
     // Invalid populated dimensions leave ownership with the allocation so it
     // can still be released normally.
     var invalid = try result.allocatePage(.{ .cols = 1, .rows = 1 });
-    defer invalid.cancel();
+    defer invalid.deinit();
     try testing.expectError(
         error.InvalidPageDimensions,
         invalid.finalize(.prepend),
@@ -7355,7 +7361,7 @@ test "PageList PageAllocation rejects limits before modifying the destination" {
     // Fill that allowance so the following allocation exceeds the byte limit.
     {
         var allocation = try result.allocatePage(.{ .cols = 1, .rows = 1 });
-        errdefer allocation.cancel();
+        defer allocation.deinit();
         allocation.page().size.rows = 1;
         try allocation.finalize(.prepend);
     }
@@ -7365,7 +7371,7 @@ test "PageList PageAllocation rejects limits before modifying the destination" {
     const before_page_size = result.page_size;
 
     var allocation = try result.allocatePage(.{ .cols = 1, .rows = 1 });
-    defer allocation.cancel();
+    defer allocation.deinit();
     allocation.page().size.rows = 1;
     try testing.expectError(
         error.MaxSizeExceeded,
@@ -7400,7 +7406,7 @@ test "PageList PageAllocation allocation failure leaves list unchanged" {
     var allocations: [64]PageAllocation = undefined;
     var allocation_count: usize = 0;
     defer for (allocations[0..allocation_count]) |*allocation| {
-        allocation.cancel();
+        allocation.deinit();
     };
 
     var failed = false;
