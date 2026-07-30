@@ -149,11 +149,7 @@ pub fn encode(
         const row_header: RowHeader = .{
             .wrap = row.wrap,
             .wrap_continuation = row.wrap_continuation,
-            .semantic_prompt = switch (row.semantic_prompt) {
-                .none => .none,
-                .prompt => .prompt,
-                .prompt_continuation => .prompt_continuation,
-            },
+            .semantic_prompt = row.semantic_prompt,
         };
         try writer.writeByte(@bitCast(row_header));
 
@@ -262,20 +258,24 @@ pub fn decode(
     hyperlink_remap: *const HyperlinkRemap,
 ) DecodeError!void {
     for (0..page.size.rows) |y| {
-        const row_header: RowHeader = @bitCast(try reader.takeByte());
+        const row_raw = try reader.takeByte();
+
+        // Validate the enum field before bitcasting into the packed native
+        // representation. The remaining value is checked through its named
+        // padding field below.
+        const semantic_prompt_raw: u2 = @truncate(row_raw >> 2);
+        _ = std.enums.fromInt(
+            TerminalRow.SemanticPrompt,
+            semantic_prompt_raw,
+        ) orelse return error.InvalidRow;
+
+        const row_header: RowHeader = @bitCast(row_raw);
         if (row_header._padding != 0) return error.InvalidRow;
-        const semantic_prompt: TerminalRow.SemanticPrompt =
-            switch (row_header.semantic_prompt) {
-                .none => .none,
-                .prompt => .prompt,
-                .prompt_continuation => .prompt_continuation,
-                .invalid => return error.InvalidRow,
-            };
 
         const row = page.getRow(y);
         row.wrap = row_header.wrap;
         row.wrap_continuation = row_header.wrap_continuation;
-        row.semantic_prompt = semantic_prompt;
+        row.semantic_prompt = row_header.semantic_prompt;
 
         const cells = page.getCells(row);
         for (cells, 0..) |*cell, x| {
@@ -396,15 +396,8 @@ pub fn decode(
 const RowHeader = packed struct(u8) {
     wrap: bool = false,
     wrap_continuation: bool = false,
-    semantic_prompt: SemanticPrompt = .none,
+    semantic_prompt: TerminalRow.SemanticPrompt = .none,
     _padding: u4 = 0,
-
-    const SemanticPrompt = enum(u2) {
-        none = 0,
-        prompt = 1,
-        prompt_continuation = 2,
-        invalid = 3,
-    };
 };
 
 /// The fixed fields that precede a cell's grapheme suffix codepoints.
@@ -451,14 +444,9 @@ const CellHeader = struct {
         self: CellHeader,
         writer: *std.Io.Writer,
     ) std.Io.Writer.Error!void {
-        const semantic_content: Flags.SemanticContent = switch (self.semantic_content) {
-            .output => .output,
-            .input => .input,
-            .prompt => .prompt,
-        };
         const flags: Flags = .{
             .protected = self.protected,
-            .semantic_content = semantic_content,
+            .semantic_content = self.semantic_content,
         };
 
         //  0       1       2       3       4        6        8        12       16
@@ -488,14 +476,18 @@ const CellHeader = struct {
             try reader.takeByte(),
         ) orelse return error.InvalidCell;
 
-        const flags: Flags = @bitCast(try reader.takeByte());
+        const flags_raw = try reader.takeByte();
+
+        // As with the row header, validate the exhaustive native enum before
+        // bitcasting the complete packed byte.
+        const semantic_content_raw: u2 = @truncate(flags_raw >> 1);
+        _ = std.enums.fromInt(
+            TerminalCell.SemanticContent,
+            semantic_content_raw,
+        ) orelse return error.InvalidCell;
+
+        const flags: Flags = @bitCast(flags_raw);
         if (flags._padding != 0) return error.InvalidCell;
-        const semantic_content: TerminalCell.SemanticContent = switch (flags.semantic_content) {
-            .output => .output,
-            .input => .input,
-            .prompt => .prompt,
-            .invalid => return error.InvalidCell,
-        };
 
         // This byte is reserved so the IDs and content value remain naturally
         // aligned within the fixed cell header.
@@ -505,7 +497,7 @@ const CellHeader = struct {
             .content_kind = content_kind,
             .width = width,
             .protected = flags.protected,
-            .semantic_content = semantic_content,
+            .semantic_content = flags.semantic_content,
             .style_id = try io.readInt(reader, TerminalStyleId),
             .hyperlink_id = try io.readInt(reader, TerminalHyperlinkId),
             .value = @bitCast(try io.readInt(reader, u32)),
@@ -547,14 +539,7 @@ const CellHeader = struct {
 
     const Flags = packed struct(u8) {
         protected: bool = false,
-        semantic_content: SemanticContent = .output,
+        semantic_content: TerminalCell.SemanticContent = .output,
         _padding: u5 = 0,
-
-        const SemanticContent = enum(u2) {
-            output = 0,
-            input = 1,
-            prompt = 2,
-            invalid = 3,
-        };
     };
 };

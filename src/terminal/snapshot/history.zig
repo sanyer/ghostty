@@ -86,7 +86,7 @@ pub const Header = struct {
     }
 
     /// Identifies the previously encoded screen that owns this history.
-    key: screen.Key,
+    key: TerminalScreenKey,
 
     /// Number of complete PAGE records immediately following this record.
     page_count: u32,
@@ -102,7 +102,7 @@ pub const Header = struct {
         self: Header,
         writer: *std.Io.Writer,
     ) std.Io.Writer.Error!void {
-        try io.writeInt(writer, u16, @intFromEnum(self.key));
+        try io.writeInt(writer, u16, @intCast(@intFromEnum(self.key)));
         try io.writeInt(writer, u32, self.page_count);
         try io.writeInt(writer, u64, self.total_rows);
         try io.writeInt(writer, u16, self.screen_overlap_rows);
@@ -112,9 +112,13 @@ pub const Header = struct {
 
     /// Decode and validate the fixed HISTORY payload.
     pub fn decode(reader: *std.Io.Reader) Header.DecodeError!Header {
+        const raw = try io.readInt(reader, u16);
+        const Tag = @typeInfo(TerminalScreenKey).@"enum".tag_type;
+        const value = std.math.cast(Tag, raw) orelse
+            return error.InvalidKey;
         const key = std.enums.fromInt(
-            screen.Key,
-            try io.readInt(reader, u16),
+            TerminalScreenKey,
+            value,
         ) orelse return error.InvalidKey;
         return .{
             .key = key,
@@ -186,10 +190,7 @@ pub fn encode(
     };
 
     const header: Header = .{
-        .key = switch (key) {
-            .primary => .primary,
-            .alternate => .alternate,
-        },
+        .key = key,
         .page_count = std.math.cast(
             u32,
             page_count,
@@ -265,11 +266,7 @@ pub fn decode(
         break :header header;
     };
 
-    const decoded_key: TerminalScreenKey = switch (header.key) {
-        .primary => .primary,
-        .alternate => .alternate,
-    };
-    if (decoded_key != expected_key) return error.UnexpectedScreenKey;
+    if (header.key != expected_key) return error.UnexpectedScreenKey;
 
     // A freshly restored SCREEN may carry overlap inside its first page, but
     // cannot already contain a complete historical page before that boundary.
@@ -437,7 +434,7 @@ test "HISTORY encodes newest first and restores complete history" {
     try std.testing.expectEqual(record.Tag.history, history_record.header.tag);
     const header = try Header.decode(history_record.payloadReader());
     try history_record.finish();
-    try std.testing.expectEqual(screen.Key.primary, header.key);
+    try std.testing.expectEqual(TerminalScreenKey.primary, header.key);
     try std.testing.expectEqual(@as(u32, 2), header.page_count);
     try std.testing.expectEqual(
         @as(u16, active_top.y),
