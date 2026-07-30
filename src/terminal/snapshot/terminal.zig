@@ -6,8 +6,9 @@
 //! `history.zig`.
 //!
 //! Snapshot version 1 supports the primary screen and an optional alternate
-//! screen. `screen_count` is therefore one or two. SCREEN records are ordered by
-//! key: primary first, then alternate when present. `active_screen_key` must
+//! screen. `screen_count` is therefore one or two. SCREEN records identify
+//! their destination by key and may appear in either order. Canonical encoders
+//! write primary first, then alternate when present. `active_screen_key` must
 //! name one of those declared screens.
 //!
 //! All integers are unsigned and little-endian.

@@ -472,24 +472,28 @@ test "HISTORY encodes newest first and restores complete history" {
 
     // Restore SCREEN first, then prepend HISTORY directly into that PageList.
     var restore_source: std.Io.Reader = .fixed(destination.written());
-    var restored = try screen.decode(
+    var decoded_screen = try screen.decode(
         &restore_source,
         std.testing.io,
         std.testing.allocator,
-        .primary,
         .{
             .cols = 80,
             .rows = screen_rows,
             .max_scrollback_bytes = null,
         },
     );
-    defer restored.deinit();
+    defer decoded_screen.deinit();
+    try std.testing.expectEqual(
+        TerminalScreenKey.primary,
+        decoded_screen.key,
+    );
+    const restored = &decoded_screen.screen;
     try std.testing.expect(!restored.semantic_prompt.seen);
     try decode(
         &restore_source,
         std.testing.allocator,
         .primary,
-        &restored,
+        restored,
     );
 
     try std.testing.expectEqual(
@@ -530,18 +534,18 @@ test "HISTORY encodes newest first and restores complete history" {
     var truncated_source: std.Io.Reader = .fixed(
         encoded[0 .. second_page_offset - 1],
     );
-    var truncated = try screen.decode(
+    var decoded_truncated = try screen.decode(
         &truncated_source,
         std.testing.io,
         std.testing.allocator,
-        .primary,
         .{
             .cols = 80,
             .rows = screen_rows,
             .max_scrollback_bytes = null,
         },
     );
-    defer truncated.deinit();
+    defer decoded_truncated.deinit();
+    const truncated = &decoded_truncated.screen;
     const truncated_screen_first = truncated.pages.getTopLeft(.screen).node;
     const truncated_screen_page_count = truncated.pages.totalPages();
     try std.testing.expectError(
@@ -550,7 +554,7 @@ test "HISTORY encodes newest first and restores complete history" {
             &truncated_source,
             std.testing.allocator,
             .primary,
-            &truncated,
+            truncated,
         ),
     );
     try std.testing.expectEqual(
@@ -574,18 +578,18 @@ test "HISTORY encodes newest first and restores complete history" {
     );
 
     var partial_source: std.Io.Reader = .fixed(encoded);
-    var partial = try screen.decode(
+    var decoded_partial = try screen.decode(
         &partial_source,
         std.testing.io,
         std.testing.allocator,
-        .primary,
         .{
             .cols = 80,
             .rows = screen_rows,
             .max_scrollback_bytes = null,
         },
     );
-    defer partial.deinit();
+    defer decoded_partial.deinit();
+    const partial = &decoded_partial.screen;
     const screen_page_count = partial.pages.totalPages();
     try std.testing.expectError(
         error.UnexpectedRecordTag,
@@ -593,7 +597,7 @@ test "HISTORY encodes newest first and restores complete history" {
             &partial_source,
             std.testing.allocator,
             .primary,
-            &partial,
+            partial,
         ),
     );
     try std.testing.expectEqual(

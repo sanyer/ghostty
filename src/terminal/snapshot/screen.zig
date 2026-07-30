@@ -294,9 +294,6 @@ pub const DecodeError = PayloadDecodeError ||
         /// The next record is valid but is not a SCREEN.
         UnexpectedRecordTag,
 
-        /// The SCREEN key does not match the caller-selected native screen.
-        UnexpectedScreenKey,
-
         /// A SCREEN must declare at least one PAGE.
         InvalidPageCount,
 
@@ -304,18 +301,30 @@ pub const DecodeError = PayloadDecodeError ||
         InvalidCursorPosition,
     };
 
+/// One decoded SCREEN sequence and the native screen identified by its header.
+pub const Decoded = struct {
+    key: TerminalScreenKey,
+    screen: TerminalScreen,
+
+    /// Release the decoded native screen before ownership is transferred.
+    pub fn deinit(self: *Decoded) void {
+        self.screen.deinit();
+        self.* = undefined;
+    }
+};
+
 /// Restore one SCREEN and its declared PAGE records into native terminal state.
 ///
 /// The caller supplies terminal-wide dimensions and policy. The record sequence
 /// is decoded transactionally: on failure, all page, pin, hyperlink, and
 /// temporary allocations are released and no partially restored Screen escapes.
+/// The returned key selects the ScreenSet slot that owns the decoded screen.
 pub fn decode(
     source: *std.Io.Reader,
     io_: std.Io,
     alloc: Allocator,
-    expected_key: TerminalScreenKey,
     options: TerminalScreen.Options,
-) DecodeError!TerminalScreen {
+) DecodeError!Decoded {
     // Decode and finish the self-contained SCREEN record before consuming any
     // of the PAGE records which follow it.
     var record_reader: record.Reader = undefined;
@@ -340,11 +349,7 @@ pub fn decode(
     defer if (cursor_hyperlink) |*value| value.deinit(alloc);
     try record_reader.finish();
 
-    // Reject a structurally valid SCREEN which does not describe the native
-    // screen selected by the caller.
-    if (header.key.terminal() != expected_key) {
-        return error.UnexpectedScreenKey;
-    }
+    const key = header.key.terminal();
     if (header.page_count == 0) return error.InvalidPageCount;
 
     // Dimensions are terminal-wide state supplied by the enclosing snapshot.
@@ -367,11 +372,11 @@ pub fn decode(
         var builder = try TerminalPageList.Builder.init(alloc, .{
             .cols = options.cols,
             .rows = options.rows,
-            .max_size = if (expected_key == .alternate)
+            .max_size = if (key == .alternate)
                 0
             else
                 options.max_scrollback_bytes,
-            .max_lines = if (expected_key == .alternate)
+            .max_lines = if (key == .alternate)
                 0
             else
                 options.max_scrollback_lines,
@@ -407,7 +412,7 @@ pub fn decode(
             .io = io_,
             .alloc = alloc,
             .pages = pages,
-            .no_scrollback = expected_key == .alternate or
+            .no_scrollback = key == .alternate or
                 options.max_scrollback_bytes == 0,
             .cursor = .{
                 .x = header.cursor_x,
@@ -504,7 +509,7 @@ pub fn decode(
     // before transferring ownership to the caller.
     result.pages.assertIntegrity();
     result.assertIntegrity();
-    return result;
+    return .{ .key = key, .screen = result };
 }
 
 /// Errors possible while decoding fixed SCREEN payload fields.
@@ -2036,14 +2041,15 @@ test "framed native SCREEN and PAGE sequence" {
     // The complete sequence restores directly into native Screen/PageList
     // state, including page-local cursor references.
     var restore_source: std.Io.Reader = .fixed(destination.written()[6..]);
-    var restored = try decode(
+    var decoded = try decode(
         &restore_source,
         std.testing.io,
         std.testing.allocator,
-        .alternate,
         .{ .cols = 8, .rows = 8, .max_scrollback_bytes = 0 },
     );
-    defer restored.deinit();
+    defer decoded.deinit();
+    try std.testing.expectEqual(TerminalScreenKey.alternate, decoded.key);
+    const restored = &decoded.screen;
 
     try std.testing.expect(restored.no_scrollback);
     try std.testing.expectEqual(@as(u16, 7), restored.cursor.x);
@@ -2197,18 +2203,19 @@ test "SCREEN encodes the minimal complete-page active suffix" {
     // Native restoration keeps the incidental history prefix and positions
     // the active top within the first decoded page.
     var restore_source: std.Io.Reader = .fixed(destination.written());
-    var restored = try decode(
+    var decoded = try decode(
         &restore_source,
         std.testing.io,
         std.testing.allocator,
-        .primary,
         .{
             .cols = 80,
             .rows = screen_rows,
             .max_scrollback_bytes = null,
         },
     );
-    defer restored.deinit();
+    defer decoded.deinit();
+    try std.testing.expectEqual(TerminalScreenKey.primary, decoded.key);
+    const restored = &decoded.screen;
 
     try std.testing.expectEqual(@as(usize, 2), restored.pages.totalPages());
     const restored_top = restored.pages.getTopLeft(.active);
@@ -2245,21 +2252,6 @@ test "SCREEN restoration rejects invalid and incomplete sequences" {
     defer destination.deinit();
     try encode(&screen, .primary, &destination);
 
-    // The caller selects which native screen receives the record.
-    {
-        var source: std.Io.Reader = .fixed(destination.written());
-        try std.testing.expectError(
-            error.UnexpectedScreenKey,
-            decode(
-                &source,
-                std.testing.io,
-                std.testing.allocator,
-                .alternate,
-                .{ .cols = 2, .rows = 2, .max_scrollback_bytes = 0 },
-            ),
-        );
-    }
-
     // Every truncation must fail without leaking a partially restored
     // PageList, cursor pin, or cursor-owned state.
     for (0..destination.written().len) |fixture_len| {
@@ -2270,7 +2262,6 @@ test "SCREEN restoration rejects invalid and incomplete sequences" {
             &source,
             std.testing.io,
             std.testing.allocator,
-            .primary,
             .{ .cols = 2, .rows = 2, .max_scrollback_bytes = 0 },
         ) catch continue;
         restored.deinit();
@@ -2290,7 +2281,6 @@ test "SCREEN restoration rejects invalid and incomplete sequences" {
                 &source,
                 std.testing.io,
                 failing.allocator(),
-                .primary,
                 .{ .cols = 2, .rows = 2, .max_scrollback_bytes = 0 },
             ),
         );
@@ -2319,7 +2309,6 @@ test "SCREEN restoration rejects invalid and incomplete sequences" {
             &empty_source,
             std.testing.io,
             std.testing.allocator,
-            .primary,
             .{ .cols = 2, .rows = 2, .max_scrollback_bytes = 0 },
         ),
     );

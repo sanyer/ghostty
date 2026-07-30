@@ -44,17 +44,14 @@
 //! +------------------+
 //! ```
 //!
-//! Records have a strict order:
+//! Record groups have a strict order:
 //!
 //! ```text
 //! +----------------------------------------+
 //! | TERMINAL                               |
 //! +----------------------------------------+
-//! | SCREEN (primary)                       |
-//! | PAGE * screen.page_count               |
-//! +----------------------------------------+
-//! | SCREEN (alternate, when present)       |
-//! | PAGE * screen.page_count               |
+//! | SCREEN * terminal.screen_count         |
+//! | PAGE * each screen.page_count          |
 //! +----------------------------------------+
 //! | READY                                  |
 //! +----------------------------------------+
@@ -68,11 +65,13 @@
 //! +----------------------------------------+
 //! ```
 //!
-//! The SCREEN sequences contain the complete pages needed to restore each
-//! active area. A HISTORY sequence contains the older complete pages for its
-//! screen in newest-to-oldest order so they can be prepended as they arrive.
-//! Every SCREEN has one corresponding HISTORY, even when its history page count
-//! is zero. FINISH is followed by end-of-file.
+//! The SCREEN sequences may appear in any key order. Each key must be unique
+//! and must identify one of the screens declared by TERMINAL. They contain the
+//! complete pages needed to restore each active area. A HISTORY sequence
+//! contains the older complete pages for its screen in newest-to-oldest order
+//! so they can be prepended as they arrive. Every SCREEN has one corresponding
+//! HISTORY, even when its history page count is zero. FINISH is followed by
+//! end-of-file.
 //!
 //! READY and FINISH contain BLAKE3-256 digests of all preceding snapshot bytes.
 //! READY therefore validates the renderable active-state prefix. FINISH covers
@@ -81,16 +80,15 @@
 //!
 //! ## Encoding
 //!
-//! Encode the envelope once, then append records in the required order:
+//! Encode a complete snapshot into an empty allocating writer:
 //!
 //! ```zig
 //! var output: std.Io.Writer.Allocating = .init(alloc);
 //! defer output.deinit();
 //!
-//! try envelope.encode(&output.writer);
-//! try screen.encode(&terminal_screen, .primary, &output);
+//! try snapshot.encode(&terminal, &output);
 //!
-//! const snapshot = output.written();
+//! const bytes = output.written();
 //! ```
 //!
 //! We have to use an allocating writer because record formats require
@@ -108,6 +106,7 @@ pub const hyperlink = @import("hyperlink.zig");
 pub const page = @import("page.zig");
 pub const record = @import("record.zig");
 pub const screen = @import("screen.zig");
+pub const snapshot = @import("snapshot.zig");
 pub const style = @import("style.zig");
 pub const terminal = @import("terminal.zig");
 
