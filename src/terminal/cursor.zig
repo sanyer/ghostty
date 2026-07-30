@@ -1,4 +1,4 @@
-const lib = @import("lib.zig");
+const lib = @import("../lib/main.zig");
 
 /// The visual style of the cursor. Whether or not it blinks
 /// is determined by mode 12 (modes.zig). This mode is synchronized
@@ -6,7 +6,7 @@ const lib = @import("lib.zig");
 ///
 /// Bar, block, and underline correspond to DECSCUSR 5/6, 1/2, and 3/4.
 /// Hollow block is Ghostty-specific and is reported as DECSCUSR 1 or 2.
-pub const Style = lib.Enum(lib.target, &.{
+pub const Style = lib.Enum(.zig, &.{
     // DECSCUSR 5, 6
     "bar",
 
