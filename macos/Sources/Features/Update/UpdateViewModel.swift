@@ -185,7 +185,7 @@ enum UpdateState: Equatable {
     case extracting(Extracting)
     case installing(Installing)
 
-    var isIdle: Bool {
+    var isHidden: Bool {
         if case .idle = self { return true }
         return false
     }
