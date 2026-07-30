@@ -373,6 +373,10 @@ fn decodePayloadBody(
             error.EndOfStream => return error.EndOfStream,
             error.ReadFailed => return error.ReadFailed,
         };
+
+        // Zero records an ignored table entry. Keeping that mapping preserves
+        // encoded-ID uniqueness while grid decoding treats every reference to
+        // the invalid hyperlink as no hyperlink.
         hyperlink_remap.putAssumeCapacityNoClobber(
             native_id,
             decoded_id,
@@ -1104,21 +1108,21 @@ test "decode accepts unordered sparse hyperlink IDs" {
         .style_capacity = 0,
         .hyperlink_capacity_bytes = 512,
         .grapheme_capacity_bytes = 0,
-        .string_capacity_bytes = 0,
+        .string_capacity_bytes = 6,
     };
 
     const first: TerminalHyperlink = .{
         .id = .{ .implicit = 1 },
-        .uri = "",
+        .uri = "one",
     };
     const second: TerminalHyperlink = .{
         .id = .{ .implicit = 2 },
-        .uri = "",
+        .uri = "two",
     };
 
     var encoded: [
         Header.len +
-            2 * 11 +
+            2 * 14 +
             1 +
             16
     ]u8 = undefined;
@@ -1406,7 +1410,7 @@ test "decode rejects duplicate and default style entries" {
     );
 }
 
-test "decode rejects duplicate hyperlinks with empty strings" {
+test "decode rejects duplicate hyperlinks" {
     const header: Header = .{
         .columns = 1,
         .rows = 1,
@@ -1415,24 +1419,94 @@ test "decode rejects duplicate hyperlinks with empty strings" {
         .style_capacity = 0,
         .hyperlink_capacity_bytes = 512,
         .grapheme_capacity_bytes = 0,
-        .string_capacity_bytes = 0,
+        .string_capacity_bytes = 16,
     };
     const duplicate: TerminalHyperlink = .{
-        .id = .{ .explicit = "" },
-        .uri = "",
+        .id = .{ .explicit = "id" },
+        .uri = "uri",
     };
 
-    var encoded: [Header.len + 22]u8 = undefined;
-    var writer: std.Io.Writer = .fixed(&encoded);
-    try header.encode(&writer);
-    try io.writeInt(&writer, TerminalHyperlinkId, 1);
-    try hyperlink.encode(duplicate, &writer);
-    try io.writeInt(&writer, TerminalHyperlinkId, 3);
-    try hyperlink.encode(duplicate, &writer);
+    var encoded: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer encoded.deinit();
+    try header.encode(&encoded.writer);
+    try io.writeInt(&encoded.writer, TerminalHyperlinkId, 1);
+    try hyperlink.encode(duplicate, &encoded.writer);
+    try io.writeInt(&encoded.writer, TerminalHyperlinkId, 3);
+    try hyperlink.encode(duplicate, &encoded.writer);
 
-    var reader: std.Io.Reader = .fixed(writer.buffered());
+    var reader: std.Io.Reader = .fixed(encoded.written());
     try std.testing.expectError(
         error.DuplicateHyperlink,
         decodePayload(&reader, std.testing.allocator),
     );
+}
+
+test "decode ignores empty hyperlink strings" {
+    const header: Header = .{
+        .columns = 1,
+        .rows = 1,
+        .style_count = 0,
+        .hyperlink_count = 1,
+        .style_capacity = 0,
+        .hyperlink_capacity_bytes = 512,
+        .grapheme_capacity_bytes = 0,
+        .string_capacity_bytes = 16,
+    };
+    const cases = [_]struct {
+        value: TerminalHyperlink,
+    }{
+        .{
+            .value = .{
+                .id = .{ .implicit = 1 },
+                .uri = "",
+            },
+        },
+        .{
+            .value = .{
+                .id = .{ .explicit = "" },
+                .uri = "uri",
+            },
+        },
+        .{
+            .value = .{
+                .id = .{ .explicit = "id" },
+                .uri = "",
+            },
+        },
+    };
+
+    for (cases) |case| {
+        var encoded: std.Io.Writer.Allocating = .init(
+            std.testing.allocator,
+        );
+        defer encoded.deinit();
+        try header.encode(&encoded.writer);
+        try io.writeInt(&encoded.writer, TerminalHyperlinkId, 1);
+        try hyperlink.encode(case.value, &encoded.writer);
+
+        // The cell refers to the ignored table entry. Its absent native
+        // remapping must degrade to no hyperlink while preserving the cell.
+        try encoded.writer.writeByte(0);
+        try encoded.writer.writeAll(&.{ 0, 0, 0, 0 });
+        try io.writeInt(&encoded.writer, TerminalStyleId, 0);
+        try io.writeInt(&encoded.writer, TerminalHyperlinkId, 1);
+        try io.writeInt(&encoded.writer, u32, 'A');
+        try io.writeInt(&encoded.writer, u32, 0);
+
+        var reader: std.Io.Reader = .fixed(encoded.written());
+        var decoded = try decodePayload(
+            &reader,
+            std.testing.allocator,
+        );
+        defer decoded.deinit();
+
+        try std.testing.expectEqual(
+            @as(usize, 0),
+            decoded.hyperlink_set.count(),
+        );
+        const cell = decoded.getRowAndCell(0, 0).cell;
+        try std.testing.expectEqual(@as(u21, 'A'), cell.codepoint());
+        try std.testing.expect(!cell.hyperlink);
+        try std.testing.expectEqual(null, decoded.lookupHyperlink(cell));
+    }
 }

@@ -2148,6 +2148,34 @@ test "cursor hyperlink rejects invalid kind and every truncation" {
         ),
     );
 
+    const empty_cases = [_]struct {
+        fixture: []const u8,
+        expected: anyerror,
+    }{
+        .{
+            .fixture = "\x01\x04\x03\x02\x01\x00\x00\x00\x00",
+            .expected = error.InvalidUri,
+        },
+        .{
+            .fixture = "\x02\x00\x00\x00\x00",
+            .expected = error.InvalidExplicitId,
+        },
+        .{
+            .fixture = "\x02\x02\x00\x00\x00id\x00\x00\x00\x00",
+            .expected = error.InvalidUri,
+        },
+    };
+    for (empty_cases) |case| {
+        var reader: std.Io.Reader = .fixed(case.fixture);
+        try std.testing.expectError(
+            case.expected,
+            decodeCursorHyperlink(
+                &reader,
+                std.testing.allocator,
+            ),
+        );
+    }
+
     const fixtures = .{
         "\x01\x04\x03\x02\x01\x03\x00\x00\x00uri",
         "\x02\x02\x00\x00\x00id\x03\x00\x00\x00uri",
@@ -2164,4 +2192,118 @@ test "cursor hyperlink rejects invalid kind and every truncation" {
             );
         }
     }
+}
+
+test "SCREEN decode rejects an empty cursor hyperlink URI" {
+    var destination: std.Io.Writer.Allocating = .init(
+        std.testing.allocator,
+    );
+    defer destination.deinit();
+
+    var header = testHeader();
+    header.key = .primary;
+    header.page_count = 1;
+    header.cursor_x = 0;
+    header.cursor_y = 0;
+    header.cursor_flags.pending_wrap = false;
+    header.saved_cursor_present = false;
+
+    var record_writer = try record.Writer.init(&destination, .screen);
+    try header.encode(record_writer.payloadWriter());
+    try hyperlink.encode(.{
+        .id = .{ .implicit = 1 },
+        .uri = "",
+    }, record_writer.payloadWriter());
+    try record_writer.finish();
+
+    var source: std.Io.Reader = .fixed(destination.written());
+    try std.testing.expectError(
+        error.InvalidUri,
+        decode(
+            &source,
+            std.testing.io,
+            std.testing.allocator,
+            .{ .cols = 1, .rows = 1 },
+        ),
+    );
+}
+
+test "SCREEN decode ignores a PAGE with an empty hyperlink URI" {
+    var destination: std.Io.Writer.Allocating = .init(
+        std.testing.allocator,
+    );
+    defer destination.deinit();
+
+    var header = testHeader();
+    header.key = .primary;
+    header.page_count = 1;
+    header.cursor_x = 0;
+    header.cursor_y = 0;
+    header.cursor_flags.pending_wrap = false;
+    header.saved_cursor_present = false;
+
+    var screen_writer = try record.Writer.init(&destination, .screen);
+    try header.encode(screen_writer.payloadWriter());
+    try screen_writer.payloadWriter().writeByte(0);
+    try screen_writer.finish();
+
+    const page_header: page.Header = .{
+        .columns = 1,
+        .rows = 1,
+        .style_count = 0,
+        .hyperlink_count = 1,
+        .style_capacity = 16,
+        .hyperlink_capacity_bytes = 512,
+        .grapheme_capacity_bytes = 0,
+        .string_capacity_bytes = 0,
+    };
+    var page_writer = try record.Writer.init(&destination, .page);
+    try page_header.encode(page_writer.payloadWriter());
+    try io.writeInt(
+        page_writer.payloadWriter(),
+        terminal_hyperlink.Id,
+        1,
+    );
+    try hyperlink.encode(.{
+        .id = .{ .implicit = 1 },
+        .uri = "",
+    }, page_writer.payloadWriter());
+
+    // One narrow codepoint cell refers to the hyperlink table entry above.
+    // Since that entry is ignored, the cell must restore without a hyperlink.
+    try page_writer.payloadWriter().writeByte(0);
+    try page_writer.payloadWriter().writeAll(&.{ 0, 0, 0, 0 });
+    try io.writeInt(
+        page_writer.payloadWriter(),
+        terminal_style.Id,
+        0,
+    );
+    try io.writeInt(
+        page_writer.payloadWriter(),
+        terminal_hyperlink.Id,
+        1,
+    );
+    try io.writeInt(page_writer.payloadWriter(), u32, 'A');
+    try io.writeInt(page_writer.payloadWriter(), u32, 0);
+    try page_writer.finish();
+
+    var source: std.Io.Reader = .fixed(destination.written());
+    var decoded = try decode(
+        &source,
+        std.testing.io,
+        std.testing.allocator,
+        .{ .cols = 1, .rows = 1 },
+    );
+    defer decoded.deinit();
+
+    try std.testing.expectEqual(
+        @as(u21, 'A'),
+        decoded.screen.cursor.page_cell.codepoint(),
+    );
+    try std.testing.expect(!decoded.screen.cursor.page_cell.hyperlink);
+
+    // Resizing copies the restored cells into a wider page. The ignored
+    // hyperlink must not leave a zero-length PageEntry to duplicate later.
+    try decoded.screen.resize(.{ .cols = 2, .rows = 1 });
+    try std.testing.expect(!decoded.screen.cursor.page_cell.hyperlink);
 }

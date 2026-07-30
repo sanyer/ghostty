@@ -7,8 +7,11 @@
 //! Indexing and ordering are properties of the containing record rather than
 //! this codec.
 //!
-//! IDs and URIs are arbitrary byte strings. Their lengths are retained on the
-//! wire; they are not NUL-terminated and need not contain UTF-8.
+//! URIs and explicit IDs are non-empty arbitrary byte strings. Their lengths
+//! are retained on the wire; they are not NUL-terminated and need not contain
+//! UTF-8. Native page storage requires every allocated hyperlink string to
+//! contain at least one byte, so standalone decoding rejects zero lengths and
+//! PAGE decoding consumes but ignores the invalid table entry.
 //!
 //! All integers are unsigned and little-endian.
 //!
@@ -56,6 +59,12 @@ pub const EncodeError = std.Io.Writer.Error;
 pub const DecodeError = std.Io.Reader.Error || Allocator.Error || error{
     /// The hyperlink kind is not defined by snapshot version 1.
     InvalidKind,
+
+    /// A native hyperlink URI must contain at least one byte.
+    InvalidUri,
+
+    /// A native explicit hyperlink ID must contain at least one byte.
+    InvalidExplicitId,
 };
 
 /// Errors possible while decoding directly into a native page.
@@ -106,6 +115,8 @@ pub fn decode(
         .implicit => implicit: {
             const id = try io.readInt(reader, u32);
             const uri_len: usize = @intCast(try io.readInt(reader, u32));
+            if (uri_len == 0) return error.InvalidUri;
+
             const uri = try alloc.alloc(u8, uri_len);
             errdefer alloc.free(uri);
             try reader.readSliceAll(uri);
@@ -118,11 +129,15 @@ pub fn decode(
 
         .explicit => explicit: {
             const id_len: usize = @intCast(try io.readInt(reader, u32));
+            if (id_len == 0) return error.InvalidExplicitId;
+
             const id = try alloc.alloc(u8, id_len);
             errdefer alloc.free(id);
             try reader.readSliceAll(id);
 
             const uri_len: usize = @intCast(try io.readInt(reader, u32));
+            if (uri_len == 0) return error.InvalidUri;
+
             const uri = try alloc.alloc(u8, uri_len);
             errdefer alloc.free(uri);
             try reader.readSliceAll(uri);
@@ -139,7 +154,9 @@ pub fn decode(
 ///
 /// Explicit ID and URI bytes are read into the page string allocator and the
 /// completed entry is inserted into the page hyperlink set. The returned ID is
-/// the native ID assigned by the destination page.
+/// the native ID assigned by the destination page. Zero is returned when the
+/// encoded URI or explicit ID is empty because native page storage cannot
+/// represent empty hyperlink strings.
 pub fn decodePage(
     page: *terminal_page.Page,
     reader: *std.Io.Reader,
@@ -152,6 +169,8 @@ pub fn decodePage(
         .implicit => implicit: {
             const id = try io.readInt(reader, u32);
             const uri_len: usize = @intCast(try io.readInt(reader, u32));
+            if (uri_len == 0) return 0;
+
             const uri = try decodePageString(
                 page,
                 reader,
@@ -166,17 +185,33 @@ pub fn decodePage(
 
         .explicit => explicit: {
             const id_len: usize = @intCast(try io.readInt(reader, u32));
+            if (id_len == 0) {
+                const uri_len: usize = @intCast(
+                    try io.readInt(reader, u32),
+                );
+                try reader.discardAll(uri_len);
+                return 0;
+            }
+
             const id = try decodePageString(
                 page,
                 reader,
                 id_len,
             );
-            errdefer if (id.len > 0) page.string_alloc.free(
+            errdefer page.string_alloc.free(
                 page.memory,
                 id.slice(page.memory),
             );
 
             const uri_len: usize = @intCast(try io.readInt(reader, u32));
+            if (uri_len == 0) {
+                page.string_alloc.free(
+                    page.memory,
+                    id.slice(page.memory),
+                );
+                return 0;
+            }
+
             const uri = try decodePageString(
                 page,
                 reader,
@@ -214,7 +249,7 @@ fn decodePageString(
     reader: *std.Io.Reader,
     len: usize,
 ) (std.Io.Reader.Error || error{StringsOutOfMemory})!terminal_size.Offset(u8).Slice {
-    if (len == 0) return .{};
+    std.debug.assert(len > 0);
 
     // Allocate space for the string and read directly into it.
     const value = page.string_alloc.alloc(
@@ -267,37 +302,57 @@ test "golden explicit encoding" {
     );
 }
 
-test "empty strings round trip" {
-    const values: [2]terminal_hyperlink.Hyperlink = .{
+test "decode rejects empty strings" {
+    const cases = [_]struct {
+        fixture: []const u8,
+        expected: anyerror,
+    }{
         .{
-            .id = .{ .implicit = 0 },
-            .uri = "",
+            .fixture = "\x01\x04\x03\x02\x01\x00\x00\x00\x00",
+            .expected = error.InvalidUri,
         },
         .{
-            .id = .{ .explicit = "" },
-            .uri = "",
+            .fixture = "\x02\x00\x00\x00\x00",
+            .expected = error.InvalidExplicitId,
+        },
+        .{
+            .fixture = "\x02\x02\x00\x00\x00id\x00\x00\x00\x00",
+            .expected = error.InvalidUri,
         },
     };
 
-    for (values) |value| {
-        var encoded: [9]u8 = undefined;
-        var writer: std.Io.Writer = .fixed(&encoded);
-        try encode(value, &writer);
+    for (cases) |case| {
+        var reader: std.Io.Reader = .fixed(case.fixture);
+        try std.testing.expectError(
+            case.expected,
+            decode(&reader, std.testing.allocator),
+        );
+    }
+}
 
-        var reader: std.Io.Reader = .fixed(writer.buffered());
-        const decoded = try decode(&reader, std.testing.allocator);
-        defer decoded.deinit(std.testing.allocator);
-        try std.testing.expectEqualStrings("", decoded.uri);
-        switch (value.id) {
-            .implicit => |id| try std.testing.expectEqual(
-                id,
-                decoded.id.implicit,
-            ),
-            .explicit => |id| try std.testing.expectEqualStrings(
-                id,
-                decoded.id.explicit,
-            ),
-        }
+test "decodePage ignores empty strings" {
+    const fixtures = [_][]const u8{
+        "\x01\x04\x03\x02\x01\x00\x00\x00\x00",
+        "\x02\x00\x00\x00\x00\x03\x00\x00\x00uri",
+        "\x02\x02\x00\x00\x00id\x00\x00\x00\x00",
+    };
+
+    for (fixtures) |fixture| {
+        var page = try terminal_page.Page.init(.{
+            .cols = 1,
+            .rows = 1,
+            .hyperlink_bytes = 512,
+            .string_bytes = 16,
+        });
+        defer page.deinit();
+
+        var reader: std.Io.Reader = .fixed(fixture);
+        try std.testing.expectEqual(
+            @as(terminal_hyperlink.Id, 0),
+            try decodePage(&page, &reader),
+        );
+        try std.testing.expectEqual(@as(usize, 0), page.hyperlink_set.count());
+        try std.testing.expectError(error.EndOfStream, reader.takeByte());
     }
 }
 
