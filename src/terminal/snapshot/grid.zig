@@ -38,7 +38,7 @@
 //! |     1 | Prompt              |
 //! |     2 | Prompt continuation |
 //!
-//! Value 3 is invalid in snapshot version 1.
+//! Value 3 is not emitted in snapshot version 1. Decoders treat it as none.
 //!
 //! Native row cache flags are not encoded. In particular, the Kitty virtual
 //! placeholder hint is derived while decoding cells containing U+10EEEE.
@@ -97,7 +97,7 @@
 //! |     1 | Input   |
 //! |     2 | Prompt  |
 //!
-//! Value 3 is invalid in snapshot version 1.
+//! Value 3 is not emitted in snapshot version 1. Decoders treat it as output.
 //!
 //! Style and hyperlink ID zero mean no style and no hyperlink. Other IDs
 //! refer to entries in the containing record's separate style and hyperlink
@@ -135,18 +135,21 @@ pub const StyleRemap = std.AutoHashMap(TerminalStyleId, TerminalStyleId);
 /// Hyperlink ID zero is implicit and does not need an entry.
 pub const HyperlinkRemap = std.AutoHashMap(TerminalHyperlinkId, TerminalHyperlinkId);
 
-pub const EncodeError = std.Io.Writer.Error;
+pub const EncodeError = std.Io.Writer.Error || error{
+    /// Wide and spacer cells do not form a valid row.
+    InvalidWideCell,
+};
 
 /// Encode every row and cell directly from a page.
+///
+/// If an error is returned, partial data may have been written. If you
+/// want transactional writing, the caller is responsible for using something
+/// like a seekable stream and rolling back.
 pub fn encode(
     page: *const TerminalPage,
     writer: *std.Io.Writer,
 ) EncodeError!void {
-    // Encoding assumes a structurally valid page. This assertion performs the
-    // comprehensive check in slow-safety builds without adding an allocator to
-    // the encoder API.
-    page.assertIntegrity();
-
+    defer page.assertIntegrity();
     for (0..page.size.rows) |y| {
         // Row header
         const row = page.getRow(y);
@@ -159,7 +162,26 @@ pub fn encode(
 
         // Cells
         const cells = page.getCells(row);
-        for (cells) |*cell| {
+        for (cells, 0..) |*cell, x| {
+            // Validate the wide state of this cell, we don't want
+            // to encode corrupt data.
+            switch (cell.wide) {
+                .narrow => {},
+                .wide => if (x + 1 == cells.len or
+                    cells[x + 1].wide != .spacer_tail)
+                {
+                    return error.InvalidWideCell;
+                },
+                .spacer_tail => if (x == 0 or
+                    cells[x - 1].wide != .wide)
+                {
+                    return error.InvalidWideCell;
+                },
+                .spacer_head => if (x + 1 != cells.len or !row.wrap) {
+                    return error.InvalidWideCell;
+                },
+            }
+
             const graphemes: []const u21 = if (cell.hasGrapheme())
                 page.lookupGrapheme(cell) orelse unreachable
             else
@@ -212,39 +234,13 @@ pub fn encode(
     }
 }
 
-pub const DecodeError = CellHeader.DecodeError || error{
-    /// A row contains undefined flag values.
-    InvalidRow,
-
-    /// A cell contains an undefined kind, width, flag, or reserved value.
-    InvalidCell,
-
-    /// A grapheme suffix is invalid or attached to non-codepoint content.
-    InvalidGrapheme,
-
-    /// The advertised grapheme capacity cannot hold the encoded suffixes.
-    InvalidGraphemeCapacity,
-
-    /// A codepoint is not a Unicode scalar value.
-    InvalidCodepoint,
-
-    /// A packed background color has nonzero reserved bytes.
-    InvalidColor,
-
-    /// Wide and spacer cells do not form a valid row.
-    InvalidWideCell,
-
-    /// The hyperlink map cannot hold the encoded cell references.
-    InvalidHyperlinkCapacity,
-};
-
 /// Decode every row and cell directly into an initialized, empty page.
 ///
 /// The grid does not encode dimensions, so `page` must already have the exact
 /// row and column count expected by the containing record. This function reads
-/// exactly `page.size.rows` rows with `page.size.cols` cells each. The page
-/// must also have enough grapheme and hyperlink-map capacity for the decoded
-/// contents.
+/// exactly `page.size.rows` rows with `page.size.cols` cells each. Capacity
+/// hints are advisory. Graphemes and cell hyperlink references that do not fit
+/// are discarded without affecting the rest of the grid.
 ///
 /// Style and hyperlink table entries must be inserted into `page` before
 /// calling this function. As each table entry is inserted, the caller records
@@ -252,143 +248,170 @@ pub const DecodeError = CellHeader.DecodeError || error{
 /// ID zero always means the default style or no hyperlink. A nonzero ID missing
 /// from its remap is also treated as zero so unknown table references do not
 /// prevent the rest of the grid from decoding.
+///
+/// Invalid semantic data is normalized into a degraded form while preserving
+/// the declared byte boundaries. Unknown semantic values use their neutral
+/// variants, invalid Unicode becomes U+FFFD, invalid optional data is ignored,
+/// and malformed wide-cell relationships become narrow cells.
 pub fn decode(
     page: *TerminalPage,
     reader: *std.Io.Reader,
     style_remap: *const StyleRemap,
     hyperlink_remap: *const HyperlinkRemap,
-) DecodeError!void {
+) std.Io.Reader.Error!void {
     for (0..page.size.rows) |y| {
         const row_raw = try reader.takeByte();
-
-        // Validate the enum field before bitcasting into the packed native
-        // representation. The remaining value is checked through its named
-        // padding field below.
-        const semantic_prompt_raw: u2 = @truncate(row_raw >> 2);
-        _ = std.enums.fromInt(
-            TerminalRow.SemanticPrompt,
-            semantic_prompt_raw,
-        ) orelse return error.InvalidRow;
-
         const row_header: RowHeader = @bitCast(row_raw);
-        if (row_header._padding != 0) return error.InvalidRow;
+        const semantic_prompt_raw: u2 = @truncate(row_raw >> @bitOffsetOf(RowHeader, "semantic_prompt"));
 
+        // Reserved bits do not change the known fields. The semantic enum is
+        // the only non-exhaustive field, so give its unknown value a default.
         const row = page.getRow(y);
         row.wrap = row_header.wrap;
         row.wrap_continuation = row_header.wrap_continuation;
-        row.semantic_prompt = row_header.semantic_prompt;
+        row.semantic_prompt = std.enums.fromInt(
+            TerminalRow.SemanticPrompt,
+            semantic_prompt_raw,
+        ) orelse .none;
 
         const cells = page.getCells(row);
         for (cells, 0..) |*cell, x| {
-            const header = try CellHeader.decode(reader);
-
-            // IDs belong to the encoded page. Translate them to IDs assigned
-            // by the destination page before storing them on cells.
-            const encoded_style_id = header.style_id;
-            const style_id = if (encoded_style_id == 0)
-                0
-            else
-                style_remap.get(encoded_style_id) orelse 0;
-
-            const encoded_hyperlink_id = header.hyperlink_id;
-            const hyperlink_id = if (encoded_hyperlink_id == 0)
-                0
-            else
-                hyperlink_remap.get(encoded_hyperlink_id) orelse 0;
+            const decoded_header = try CellHeader.decode(reader);
 
             cell.* = .init(0);
-            switch (header.content_kind) {
-                .codepoint => {
-                    const cp = std.math.cast(u21, header.value.codepoint) orelse
-                        return error.InvalidCodepoint;
-                    if (cp > 0x10FFFF or
-                        (cp >= 0xD800 and cp <= 0xDFFF))
-                    {
-                        return error.InvalidCodepoint;
-                    }
-                    if (header.grapheme_count > 0 and cp == 0) {
-                        return error.InvalidGrapheme;
-                    }
-                    cell.content = .{ .codepoint = .{ .data = cp } };
+            var accept_graphemes = false;
+            const grapheme_count: u32 = switch (decoded_header) {
+                // The fixed header was fully consumed, but its content kind
+                // cannot be interpreted. Keep the cell empty and consume only
+                // the suffix bytes needed to reach the next cell.
+                .invalid => |count| count,
 
-                    // Kitty image and placement state is not part of this
-                    // snapshot version, but the placeholder is still a valid
-                    // Unicode scalar. Preserve it and derive the native row
-                    // hint so later row operations remain correct.
-                    if (cp == kitty.graphics.unicode.placeholder) {
-                        row.kitty_virtual_placeholder = true;
+                .valid => |header| valid: {
+                    // IDs belong to the encoded page. Translate them to IDs
+                    // assigned by the destination page before storing them on
+                    // cells.
+                    const encoded_style_id = header.style_id;
+                    const style_id = if (encoded_style_id == 0)
+                        0
+                    else
+                        style_remap.get(encoded_style_id) orelse 0;
+
+                    const encoded_hyperlink_id = header.hyperlink_id;
+                    const hyperlink_id = if (encoded_hyperlink_id == 0)
+                        0
+                    else
+                        hyperlink_remap.get(encoded_hyperlink_id) orelse 0;
+
+                    switch (header.content_kind) {
+                        .codepoint => {
+                            var cp = std.math.cast(
+                                u21,
+                                header.value.codepoint,
+                            ) orelse 0xFFFD;
+                            if (cp > 0x10FFFF or
+                                (cp >= 0xD800 and cp <= 0xDFFF))
+                            {
+                                cp = 0xFFFD;
+                            }
+                            cell.content = .{ .codepoint = .{ .data = cp } };
+                            accept_graphemes = cp != 0;
+
+                            // Kitty image and placement state is not part of this
+                            // snapshot version, but the placeholder is still a
+                            // valid Unicode scalar. Preserve it and derive the
+                            // native row hint so later row operations remain
+                            // correct.
+                            if (cp == kitty.graphics.unicode.placeholder) {
+                                row.kitty_virtual_placeholder = true;
+                            }
+                        },
+                        .bg_color_palette => {
+                            const palette = header.value.bg_color_palette;
+                            cell.content_tag = .bg_color_palette;
+                            cell.content = .{
+                                .color_palette = .{ .data = palette.index },
+                            };
+                        },
+                        .bg_color_rgb => {
+                            const rgb = header.value.bg_color_rgb;
+                            cell.content_tag = .bg_color_rgb;
+                            cell.content = .{ .color_rgb = .{
+                                .r = rgb.r,
+                                .g = rgb.g,
+                                .b = rgb.b,
+                            } };
+                        },
                     }
+
+                    cell.wide = header.width;
+                    cell.protected = header.protected;
+                    cell.semantic_content = header.semantic_content;
+
+                    if (style_id != 0) {
+                        // The table owns one reference and each decoded cell owns
+                        // one additional reference.
+                        page.styles.use(page.memory, style_id);
+                        cell.style_id = style_id;
+                        row.styled = true;
+                    }
+
+                    if (hyperlink_id != 0) {
+                        // setHyperlink records the cell mapping but intentionally
+                        // does not increment the set's reference count. If its map
+                        // is full, undo our reference and leave this cell unlinked.
+                        page.hyperlink_set.use(page.memory, hyperlink_id);
+                        page.setHyperlink(row, cell, hyperlink_id) catch {
+                            page.hyperlink_set.release(page.memory, hyperlink_id);
+                        };
+                    }
+
+                    break :valid header.grapheme_count;
                 },
-                .bg_color_palette => {
-                    const palette = header.value.bg_color_palette;
-                    if (palette._padding != 0) return error.InvalidColor;
-                    if (header.grapheme_count != 0) {
-                        return error.InvalidGrapheme;
-                    }
-                    cell.content_tag = .bg_color_palette;
-                    cell.content = .{
-                        .color_palette = .{ .data = palette.index },
-                    };
-                },
-                .bg_color_rgb => {
-                    const rgb = header.value.bg_color_rgb;
-                    if (rgb._padding != 0) return error.InvalidColor;
-                    if (header.grapheme_count != 0) {
-                        return error.InvalidGrapheme;
-                    }
-                    cell.content_tag = .bg_color_rgb;
-                    cell.content = .{ .color_rgb = .{
-                        .r = rgb.r,
-                        .g = rgb.g,
-                        .b = rgb.b,
-                    } };
-                },
-            }
+            };
 
-            cell.wide = header.width;
-            cell.protected = header.protected;
-            cell.semantic_content = header.semantic_content;
-
-            if (style_id != 0) {
-                // The table owns one reference and each decoded cell owns one
-                // additional reference.
-                page.styles.use(page.memory, style_id);
-                cell.style_id = style_id;
-                row.styled = true;
-            }
-
-            if (hyperlink_id != 0) {
-                // setHyperlink records the cell mapping but intentionally does
-                // not increment the set's reference count.
-                page.hyperlink_set.use(page.memory, hyperlink_id);
-                page.setHyperlink(row, cell, hyperlink_id) catch
-                    return error.InvalidHyperlinkCapacity;
-            }
-
-            // Append directly into page-owned grapheme storage so no
-            // intermediate suffix buffer is needed.
-            for (0..header.grapheme_count) |_| {
+            // Always consume every declared suffix. Invalid scalars, suffixes
+            // on non-text cells, and suffixes that exceed the native capacity
+            // are optional detail and can be dropped independently.
+            for (0..grapheme_count) |_| {
                 const suffix_raw = try io.readInt(reader, u32);
-                const suffix = std.math.cast(u21, suffix_raw) orelse
-                    return error.InvalidCodepoint;
+                if (!accept_graphemes) continue;
+
+                const suffix = std.math.cast(u21, suffix_raw) orelse continue;
                 if (suffix > 0x10FFFF or
                     (suffix >= 0xD800 and suffix <= 0xDFFF))
                 {
-                    return error.InvalidCodepoint;
+                    continue;
                 }
-                page.appendGrapheme(row, cell, suffix) catch
-                    return error.InvalidGraphemeCapacity;
+                page.appendGrapheme(row, cell, suffix) catch {
+                    accept_graphemes = false;
+                };
             }
 
-            switch (header.width) {
-                .narrow, .wide => {},
+            // A following cell resolves whether the previous wide marker owns
+            // a tail. Normalize the current marker immediately when possible,
+            // including a wide marker at the row end.
+            if (x > 0 and
+                cells[x - 1].wide == .wide and
+                cell.wide != .spacer_tail)
+            {
+                cells[x - 1].wide = .narrow;
+            }
+            switch (cell.wide) {
+                .narrow => {},
+
+                // A non-final wide marker remains pending until the next cell.
+                .wide => if (x + 1 == cells.len) {
+                    cell.wide = .narrow;
+                },
+
                 .spacer_tail => if (x == 0 or
                     cells[x - 1].wide != .wide)
                 {
-                    return error.InvalidWideCell;
+                    cell.wide = .narrow;
                 },
+
                 .spacer_head => if (x + 1 != cells.len or !row.wrap) {
-                    return error.InvalidWideCell;
+                    cell.wide = .narrow;
                 },
             }
         }
@@ -439,9 +462,6 @@ const CellHeader = struct {
     /// Number of grapheme suffix codepoints immediately following the header.
     grapheme_count: u32 = 0,
 
-    /// Errors possible while decoding a fixed cell header.
-    pub const DecodeError = std.Io.Reader.Error || error{InvalidCell};
-
     /// Encode the fixed cell header.
     pub fn encode(
         self: CellHeader,
@@ -467,45 +487,63 @@ const CellHeader = struct {
         try io.writeInt(writer, u32, self.grapheme_count);
     }
 
-    /// Decode and validate the fixed cell header.
-    pub fn decode(reader: *std.Io.Reader) CellHeader.DecodeError!CellHeader {
-        const content_kind = std.enums.fromInt(
-            Kind,
-            try reader.takeByte(),
-        ) orelse return error.InvalidCell;
+    /// A valid header, or the suffix count from an uninterpretable header.
+    const DecodeResult = union(enum) {
+        valid: CellHeader,
+        invalid: u32,
+    };
 
-        const width = std.enums.fromInt(
-            TerminalCell.Wide,
-            try reader.takeByte(),
-        ) orelse return error.InvalidCell;
+    /// Decode a fixed cell header, normalizing unknown semantic values.
+    pub fn decode(reader: *std.Io.Reader) std.Io.Reader.Error!DecodeResult {
+        // Decode various fields. We need to be very defensive here
+        // because it can come from an untrusted source and may be invalid.
+        const content_kind_optional = kind: {
+            const raw = try reader.takeByte();
+            break :kind std.enums.fromInt(Kind, raw);
+        };
+        const width = width: {
+            const raw = try reader.takeByte();
+            break :width std.enums.fromInt(TerminalCell.Wide, raw) orelse .narrow;
+        };
 
-        const flags_raw = try reader.takeByte();
+        const flags: Flags = @bitCast(try reader.takeByte());
 
-        // As with the row header, validate the exhaustive native enum before
-        // bitcasting the complete packed byte.
-        const semantic_content_raw: u2 = @truncate(flags_raw >> 1);
-        _ = std.enums.fromInt(
-            TerminalCell.SemanticContent,
-            semantic_content_raw,
-        ) orelse return error.InvalidCell;
-
-        const flags: Flags = @bitCast(flags_raw);
-        if (flags._padding != 0) return error.InvalidCell;
+        // We can't trust `flags` to have a valid semantic content so
+        // we need extract the bits and do a safe conversion.
+        const semantic_content = semantic: {
+            const flags_raw: u8 = @bitCast(flags);
+            const raw: u2 = @truncate(flags_raw >> @bitOffsetOf(Flags, "semantic_content"));
+            break :semantic std.enums.fromInt(
+                TerminalCell.SemanticContent,
+                raw,
+            ) orelse .output;
+        };
 
         // This byte is reserved so the IDs and content value remain naturally
-        // aligned within the fixed cell header.
-        if (try reader.takeByte() != 0) return error.InvalidCell;
+        // aligned within the fixed cell header. Ignore it so future versions
+        // can give it meaning without making old decoders reject the cell.
+        _ = try reader.takeByte();
 
-        return .{
+        const style_id = try io.readInt(reader, TerminalStyleId);
+        const hyperlink_id = try io.readInt(reader, TerminalHyperlinkId);
+        const value: Value = @bitCast(try io.readInt(reader, u32));
+        const grapheme_count = try io.readInt(reader, u32);
+
+        // If we don't have a valid content kind, we return invalid and
+        // note the suffix bytes so that the reader can discard
+        const content_kind = content_kind_optional orelse
+            return .{ .invalid = grapheme_count };
+
+        return .{ .valid = .{
             .content_kind = content_kind,
             .width = width,
             .protected = flags.protected,
-            .semantic_content = flags.semantic_content,
-            .style_id = try io.readInt(reader, TerminalStyleId),
-            .hyperlink_id = try io.readInt(reader, TerminalHyperlinkId),
-            .value = @bitCast(try io.readInt(reader, u32)),
-            .grapheme_count = try io.readInt(reader, u32),
-        };
+            .semantic_content = semantic_content,
+            .style_id = style_id,
+            .hyperlink_id = hyperlink_id,
+            .value = value,
+            .grapheme_count = grapheme_count,
+        } };
     }
 
     /// Computes the fixed header size using the encoder itself.
@@ -706,4 +744,61 @@ test "grid golden encoding and decoding" {
         &test_golden_fixture,
         rewriter.buffered(),
     );
+}
+
+test "grid normalizes incomplete wide cells" {
+    const testing = std.testing;
+    // One column puts the wide cell at the row end. Two columns put an
+    // ordinary narrow cell after it. Neither case supplies a spacer tail.
+    for ([_]u16{ 1, 2 }) |columns| {
+        const capacity: terminal_page.Capacity = .{
+            .cols = columns,
+            .rows = 1,
+        };
+
+        // Craft the malformed row directly on the wire. Decoding keeps its
+        // content but makes the incomplete wide cell narrow.
+        var payload: [64]u8 = undefined;
+        var payload_writer: std.Io.Writer = .fixed(&payload);
+        try payload_writer.writeByte(@bitCast(RowHeader{}));
+        try (CellHeader{
+            .width = .wide,
+            .value = .{ .codepoint = 'A' },
+        }).encode(&payload_writer);
+        if (capacity.cols > 1) try (CellHeader{
+            .value = .{ .codepoint = 'B' },
+        }).encode(&payload_writer);
+
+        var destination = try TerminalPage.init(capacity);
+        defer destination.deinit();
+        var style_remap = StyleRemap.init(testing.allocator);
+        defer style_remap.deinit();
+        var hyperlink_remap = HyperlinkRemap.init(testing.allocator);
+        defer hyperlink_remap.deinit();
+
+        var payload_reader: std.Io.Reader = .fixed(
+            payload_writer.buffered(),
+        );
+        try decode(
+            &destination,
+            &payload_reader,
+            &style_remap,
+            &hyperlink_remap,
+        );
+        try destination.verifyIntegrity(testing.allocator);
+
+        try testing.expectEqual(
+            @as(u21, 'A'),
+            destination.getRowAndCell(0, 0).cell.codepoint(),
+        );
+        try testing.expectEqual(
+            TerminalCell.Wide.narrow,
+            destination.getRowAndCell(0, 0).cell.wide,
+        );
+        if (columns > 1) {
+            const second = destination.getRowAndCell(1, 0).cell;
+            try testing.expectEqual(@as(u21, 'B'), second.codepoint());
+            try testing.expectEqual(TerminalCell.Wide.narrow, second.wide);
+        }
+    }
 }

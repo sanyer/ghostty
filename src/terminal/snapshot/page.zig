@@ -120,7 +120,6 @@ const TerminalStyleSet = terminal_style.Set;
 const PayloadEncodeError = hyperlink.EncodeError || grid.EncodeError;
 
 const PayloadDecodeError = style.DecodeError ||
-    grid.DecodeError ||
     Header.CapacityError ||
     error{
         /// The hyperlink kind is not defined by snapshot version 1.
@@ -829,6 +828,35 @@ test "framed PAGE golden empty record" {
     );
 }
 
+test "framed PAGE rejects incomplete wide cells transactionally" {
+    const testing = std.testing;
+
+    // One column puts the wide cell at the row end. Two columns put an
+    // ordinary narrow cell after it. Neither case supplies a spacer tail.
+    for ([_]u16{ 1, 2 }) |columns| {
+        var page = try TerminalPage.init(.{
+            .cols = columns,
+            .rows = 1,
+        });
+        defer page.deinit();
+        const first = page.getRowAndCell(0, 0).cell;
+        first.* = .init('A');
+        first.wide = .wide;
+        if (columns > 1) {
+            page.getRowAndCell(1, 0).cell.* = .init('B');
+        }
+
+        var destination: std.Io.Writer.Allocating = .init(testing.allocator);
+        defer destination.deinit();
+        try destination.writer.writeAll("prefix");
+        try testing.expectError(
+            error.InvalidWideCell,
+            encode(&page, &destination),
+        );
+        try testing.expectEqualStrings("prefix", destination.written());
+    }
+}
+
 test "framed PAGE rejects a different record tag" {
     var wrong_tag = test_empty_framed_page_fixture;
     std.mem.writeInt(
@@ -1044,9 +1072,9 @@ test "decode defaults missing sparse cell references" {
     );
 }
 
-test "decode rejects undefined row and cell values" {
+test "decode normalizes invalid grid semantics" {
     const header: Header = .{
-        .columns = 1,
+        .columns = 3,
         .rows = 1,
         .style_count = 0,
         .hyperlink_count = 0,
@@ -1056,62 +1084,79 @@ test "decode rejects undefined row and cell values" {
         .string_capacity_bytes = 0,
     };
 
-    var invalid_row: [Header.len + 1]u8 = undefined;
-    var row_writer: std.Io.Writer = .fixed(&invalid_row);
-    try header.encode(&row_writer);
-    try row_writer.writeByte(0x10);
+    var encoded: [Header.len + 1 + 3 * 16 + 12]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&encoded);
+    try header.encode(&writer);
 
-    var row_reader: std.Io.Reader = .fixed(row_writer.buffered());
-    try std.testing.expectError(
-        error.InvalidRow,
-        decodePayload(&row_reader, std.testing.allocator),
+    // Preserve wrap while degrading the unknown semantic-prompt value to none
+    // and ignoring all reserved row bits.
+    try writer.writeByte(0xFD);
+
+    // An unknown content and width kind, invalid semantic content, reserved
+    // bytes, and suffix data all degrade to a blank narrow output cell.
+    try writer.writeAll(&.{ 3, 4, 0xFF, 0xFF });
+    try io.writeInt(&writer, TerminalStyleId, 0);
+    try io.writeInt(&writer, TerminalHyperlinkId, 0);
+    try io.writeInt(&writer, u32, 0xD800);
+    try io.writeInt(&writer, u32, 1);
+    try io.writeInt(&writer, u32, 0x110000);
+
+    // A recognized text cell replaces an invalid Unicode scalar with U+FFFD.
+    // Its valid suffix cannot fit the advertised zero capacity, so decoding
+    // preserves the base character and drops the optional suffix.
+    try writer.writeAll(&.{ 0, 0, 0, 0 });
+    try io.writeInt(&writer, TerminalStyleId, 0);
+    try io.writeInt(&writer, TerminalHyperlinkId, 0);
+    try io.writeInt(&writer, u32, 0xD800);
+    try io.writeInt(&writer, u32, 1);
+    try io.writeInt(&writer, u32, 'x');
+
+    // Reserved palette bits and a nonsensical suffix do not obscure the valid
+    // low palette byte; the suffix is consumed and ignored.
+    try writer.writeAll(&.{ 1, 0, 0, 0xFF });
+    try io.writeInt(&writer, TerminalStyleId, 0);
+    try io.writeInt(&writer, TerminalHyperlinkId, 0);
+    try io.writeInt(&writer, u32, 0xFFFFFF07);
+    try io.writeInt(&writer, u32, 1);
+    try io.writeInt(&writer, u32, 'x');
+
+    var reader: std.Io.Reader = .fixed(writer.buffered());
+    var page = try decodePayload(&reader, std.testing.allocator);
+    defer page.deinit();
+    try page.verifyIntegrity(std.testing.allocator);
+
+    const first = page.getRowAndCell(0, 0);
+    try std.testing.expect(first.row.wrap);
+    try std.testing.expectEqual(
+        terminal_page.Row.SemanticPrompt.none,
+        first.row.semantic_prompt,
     );
-
-    var invalid_cell: [Header.len + 2]u8 = undefined;
-    var cell_writer: std.Io.Writer = .fixed(&invalid_cell);
-    try header.encode(&cell_writer);
-    try cell_writer.writeByte(0);
-    try cell_writer.writeByte(3);
-
-    var cell_reader: std.Io.Reader = .fixed(cell_writer.buffered());
-    try std.testing.expectError(
-        error.InvalidCell,
-        decodePayload(&cell_reader, std.testing.allocator),
+    try std.testing.expectEqual(@as(u21, 0), first.cell.codepoint());
+    try std.testing.expectEqual(
+        terminal_page.Cell.Wide.narrow,
+        first.cell.wide,
     );
-
-    var invalid_codepoint: [Header.len + 1 + 16]u8 = undefined;
-    var codepoint_writer: std.Io.Writer = .fixed(&invalid_codepoint);
-    try header.encode(&codepoint_writer);
-    try codepoint_writer.writeByte(0);
-    try codepoint_writer.writeAll(&.{ 0, 0, 0, 0 });
-    try io.writeInt(&codepoint_writer, TerminalStyleId, 0);
-    try io.writeInt(&codepoint_writer, TerminalHyperlinkId, 0);
-    try io.writeInt(&codepoint_writer, u32, 0xD800);
-    try io.writeInt(&codepoint_writer, u32, 0);
-
-    var codepoint_reader: std.Io.Reader = .fixed(
-        codepoint_writer.buffered(),
+    try std.testing.expectEqual(
+        terminal_page.Cell.SemanticContent.output,
+        first.cell.semantic_content,
     );
-    try std.testing.expectError(
-        error.InvalidCodepoint,
-        decodePayload(&codepoint_reader, std.testing.allocator),
-    );
+    try std.testing.expect(!first.cell.protected);
+    try std.testing.expect(!first.cell.hasGrapheme());
 
-    var invalid_color: [Header.len + 1 + 16]u8 = undefined;
-    var color_writer: std.Io.Writer = .fixed(&invalid_color);
-    try header.encode(&color_writer);
-    try color_writer.writeByte(0);
-    try color_writer.writeAll(&.{ 1, 0, 0, 0 });
-    try io.writeInt(&color_writer, TerminalStyleId, 0);
-    try io.writeInt(&color_writer, TerminalHyperlinkId, 0);
-    try io.writeInt(&color_writer, u32, 0x100);
-    try io.writeInt(&color_writer, u32, 0);
+    const second = page.getRowAndCell(1, 0).cell;
+    try std.testing.expectEqual(@as(u21, 0xFFFD), second.codepoint());
+    try std.testing.expect(!second.hasGrapheme());
 
-    var color_reader: std.Io.Reader = .fixed(color_writer.buffered());
-    try std.testing.expectError(
-        error.InvalidColor,
-        decodePayload(&color_reader, std.testing.allocator),
+    const third = page.getRowAndCell(2, 0).cell;
+    try std.testing.expectEqual(
+        terminal_page.Cell.ContentTag.bg_color_palette,
+        third.content_tag,
     );
+    try std.testing.expectEqual(
+        @as(u8, 7),
+        third.content.color_palette.data,
+    );
+    try std.testing.expect(!third.hasGrapheme());
 }
 
 test "decode validates dimensions and native table capacities" {
