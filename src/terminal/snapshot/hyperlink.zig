@@ -10,8 +10,8 @@
 //! URIs and explicit IDs are non-empty arbitrary byte strings. Their lengths
 //! are retained on the wire; they are not NUL-terminated and need not contain
 //! UTF-8. Native page storage requires every allocated hyperlink string to
-//! contain at least one byte, so standalone decoding rejects zero lengths and
-//! PAGE decoding consumes but ignores the invalid table entry.
+//! contain at least one byte. Encoding and standalone decoding reject empty
+//! strings; PAGE decoding consumes but ignores entries it cannot represent.
 //!
 //! All integers are unsigned and little-endian.
 //!
@@ -54,7 +54,16 @@ const Kind = enum(u8) {
 };
 
 /// Errors possible while encoding one hyperlink entry.
-pub const EncodeError = std.Io.Writer.Error;
+pub const EncodeError = std.Io.Writer.Error || error{
+    /// A native hyperlink URI must contain at least one byte.
+    InvalidUri,
+
+    /// A native explicit hyperlink ID must contain at least one byte.
+    InvalidExplicitId,
+
+    /// A string does not fit the version 1 length field.
+    StringTooLong,
+};
 
 /// Errors possible while decoding one allocator-owned hyperlink entry.
 pub const DecodeError = std.Io.Reader.Error || Allocator.Error || error{
@@ -69,21 +78,26 @@ pub const DecodeError = std.Io.Reader.Error || Allocator.Error || error{
 };
 
 /// Errors possible while decoding directly into a native page.
-pub const DecodePageError = std.Io.Reader.Error ||
-    terminal_page.Page.InsertHyperlinkError ||
-    error{
-        /// The hyperlink kind is not defined by snapshot version 1.
-        InvalidKind,
-
-        /// The hyperlink value already exists in the page.
-        DuplicateHyperlink,
-    };
+pub const DecodePageError = std.Io.Reader.Error || error{
+    /// The hyperlink kind is not defined by snapshot version 1.
+    InvalidKind,
+};
 
 /// Encode one hyperlink entry.
 pub fn encode(
     value: terminal_hyperlink.Hyperlink,
     writer: *std.Io.Writer,
 ) EncodeError!void {
+    // Validate the complete value before writing any part of this variable-
+    // length entry. This keeps callers able to roll back at entry boundaries.
+    if (value.uri.len == 0) return error.InvalidUri;
+    if (value.uri.len > std.math.maxInt(u32)) return error.StringTooLong;
+    if (value.id == .explicit) {
+        const id = value.id.explicit;
+        if (id.len == 0) return error.InvalidExplicitId;
+        if (id.len > std.math.maxInt(u32)) return error.StringTooLong;
+    }
+
     switch (value.id) {
         .implicit => |id| {
             try writer.writeByte(@intFromEnum(Kind.implicit));
@@ -156,8 +170,8 @@ pub fn decode(
 /// Explicit ID and URI bytes are read into the page string allocator and the
 /// completed entry is inserted into the page hyperlink set. The returned ID is
 /// the native ID assigned by the destination page. Zero is returned when the
-/// encoded URI or explicit ID is empty because native page storage cannot
-/// represent empty hyperlink strings.
+/// encoded value cannot be represented within the destination page, including
+/// empty strings and insufficient advertised capacity.
 pub fn decodePage(
     page: *terminal_page.Page,
     reader: *std.Io.Reader,
@@ -172,11 +186,17 @@ pub fn decodePage(
             const uri_len: usize = @intCast(try io.readInt(reader, u32));
             if (uri_len == 0) return 0;
 
-            const uri = try decodePageString(
+            const uri = decodePageString(
                 page,
                 reader,
                 uri_len,
-            );
+            ) catch |err| switch (err) {
+                error.StringsOutOfMemory => {
+                    try reader.discardAll(uri_len);
+                    return 0;
+                },
+                else => |read_err| return read_err,
+            };
 
             break :implicit .{
                 .id = .{ .implicit = id },
@@ -194,11 +214,21 @@ pub fn decodePage(
                 return 0;
             }
 
-            const id = try decodePageString(
+            const id = decodePageString(
                 page,
                 reader,
                 id_len,
-            );
+            ) catch |err| switch (err) {
+                error.StringsOutOfMemory => {
+                    try reader.discardAll(id_len);
+                    const uri_len: usize = @intCast(
+                        try io.readInt(reader, u32),
+                    );
+                    try reader.discardAll(uri_len);
+                    return 0;
+                },
+                else => |read_err| return read_err,
+            };
             errdefer page.string_alloc.free(
                 page.memory,
                 id.slice(page.memory),
@@ -213,11 +243,21 @@ pub fn decodePage(
                 return 0;
             }
 
-            const uri = try decodePageString(
+            const uri = decodePageString(
                 page,
                 reader,
                 uri_len,
-            );
+            ) catch |err| switch (err) {
+                error.StringsOutOfMemory => {
+                    try reader.discardAll(uri_len);
+                    page.string_alloc.free(
+                        page.memory,
+                        id.slice(page.memory),
+                    );
+                    return 0;
+                },
+                else => |read_err| return read_err,
+            };
 
             break :explicit .{
                 .id = .{ .explicit = id },
@@ -225,23 +265,15 @@ pub fn decodePage(
             };
         },
     };
-    errdefer entry.free(page);
-
-    if (page.hyperlink_set.lookupContext(
-        page.memory,
-        entry,
-        .{ .page = page },
-    ) != null) {
-        return error.DuplicateHyperlink;
-    }
-
     return page.hyperlink_set.addContext(
         page.memory,
         entry,
         .{ .page = page },
-    ) catch |err| switch (err) {
-        error.OutOfMemory => error.SetOutOfMemory,
-        error.NeedsRehash => error.SetNeedsRehash,
+    ) catch {
+        // The entry was fully consumed, so capacity failure only loses this
+        // optional hyperlink. Free its strings and let cells restore unlinked.
+        entry.free(page);
+        return 0;
     };
 }
 
@@ -322,6 +354,36 @@ test "golden explicit encoding" {
     try std.testing.expectEqualDeep(value, decoded);
 }
 
+test "encode rejects invalid strings before writing" {
+    const cases = [_]struct {
+        value: terminal_hyperlink.Hyperlink,
+        expected: anyerror,
+    }{
+        .{
+            .value = .{ .id = .{ .implicit = 1 }, .uri = "" },
+            .expected = error.InvalidUri,
+        },
+        .{
+            .value = .{ .id = .{ .explicit = "" }, .uri = "uri" },
+            .expected = error.InvalidExplicitId,
+        },
+        .{
+            .value = .{ .id = .{ .explicit = "id" }, .uri = "" },
+            .expected = error.InvalidUri,
+        },
+    };
+
+    for (cases) |case| {
+        var encoded: [32]u8 = undefined;
+        var writer: std.Io.Writer = .fixed(&encoded);
+        try std.testing.expectError(
+            case.expected,
+            encode(case.value, &writer),
+        );
+        try std.testing.expectEqual(@as(usize, 0), writer.end);
+    }
+}
+
 test "decode rejects empty strings" {
     const cases = [_]struct {
         fixture: []const u8,
@@ -376,7 +438,7 @@ test "decodePage ignores empty strings" {
     }
 }
 
-test "reject invalid kinds" {
+test "decode rejects invalid kinds" {
     for ([_]u8{ 0, 3, std.math.maxInt(u8) }) |kind| {
         var fixture: [1]u8 = .{kind};
         var reader: std.Io.Reader = .fixed(&fixture);

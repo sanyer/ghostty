@@ -108,38 +108,20 @@ const terminal_style = @import("../style.zig");
 const TerminalHyperlink = terminal_hyperlink.Hyperlink;
 const TerminalHyperlinkId = terminal_hyperlink.Id;
 const TerminalHyperlinkPageEntry = terminal_hyperlink.PageEntry;
-const TerminalHyperlinkSet = terminal_hyperlink.Set;
 const TerminalCell = terminal_page.Cell;
 const TerminalPage = terminal_page.Page;
 const TerminalPageCapacity = terminal_page.Capacity;
 const TerminalRow = terminal_page.Row;
 const TerminalStyle = terminal_style.Style;
 const TerminalStyleId = terminal_style.Id;
-const TerminalStyleSet = terminal_style.Set;
 
 const PayloadEncodeError = hyperlink.EncodeError || grid.EncodeError;
 
-const PayloadDecodeError = style.DecodeError ||
+const PayloadDecodeError = std.Io.Reader.Error ||
     Header.CapacityError ||
     error{
         /// The hyperlink kind is not defined by snapshot version 1.
         InvalidKind,
-
-        /// The advertised string capacity cannot hold the encoded hyperlinks.
-        InvalidStringCapacity,
-
-        /// A non-default style was encoded more than once.
-        DuplicateStyle,
-
-        /// A hyperlink was encoded more than once.
-        DuplicateHyperlink,
-
-        /// The default style cannot appear in the non-default style table.
-        DefaultStyle,
-
-        /// An encoded table ID is zero or appears more than once.
-        InvalidStyleId,
-        InvalidHyperlinkId,
 
         /// Native page backing memory could not be allocated.
         OutOfMemory,
@@ -315,34 +297,26 @@ fn decodePayloadBody(
 
     // Styles
     for (0..header.style_count) |_| {
-        // Zero denotes the implicit default style. Reusing an encoded ID would
-        // make cell references ambiguous because it would name multiple table
-        // entries.
         const native_id = try io.readInt(reader, TerminalStyleId);
-        if (native_id == 0 or style_remap.contains(native_id)) {
-            return error.InvalidStyleId;
-        }
+        const value: ?TerminalStyle = style.decodeOrDiscard(reader) catch null;
 
-        // Decode the style itself. It must never be the default style.
-        const value = try style.decode(reader);
-        if (value.default()) return error.DefaultStyle;
+        // Zero is reserved for the implicit default. For a duplicate encoded
+        // ID, the first entry wins and this complete entry is simply ignored.
+        if (native_id == 0 or style_remap.contains(native_id)) continue;
 
-        // If we already have the style, its invalid.
-        if (page.styles.lookup(
-            page.memory,
-            value,
-        ) != null) return error.DuplicateStyle;
-
-        // Add our style, get our real ID on this side, and store it in the
-        // remap table.
-        const decoded_id = page.styles.add(
-            page.memory,
-            value,
-        ) catch |err| switch (err) {
-            error.OutOfMemory,
-            error.NeedsRehash,
-            => return error.InvalidStyleCapacity,
-        };
+        // Invalid/default styles map to the native default. Repeated concrete
+        // values share the existing native entry, while capacity failure also
+        // degrades only this style.
+        const decoded_id: TerminalStyleId = if (value) |valid| decoded: {
+            if (valid.default()) break :decoded 0;
+            if (page.styles.lookup(page.memory, valid)) |existing| {
+                break :decoded existing;
+            }
+            break :decoded page.styles.add(
+                page.memory,
+                valid,
+            ) catch 0;
+        } else 0;
         style_remap.putAssumeCapacityNoClobber(
             native_id,
             decoded_id,
@@ -351,31 +325,20 @@ fn decodePayloadBody(
 
     // Hyperlinks
     for (0..header.hyperlink_count) |_| {
-        // Zero denotes no hyperlink. As with styles, a repeated encoded ID
-        // would make cell references ambiguous.
         const native_id = try io.readInt(reader, TerminalHyperlinkId);
+        const decoded_id = try hyperlink.decodePage(page, reader);
+
+        // As with styles, zero is reserved and the first duplicate encoded ID
+        // wins. Release any native entry reference created for an ignored ID.
         if (native_id == 0 or hyperlink_remap.contains(native_id)) {
-            return error.InvalidHyperlinkId;
+            if (decoded_id != 0) {
+                page.hyperlink_set.release(page.memory, decoded_id);
+            }
+            continue;
         }
 
-        const decoded_id = hyperlink.decodePage(
-            page,
-            reader,
-        ) catch |err| switch (err) {
-            error.StringsOutOfMemory => return error.InvalidStringCapacity,
-            error.SetOutOfMemory,
-            error.SetNeedsRehash,
-            => return error.InvalidHyperlinkCapacity,
-
-            error.DuplicateHyperlink => return error.DuplicateHyperlink,
-            error.InvalidKind => return error.InvalidKind,
-            error.EndOfStream => return error.EndOfStream,
-            error.ReadFailed => return error.ReadFailed,
-        };
-
-        // Zero records an ignored table entry. Keeping that mapping preserves
-        // encoded-ID uniqueness while grid decoding treats every reference to
-        // the invalid hyperlink as no hyperlink.
+        // Zero records an ignored table entry. Grid decoding treats every
+        // reference to it as no hyperlink.
         hyperlink_remap.putAssumeCapacityNoClobber(
             native_id,
             decoded_id,
@@ -479,30 +442,12 @@ pub const Header = struct {
 
     pub const CapacityError = error{
         InvalidDimensions,
-        InvalidStyleCapacity,
-        InvalidHyperlinkCapacity,
     };
 
     /// Validate native allocation requirements and produce the page capacity.
     fn pageCapacity(self: Header) CapacityError!TerminalPageCapacity {
         if (self.columns == 0 or self.rows == 0) {
             return error.InvalidDimensions;
-        }
-
-        const style_layout: TerminalStyleSet.Layout = .init(self.style_capacity);
-        if (self.style_count > style_layout.cap -| 1) {
-            return error.InvalidStyleCapacity;
-        }
-
-        const hyperlink_capacity_count = @divFloor(
-            self.hyperlink_capacity_bytes,
-            @sizeOf(TerminalHyperlinkSet.Item),
-        );
-        const hyperlink_layout: TerminalHyperlinkSet.Layout = .init(
-            hyperlink_capacity_count,
-        );
-        if (self.hyperlink_count > hyperlink_layout.cap -| 1) {
-            return error.InvalidHyperlinkCapacity;
         }
 
         return .{
@@ -891,7 +836,7 @@ test "decode sparse page rejects every truncation" {
     }
 }
 
-test "decode accepts unordered sparse style IDs and rejects zero" {
+test "decode accepts unordered sparse style IDs and ignores zero" {
     const header: Header = .{
         .columns = 1,
         .rows = 1,
@@ -939,17 +884,23 @@ test "decode accepts unordered sparse style IDs and rejects zero" {
         .string_capacity_bytes = 0,
     };
 
-    var zero: [Header.len + 2 + style.len]u8 = undefined;
+    var zero: [Header.len + 2 + style.len + 17]u8 = undefined;
     var zero_writer: std.Io.Writer = .fixed(&zero);
     try one_header.encode(&zero_writer);
     try io.writeInt(&zero_writer, TerminalStyleId, 0);
     try style.encode(.{ .flags = .{ .bold = true } }, &zero_writer);
 
+    var zero_grid = try TerminalPage.init(.{ .cols = 1, .rows = 1 });
+    defer zero_grid.deinit();
+    try grid.encode(&zero_grid, &zero_writer);
+
     var zero_reader: std.Io.Reader = .fixed(zero_writer.buffered());
-    try std.testing.expectError(
-        error.InvalidStyleId,
-        decodePayload(&zero_reader, std.testing.allocator),
+    var decoded_zero = try decodePayload(
+        &zero_reader,
+        std.testing.allocator,
     );
+    defer decoded_zero.deinit();
+    try std.testing.expectEqual(@as(usize, 0), decoded_zero.styles.count());
 }
 
 test "decode accepts unordered sparse hyperlink IDs" {
@@ -1159,83 +1110,47 @@ test "decode normalizes invalid grid semantics" {
     try std.testing.expect(!third.hasGrapheme());
 }
 
-test "decode validates dimensions and native table capacities" {
-    const Case = struct {
-        expected: anyerror,
-        header: Header,
-    };
-    const cases = [_]Case{
+test "decode validates dimensions" {
+    const cases = [_]Header{
         .{
-            .expected = error.InvalidDimensions,
-            .header = Header{
-                .columns = 0,
-                .rows = 24,
-                .style_count = 0,
-                .hyperlink_count = 0,
-                .style_capacity = 0,
-                .hyperlink_capacity_bytes = 0,
-                .grapheme_capacity_bytes = 0,
-                .string_capacity_bytes = 0,
-            },
+            .columns = 0,
+            .rows = 24,
+            .style_count = 0,
+            .hyperlink_count = 0,
+            .style_capacity = 0,
+            .hyperlink_capacity_bytes = 0,
+            .grapheme_capacity_bytes = 0,
+            .string_capacity_bytes = 0,
         },
         .{
-            .expected = error.InvalidDimensions,
-            .header = Header{
-                .columns = 80,
-                .rows = 0,
-                .style_count = 0,
-                .hyperlink_count = 0,
-                .style_capacity = 0,
-                .hyperlink_capacity_bytes = 0,
-                .grapheme_capacity_bytes = 0,
-                .string_capacity_bytes = 0,
-            },
-        },
-        .{
-            .expected = error.InvalidStyleCapacity,
-            .header = Header{
-                .columns = 80,
-                .rows = 24,
-                .style_count = 1,
-                .hyperlink_count = 0,
-                .style_capacity = 0,
-                .hyperlink_capacity_bytes = 0,
-                .grapheme_capacity_bytes = 0,
-                .string_capacity_bytes = 0,
-            },
-        },
-        .{
-            .expected = error.InvalidHyperlinkCapacity,
-            .header = Header{
-                .columns = 80,
-                .rows = 24,
-                .style_count = 0,
-                .hyperlink_count = 1,
-                .style_capacity = 0,
-                .hyperlink_capacity_bytes = 0,
-                .grapheme_capacity_bytes = 0,
-                .string_capacity_bytes = 0,
-            },
+            .columns = 80,
+            .rows = 0,
+            .style_count = 0,
+            .hyperlink_count = 0,
+            .style_capacity = 0,
+            .hyperlink_capacity_bytes = 0,
+            .grapheme_capacity_bytes = 0,
+            .string_capacity_bytes = 0,
         },
     };
 
-    for (cases) |case| {
+    for (cases) |header| {
         var encoded: [Header.len]u8 = undefined;
         var writer: std.Io.Writer = .fixed(&encoded);
-        try case.header.encode(&writer);
+        try header.encode(&writer);
 
         var reader: std.Io.Reader = .fixed(writer.buffered());
         try std.testing.expectError(
-            case.expected,
+            error.InvalidDimensions,
             decodePayload(&reader, std.testing.allocator),
         );
     }
 }
 
-test "decode rejects duplicate and default style entries" {
+test "decode normalizes duplicate default and invalid style entries" {
     const header: Header = .{
-        .columns = 80,
-        .rows = 24,
+        .columns = 1,
+        .rows = 1,
         .style_count = 2,
         .hyperlink_count = 0,
         .style_capacity = 16,
@@ -1247,23 +1162,66 @@ test "decode rejects duplicate and default style entries" {
         .flags = .{ .bold = true },
     };
 
-    var encoded: [Header.len + 2 * (2 + style.len)]u8 = undefined;
-    var writer: std.Io.Writer = .fixed(&encoded);
-    try header.encode(&writer);
-    try io.writeInt(&writer, TerminalStyleId, 1);
-    try style.encode(duplicate_style, &writer);
-    try io.writeInt(&writer, TerminalStyleId, 3);
-    try style.encode(duplicate_style, &writer);
+    // Generate a valid grid whose cell references a sparse style ID. The PAGE
+    // table below can then give that ID duplicate, default, or invalid contents
+    // without hand-authoring the cell wire format.
+    var grid_page = try TerminalPage.init(.{
+        .cols = 1,
+        .rows = 1,
+        .styles = 8,
+    });
+    defer grid_page.deinit();
+    const released_style_a = try grid_page.styles.add(
+        grid_page.memory,
+        .{ .flags = .{ .italic = true } },
+    );
+    const released_style_b = try grid_page.styles.add(
+        grid_page.memory,
+        .{ .bg_color = .{ .palette = 1 } },
+    );
+    const encoded_style_id = try grid_page.styles.add(
+        grid_page.memory,
+        duplicate_style,
+    );
+    grid_page.styles.release(grid_page.memory, released_style_a);
+    grid_page.styles.release(grid_page.memory, released_style_b);
+    const grid_cell = grid_page.getRowAndCell(0, 0);
+    grid_cell.cell.* = .init('A');
+    grid_cell.cell.style_id = encoded_style_id;
+    grid_cell.row.styled = true;
 
-    var reader: std.Io.Reader = .fixed(writer.buffered());
-    try std.testing.expectError(
-        error.DuplicateStyle,
-        decodePayload(&reader, std.testing.allocator),
+    var grid_bytes: [64]u8 = undefined;
+    var grid_writer: std.Io.Writer = .fixed(&grid_bytes);
+    try grid.encode(&grid_page, &grid_writer);
+
+    var encoded: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer encoded.deinit();
+    try header.encode(&encoded.writer);
+    try io.writeInt(&encoded.writer, TerminalStyleId, 1);
+    try style.encode(duplicate_style, &encoded.writer);
+    try io.writeInt(&encoded.writer, TerminalStyleId, encoded_style_id);
+    try style.encode(duplicate_style, &encoded.writer);
+    try encoded.writer.writeAll(grid_writer.buffered());
+
+    var reader: std.Io.Reader = .fixed(encoded.written());
+    var duplicate_decoded = try decodePayload(
+        &reader,
+        std.testing.allocator,
+    );
+    defer duplicate_decoded.deinit();
+    try std.testing.expectEqual(@as(usize, 1), duplicate_decoded.styles.count());
+    const duplicate_cell = duplicate_decoded.getRowAndCell(0, 0).cell;
+    try std.testing.expect(duplicate_cell.style_id != 0);
+    try std.testing.expect(
+        duplicate_decoded.styles.get(
+            duplicate_decoded.memory,
+            duplicate_cell.style_id,
+        ).flags.bold,
     );
 
     const default_header: Header = .{
-        .columns = 80,
-        .rows = 24,
+        .columns = 1,
+        .rows = 1,
         .style_count = 1,
         .hyperlink_count = 0,
         .style_capacity = 16,
@@ -1271,20 +1229,62 @@ test "decode rejects duplicate and default style entries" {
         .grapheme_capacity_bytes = 0,
         .string_capacity_bytes = 0,
     };
-    var default_encoded: [Header.len + 2 + style.len]u8 = undefined;
-    var default_writer: std.Io.Writer = .fixed(&default_encoded);
-    try default_header.encode(&default_writer);
-    try io.writeInt(&default_writer, TerminalStyleId, 1);
-    try style.encode(.{}, &default_writer);
+    var default_encoded: std.Io.Writer.Allocating = .init(
+        std.testing.allocator,
+    );
+    defer default_encoded.deinit();
+    try default_header.encode(&default_encoded.writer);
+    try io.writeInt(
+        &default_encoded.writer,
+        TerminalStyleId,
+        encoded_style_id,
+    );
+    try style.encode(.{}, &default_encoded.writer);
+    try default_encoded.writer.writeAll(grid_writer.buffered());
 
-    var default_reader: std.Io.Reader = .fixed(default_writer.buffered());
-    try std.testing.expectError(
-        error.DefaultStyle,
-        decodePayload(&default_reader, std.testing.allocator),
+    var default_reader: std.Io.Reader = .fixed(default_encoded.written());
+    var default_decoded = try decodePayload(
+        &default_reader,
+        std.testing.allocator,
+    );
+    defer default_decoded.deinit();
+    try std.testing.expectEqual(
+        @as(TerminalStyleId, 0),
+        default_decoded.getRowAndCell(0, 0).cell.style_id,
+    );
+
+    // The strict style codec rejects this kind, but PAGE owns the fixed entry
+    // boundary and can safely map the encoded ID to the default style. A zero
+    // capacity hint also remains advisory.
+    var invalid_header = default_header;
+    invalid_header.style_capacity = 0;
+    var invalid_encoded: std.Io.Writer.Allocating = .init(
+        std.testing.allocator,
+    );
+    defer invalid_encoded.deinit();
+    try invalid_header.encode(&invalid_encoded.writer);
+    try io.writeInt(
+        &invalid_encoded.writer,
+        TerminalStyleId,
+        encoded_style_id,
+    );
+    try invalid_encoded.writer.writeByte(3);
+    try invalid_encoded.writer.splatByteAll(0, style.len - 1);
+    try invalid_encoded.writer.writeAll(grid_writer.buffered());
+
+    var invalid_reader: std.Io.Reader = .fixed(invalid_encoded.written());
+    var invalid_decoded = try decodePayload(
+        &invalid_reader,
+        std.testing.allocator,
+    );
+    defer invalid_decoded.deinit();
+    try std.testing.expectEqual(
+        @as(TerminalStyleId, 0),
+        invalid_decoded.getRowAndCell(0, 0).cell.style_id,
     );
 }
 
-test "decode rejects duplicate hyperlinks" {
+test "decode reuses duplicate hyperlinks" {
     const header: Header = .{
         .columns = 1,
         .rows = 1,
@@ -1300,18 +1300,74 @@ test "decode rejects duplicate hyperlinks" {
         .uri = "uri",
     };
 
+    // As with styles above, use a sparse native ID to make grid.encode produce
+    // the cell reference whose table value this test deliberately duplicates.
+    var grid_page = try TerminalPage.init(.{
+        .cols = 1,
+        .rows = 1,
+        .hyperlink_bytes = 512,
+        .string_bytes = 64,
+    });
+    defer grid_page.deinit();
+    const released_hyperlink_a = try grid_page.insertHyperlink(.{
+        .id = .{ .implicit = 1 },
+        .uri = "one",
+    });
+    const released_hyperlink_b = try grid_page.insertHyperlink(.{
+        .id = .{ .implicit = 2 },
+        .uri = "two",
+    });
+    const encoded_hyperlink_id = try grid_page.insertHyperlink(.{
+        .id = .{ .implicit = 3 },
+        .uri = "three",
+    });
+    grid_page.hyperlink_set.release(
+        grid_page.memory,
+        released_hyperlink_a,
+    );
+    grid_page.hyperlink_set.release(
+        grid_page.memory,
+        released_hyperlink_b,
+    );
+    const grid_cell = grid_page.getRowAndCell(0, 0);
+    grid_cell.cell.* = .init('A');
+    try grid_page.setHyperlink(
+        grid_cell.row,
+        grid_cell.cell,
+        encoded_hyperlink_id,
+    );
+
+    var grid_bytes: [64]u8 = undefined;
+    var grid_writer: std.Io.Writer = .fixed(&grid_bytes);
+    try grid.encode(&grid_page, &grid_writer);
+
     var encoded: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer encoded.deinit();
     try header.encode(&encoded.writer);
     try io.writeInt(&encoded.writer, TerminalHyperlinkId, 1);
     try hyperlink.encode(duplicate, &encoded.writer);
-    try io.writeInt(&encoded.writer, TerminalHyperlinkId, 3);
+    try io.writeInt(
+        &encoded.writer,
+        TerminalHyperlinkId,
+        encoded_hyperlink_id,
+    );
     try hyperlink.encode(duplicate, &encoded.writer);
+    try encoded.writer.writeAll(grid_writer.buffered());
 
     var reader: std.Io.Reader = .fixed(encoded.written());
-    try std.testing.expectError(
-        error.DuplicateHyperlink,
-        decodePayload(&reader, std.testing.allocator),
+    var decoded = try decodePayload(
+        &reader,
+        std.testing.allocator,
+    );
+    defer decoded.deinit();
+    try std.testing.expectEqual(@as(usize, 1), decoded.hyperlink_set.count());
+    const cell = decoded.getRowAndCell(0, 0).cell;
+    try std.testing.expect(cell.hyperlink);
+    const id = decoded.lookupHyperlink(cell).?;
+    const entry = decoded.hyperlink_set.get(decoded.memory, id);
+    try std.testing.expectEqualStrings(
+        "uri",
+        entry.uri.slice(decoded.memory),
     );
 }
 
@@ -1322,50 +1378,61 @@ test "decode ignores empty hyperlink strings" {
         .style_count = 0,
         .hyperlink_count = 1,
         .style_capacity = 0,
-        .hyperlink_capacity_bytes = 512,
+        .hyperlink_capacity_bytes = 0,
         .grapheme_capacity_bytes = 0,
         .string_capacity_bytes = 16,
     };
-    const cases = [_]struct {
-        value: TerminalHyperlink,
-    }{
-        .{
-            .value = .{
-                .id = .{ .implicit = 1 },
-                .uri = "",
-            },
-        },
-        .{
-            .value = .{
-                .id = .{ .explicit = "" },
-                .uri = "uri",
-            },
-        },
-        .{
-            .value = .{
-                .id = .{ .explicit = "id" },
-                .uri = "",
-            },
-        },
+    const fixtures = [_][]const u8{
+        // Empty implicit URI.
+        "\x01\x01\x00\x00\x00\x00\x00\x00\x00",
+        // Empty explicit ID.
+        "\x02\x00\x00\x00\x00\x03\x00\x00\x00uri",
+        // Empty explicit URI.
+        "\x02\x02\x00\x00\x00id\x00\x00\x00\x00",
+        // Valid contents that cannot fit the zero-capacity native set.
+        "\x01\x01\x00\x00\x00\x03\x00\x00\x00uri",
     };
 
-    for (cases) |case| {
+    // Only the invalid hyperlink entry itself is hand-authored above. Generate
+    // its cell reference through the native grid encoder.
+    var grid_page = try TerminalPage.init(.{
+        .cols = 1,
+        .rows = 1,
+        .hyperlink_bytes = 256,
+        .string_bytes = 16,
+    });
+    defer grid_page.deinit();
+    const encoded_hyperlink_id = try grid_page.insertHyperlink(.{
+        .id = .{ .implicit = 1 },
+        .uri = "uri",
+    });
+    const grid_cell = grid_page.getRowAndCell(0, 0);
+    grid_cell.cell.* = .init('A');
+    try grid_page.setHyperlink(
+        grid_cell.row,
+        grid_cell.cell,
+        encoded_hyperlink_id,
+    );
+    var grid_bytes: [64]u8 = undefined;
+    var grid_writer: std.Io.Writer = .fixed(&grid_bytes);
+    try grid.encode(&grid_page, &grid_writer);
+
+    for (fixtures) |fixture| {
         var encoded: std.Io.Writer.Allocating = .init(
             std.testing.allocator,
         );
         defer encoded.deinit();
         try header.encode(&encoded.writer);
-        try io.writeInt(&encoded.writer, TerminalHyperlinkId, 1);
-        try hyperlink.encode(case.value, &encoded.writer);
+        try io.writeInt(
+            &encoded.writer,
+            TerminalHyperlinkId,
+            encoded_hyperlink_id,
+        );
+        try encoded.writer.writeAll(fixture);
 
         // The cell refers to the ignored table entry. Its absent native
         // remapping must degrade to no hyperlink while preserving the cell.
-        try encoded.writer.writeByte(0);
-        try encoded.writer.writeAll(&.{ 0, 0, 0, 0 });
-        try io.writeInt(&encoded.writer, TerminalStyleId, 0);
-        try io.writeInt(&encoded.writer, TerminalHyperlinkId, 1);
-        try io.writeInt(&encoded.writer, u32, 'A');
-        try io.writeInt(&encoded.writer, u32, 0);
+        try encoded.writer.writeAll(grid_writer.buffered());
 
         var reader: std.Io.Reader = .fixed(encoded.written());
         var decoded = try decodePayload(

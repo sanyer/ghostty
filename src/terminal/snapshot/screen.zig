@@ -221,7 +221,7 @@ const TerminalHyperlink = terminal_hyperlink.Hyperlink;
 const TerminalStyle = terminal_style.Style;
 
 /// Errors possible while encoding fixed SCREEN payload fields.
-const PayloadEncodeError = std.Io.Writer.Error || error{
+const PayloadEncodeError = hyperlink.EncodeError || error{
     InvalidCursorFlags,
     InvalidCharsetState,
     InvalidKittyKeyboardIndex,
@@ -285,7 +285,6 @@ pub fn encode(
 
 /// Errors possible while restoring a SCREEN and its declared PAGE sequence.
 pub const DecodeError = PayloadDecodeError ||
-    hyperlink.DecodeError ||
     page.DecodeError ||
     record.Reader.InitError ||
     record.Reader.FinishError ||
@@ -515,7 +514,7 @@ pub fn decode(
 }
 
 /// Errors possible while decoding fixed SCREEN payload fields.
-const PayloadDecodeError = style.DecodeError || error{InvalidKey};
+const PayloadDecodeError = std.Io.Reader.Error || error{InvalidKey};
 
 /// Flags encoded after the cursor's visual shape.
 pub const CursorFlags = packed struct(u8) {
@@ -841,7 +840,7 @@ pub const SavedCursor = struct {
         return .{
             .x = try io.readInt(reader, u16),
             .y = try io.readInt(reader, u16),
-            .pen = try style.decode(reader),
+            .pen = style.decodeOrDiscard(reader) catch .{},
             .flags = try Flags.decode(reader),
             .charset = decodeCharsetState(
                 try io.readInt(reader, u16),
@@ -994,7 +993,7 @@ pub const Header = struct {
             try reader.takeByte(),
         ) orelse .block;
         const cursor_flags = try CursorFlags.decode(reader);
-        const cursor_pen = try style.decode(reader);
+        const cursor_pen: TerminalStyle = style.decodeOrDiscard(reader) catch .{};
         const hyperlink_implicit_id = try io.readInt(reader, u32);
 
         // Charset and selective-erase state.
@@ -1095,12 +1094,28 @@ pub fn encodeCursorHyperlink(
 pub fn decodeCursorHyperlink(
     reader: *std.Io.Reader,
     alloc: Allocator,
-) hyperlink.DecodeError!CursorHyperlink {
+) std.Io.Reader.Error!CursorHyperlink {
     if (try reader.peekByte() == 0) {
         _ = try reader.takeByte();
         return null;
     }
-    return try hyperlink.decode(reader, alloc);
+
+    return hyperlink.decode(reader, alloc) catch |err| switch (err) {
+        error.ReadFailed => error.ReadFailed,
+
+        // The cursor hyperlink is the final SCREEN payload field, so its
+        // record boundary lets us discard an invalid or unrepresentable value
+        // without losing the following PAGE sequence.
+        error.EndOfStream,
+        error.OutOfMemory,
+        error.InvalidKind,
+        error.InvalidUri,
+        error.InvalidExplicitId,
+        => {
+            _ = try reader.discardRemaining();
+            return null;
+        },
+    };
 }
 
 const test_header_fixture = test_fixture.parse(@embedFile("testdata/screen-header-v1.hex"));
@@ -1427,14 +1442,6 @@ test "header decoding rejects structural values" {
     invalid_key[0] = 2;
     var key_reader: std.Io.Reader = .fixed(&invalid_key);
     try std.testing.expectError(error.InvalidKey, Header.decode(&key_reader));
-
-    var invalid_style = valid;
-    invalid_style[10] = 3;
-    var style_reader: std.Io.Reader = .fixed(&invalid_style);
-    try std.testing.expectError(
-        error.InvalidColorKind,
-        Header.decode(&style_reader),
-    );
 }
 
 test "header decoding normalizes unknown semantic values" {
@@ -1442,6 +1449,7 @@ test "header decoding normalizes unknown semantic values" {
 
     fixture[8] = 4; // Unknown cursor style.
     fixture[9] = 0xFF; // Known flags, unknown semantic value, reserved bits.
+    fixture[10] = 3; // Unknown cursor foreground color kind.
     fixture[31] = 0xD0; // Invalid single shift plus a reserved bit.
     fixture[32] = 3; // Unknown protected mode.
     fixture[33] = 8; // Out-of-range Kitty keyboard index.
@@ -1457,6 +1465,7 @@ test "header decoding normalizes unknown semantic values" {
         TerminalScreen.CursorStyle.block,
         decoded.cursor_style,
     );
+    try std.testing.expect(decoded.cursor_pen.default());
     try std.testing.expect(decoded.cursor_flags.pending_wrap);
     try std.testing.expect(decoded.cursor_flags.protected);
     try std.testing.expectEqual(
@@ -1579,11 +1588,13 @@ test "saved cursor encoding rejects and decoding normalizes invalid state" {
     );
 
     var invalid = [_]u8{0} ** SavedCursor.len;
+    invalid[4] = 3; // Unknown saved-cursor foreground color kind.
     invalid[20] = 0xF9; // Protected plus reserved bits.
     invalid[22] = 0xD0; // Invalid single shift plus a reserved bit.
     var reader: std.Io.Reader = .fixed(&invalid);
     const decoded = try SavedCursor.decode(&reader);
 
+    try std.testing.expect(decoded.pen.default());
     try std.testing.expect(decoded.flags.protected);
     try std.testing.expect(!decoded.flags.pending_wrap);
     try std.testing.expect(!decoded.flags.origin);
@@ -2091,7 +2102,14 @@ test "SCREEN sequence failure preserves preceding bytes" {
     try std.testing.expectEqualStrings("prefix", destination.written());
 }
 
-test "SCREEN decode rejects an empty cursor hyperlink URI" {
+test "SCREEN decode ignores an invalid cursor hyperlink" {
+    var screen = try TerminalScreen.init(
+        std.testing.io,
+        std.testing.allocator,
+        .{ .cols = 1, .rows = 1, .max_scrollback_bytes = 0 },
+    );
+    defer screen.deinit();
+
     var destination: std.Io.Writer.Allocating = .init(
         std.testing.allocator,
     );
@@ -2107,22 +2125,25 @@ test "SCREEN decode rejects an empty cursor hyperlink URI" {
 
     var record_writer = try record.Writer.init(&destination, .screen);
     try header.encode(record_writer.payloadWriter());
-    try hyperlink.encode(.{
-        .id = .{ .implicit = 1 },
-        .uri = "",
-    }, record_writer.payloadWriter());
+    try record_writer.payloadWriter().writeByte(1); // Implicit hyperlink.
+    try io.writeInt(record_writer.payloadWriter(), u32, 1);
+    try io.writeInt(record_writer.payloadWriter(), u32, 0); // Empty URI.
     try record_writer.finish();
 
-    var source: std.Io.Reader = .fixed(destination.written());
-    try std.testing.expectError(
-        error.InvalidUri,
-        decode(
-            &source,
-            std.testing.io,
-            std.testing.allocator,
-            .{ .cols = 1, .rows = 1 },
-        ),
+    try page.encode(
+        screen.pages.getTopLeft(.active).node.pageAssumeResident(),
+        &destination,
     );
+
+    var source: std.Io.Reader = .fixed(destination.written());
+    var decoded = try decode(
+        &source,
+        std.testing.io,
+        std.testing.allocator,
+        .{ .cols = 1, .rows = 1 },
+    );
+    defer decoded.deinit();
+    try std.testing.expectEqual(null, decoded.screen.cursor.hyperlink);
 }
 
 test "SCREEN decode ignores a PAGE with an empty hyperlink URI" {
@@ -2161,10 +2182,9 @@ test "SCREEN decode ignores a PAGE with an empty hyperlink URI" {
         terminal_hyperlink.Id,
         1,
     );
-    try hyperlink.encode(.{
-        .id = .{ .implicit = 1 },
-        .uri = "",
-    }, page_writer.payloadWriter());
+    try page_writer.payloadWriter().writeByte(1); // Implicit hyperlink.
+    try io.writeInt(page_writer.payloadWriter(), u32, 1);
+    try io.writeInt(page_writer.payloadWriter(), u32, 0); // Empty URI.
 
     // One narrow codepoint cell refers to the hyperlink table entry above.
     // Since that entry is ignored, the cell must restore without a hyperlink.

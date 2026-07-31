@@ -157,6 +157,21 @@ pub fn decode(reader: *std.Io.Reader) DecodeError!terminal_style.Style {
     };
 }
 
+/// Decode strictly after consuming one complete fixed-size style entry.
+///
+/// Unlike `decode`, a semantic error leaves `reader` at the next entry. This
+/// lets an enclosing codec catch the error and choose its own fallback without
+/// losing the surrounding payload boundary.
+pub fn decodeOrDiscard(
+    reader: *std.Io.Reader,
+) DecodeError!terminal_style.Style {
+    var encoded: [len]u8 = undefined;
+    try reader.readSliceAll(&encoded);
+
+    var source: std.Io.Reader = .fixed(&encoded);
+    return decode(&source);
+}
+
 fn encodeColor(
     value: terminal_style.Style.Color,
     writer: *std.Io.Writer,
@@ -356,6 +371,16 @@ test "reject invalid flags and reserved field" {
         error.InvalidReserved,
         decode(&reserved_reader),
     );
+}
+
+test "decodeOrDiscard preserves the next entry boundary" {
+    var fixture: [len + 1]u8 = @splat(0);
+    fixture[0] = 3;
+    fixture[len] = 0xFF;
+
+    var reader: std.Io.Reader = .fixed(&fixture);
+    try std.testing.expectError(error.InvalidColorKind, decodeOrDiscard(&reader));
+    try std.testing.expectEqual(@as(u8, 0xFF), try reader.takeByte());
 }
 
 test "reject every truncation" {
