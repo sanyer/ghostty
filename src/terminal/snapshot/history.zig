@@ -12,9 +12,10 @@
 //!
 //! The first SCREEN page may begin above the active area. Those incidental
 //! history rows are counted by `screen_overlap_rows`; they are not repeated
-//! after HISTORY. `total_rows` is the authoritative number of logical rows
-//! before the active area, including both the SCREEN overlap and the rows in
-//! the following PAGE records.
+//! after HISTORY. `total_rows` is the canonical number of logical rows before
+//! the active area, including both the SCREEN overlap and the rows in the
+//! following PAGE records. Decoders derive native row totals from the restored
+//! pages and may ignore inconsistent row metadata.
 //!
 //! All integers are unsigned and little-endian.
 //!
@@ -59,9 +60,10 @@
 //! 16 +--------------------------------+
 //! ```
 //!
-//! The sum of `screen_overlap_rows` and the logical row counts of all
-//! following PAGE records must equal `total_rows`. A decoder uses `page_count`,
-//! rather than another record tag, to find the end of the page sequence.
+//! A canonical encoder sets `total_rows` to the sum of `screen_overlap_rows`
+//! and the logical row counts of all following PAGE records. A decoder uses
+//! `page_count`, rather than another record tag, to find the end of the page
+//! sequence.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -92,7 +94,7 @@ pub const Header = struct {
     /// Number of complete PAGE records immediately following this record.
     page_count: u32,
 
-    /// Authoritative number of logical rows before the active area.
+    /// Canonical number of logical rows before the active area.
     total_rows: u64,
 
     /// History rows already included at the start of the first SCREEN page.
@@ -236,12 +238,6 @@ pub const DecodeError = Allocator.Error ||
 
         /// The Screen already contains complete pages before its active page.
         ExistingHistory,
-
-        /// The claimed overlap does not match the restored SCREEN sequence.
-        InvalidScreenOverlap,
-
-        /// The declared total does not match the restored historical rows.
-        InvalidHistoryRows,
     };
 
 /// Restore one HISTORY and its declared PAGE records into a native Screen.
@@ -275,14 +271,11 @@ pub fn decode(
     if (terminal_screen.pages.getTopLeft(.screen).node != active_top.node) {
         return error.ExistingHistory;
     }
-    if (header.screen_overlap_rows != active_top.y) {
-        return error.InvalidScreenOverlap;
-    }
-    if (header.total_rows < header.screen_overlap_rows) {
-        return error.InvalidHistoryRows;
-    }
 
-    var restored_rows: u64 = header.screen_overlap_rows;
+    // Row metadata is redundant with the restored SCREEN and PAGE topology.
+    // Consume the declared number of PAGE records, but derive all native row
+    // totals from their actual dimensions instead of rejecting inconsistent
+    // metadata from another implementation.
     for (0..header.page_count) |_| {
         // PAGE exposes its exact capacity before decoding the payload, allowing
         // the destination PageList to allocate the final backing memory once.
@@ -292,24 +285,9 @@ pub fn decode(
         defer allocation.deinit();
         try decoder.decode(allocation.page(), alloc);
 
-        // Validate the authoritative row total before publishing this page.
-        const page_rows = allocation.page().size.rows;
-        restored_rows = std.math.add(
-            u64,
-            restored_rows,
-            page_rows,
-        ) catch return error.InvalidHistoryRows;
-        if (restored_rows > header.total_rows) {
-            return error.InvalidHistoryRows;
-        }
-
         const contains_prompt = hasSemanticPrompt(allocation.page());
         try allocation.finalize(.prepend);
         if (contains_prompt) terminal_screen.semantic_prompt.seen = true;
-    }
-
-    if (restored_rows != header.total_rows) {
-        return error.InvalidHistoryRows;
     }
 
     terminal_screen.pages.assertIntegrity();
@@ -363,6 +341,14 @@ test "HISTORY header golden encoding and decoding" {
             Header.decode(&truncated),
         );
     }
+
+    var invalid_key = test_header_fixture;
+    invalid_key[0] = 2;
+    var invalid_key_reader: std.Io.Reader = .fixed(&invalid_key);
+    try std.testing.expectError(
+        error.InvalidKey,
+        Header.decode(&invalid_key_reader),
+    );
 }
 
 test "HISTORY encodes newest first and restores complete history" {
@@ -657,7 +643,7 @@ test "HISTORY encodes and restores an empty sequence" {
     try std.testing.expectError(error.EndOfStream, decode_source.takeByte());
 }
 
-test "HISTORY rejects manifest mismatches" {
+test "HISTORY accepts row metadata mismatches and rejects structural ones" {
     var terminal_screen = try TerminalScreen.init(
         std.testing.io,
         std.testing.allocator,
@@ -669,8 +655,45 @@ test "HISTORY rejects manifest mismatches" {
     );
     defer terminal_screen.deinit();
 
-    // Encode a manifest without PAGE records and vary only the fixed fields so
-    // each structural validation boundary is exercised in isolation.
+    // Row counts are redundant metadata. Even internally inconsistent values
+    // do not prevent restoring the topology declared by page_count.
+    const accepted = [_]Header{
+        .{
+            .key = .primary,
+            .page_count = 0,
+            .total_rows = 0,
+            .screen_overlap_rows = 1,
+        },
+        .{
+            .key = .primary,
+            .page_count = 0,
+            .total_rows = std.math.maxInt(u64),
+            .screen_overlap_rows = std.math.maxInt(u16),
+        },
+    };
+    for (accepted) |header| {
+        var destination: std.Io.Writer.Allocating = .init(
+            std.testing.allocator,
+        );
+        defer destination.deinit();
+        var record_writer = try record.Writer.init(&destination, .history);
+        try header.encode(record_writer.payloadWriter());
+        try record_writer.finish();
+
+        var source: std.Io.Reader = .fixed(destination.written());
+        try decode(
+            &source,
+            std.testing.allocator,
+            .primary,
+            &terminal_screen,
+        );
+        try std.testing.expectError(error.EndOfStream, source.takeByte());
+        terminal_screen.pages.assertIntegrity();
+        terminal_screen.assertIntegrity();
+    }
+
+    // Routing and sequence length still determine which native screen is
+    // mutated and where the following record begins, so they remain strict.
     const Case = struct {
         header: Header,
         expected: anyerror,
@@ -684,24 +707,6 @@ test "HISTORY rejects manifest mismatches" {
                 .screen_overlap_rows = 0,
             },
             .expected = error.UnexpectedScreenKey,
-        },
-        .{
-            .header = .{
-                .key = .primary,
-                .page_count = 0,
-                .total_rows = 1,
-                .screen_overlap_rows = 1,
-            },
-            .expected = error.InvalidScreenOverlap,
-        },
-        .{
-            .header = .{
-                .key = .primary,
-                .page_count = 0,
-                .total_rows = 1,
-                .screen_overlap_rows = 0,
-            },
-            .expected = error.InvalidHistoryRows,
         },
         .{
             .header = .{
