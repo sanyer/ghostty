@@ -68,7 +68,8 @@
 //! restore each active area. HISTORY contains the older complete pages for its
 //! screen in newest-to-oldest order so they can be prepended as they arrive.
 //! Every SCREEN has one corresponding HISTORY, even when its history page count
-//! is zero. FINISH is followed by end-of-file.
+//! is zero. FINISH terminates the snapshot. Bytes after FINISH belong to the
+//! containing transport and are not consumed by snapshot decoding.
 //!
 //! READY and FINISH contain BLAKE3-256 digests of all preceding snapshot bytes.
 //! READY therefore validates the renderable active-state prefix. FINISH covers
@@ -100,6 +101,18 @@
 //!
 //! Each record type usually exposes an `encode` function that encodes
 //! a complete record, such as `screen.encode`.
+//!
+//! ## Decoding
+//!
+//! `snapshot.decode` consumes exactly one snapshot through FINISH and leaves
+//! any following bytes unread. This permits multiple snapshots or live protocol
+//! data to share a stream without waiting for the peer to close it. Transports
+//! that deliver live PTY data before history finishes must multiplex that data
+//! outside this ordered snapshot record sequence.
+//!
+//! Use `snapshot.decodeExact` for a bounded file or buffer that must contain
+//! only one snapshot. It preserves the stricter end-of-file check, which may
+//! block when used with a live stream.
 
 pub const checkpoint = @import("checkpoint.zig");
 pub const envelope = @import("envelope.zig");

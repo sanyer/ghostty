@@ -6,8 +6,8 @@
 //!
 //! READY covers the envelope, TERMINAL, and all SCREEN/PAGE sequences. FINISH
 //! covers that same prefix plus the complete READY record and all HISTORY/PAGE
-//! sequences. Neither digest includes its own record. FINISH must be followed
-//! immediately by end-of-file; READY may be followed by history.
+//! sequences. Neither digest includes its own record. FINISH terminates one
+//! snapshot; bytes after it belong to the containing transport.
 //!
 //! The digest does not replace record framing. Its 32-byte payload is still
 //! protected by the record's CRC32C.
@@ -76,9 +76,6 @@ pub const DecodeError = record.Reader.InitError ||
 
         /// The checkpoint does not describe the preceding snapshot bytes.
         InvalidDigest,
-
-        /// FINISH was followed by additional bytes.
-        TrailingData,
     };
 
 /// Decode and validate one checkpoint against the running prefix digest.
@@ -105,14 +102,6 @@ pub fn decode(
     try record_reader.payloadReader().readSliceAll(&actual);
     try record_reader.finish();
     if (!std.mem.eql(u8, &expected, &actual)) return error.InvalidDigest;
-
-    if (kind == .finish) {
-        _ = source.peekByte() catch |err| switch (err) {
-            error.EndOfStream => return,
-            else => return err,
-        };
-        return error.TrailingData;
-    }
 }
 
 const test_ready_fixture = test_fixture.parse(
@@ -212,7 +201,7 @@ test "READY and FINISH checkpoint coverage" {
     );
 }
 
-test "checkpoint rejects wrong tags, digests, and FINISH trailing data" {
+test "checkpoint rejects wrong tags and digests" {
     const testing = std.testing;
 
     var snapshot: std.Io.Writer.Allocating = .init(testing.allocator);
@@ -260,6 +249,10 @@ test "checkpoint rejects wrong tags, digests, and FINISH trailing data" {
         error.InvalidDigest,
         decode(.ready, &invalid_digest_stream),
     );
+}
+
+test "FINISH leaves continuation bytes unread" {
+    const testing = std.testing;
 
     var finished: std.Io.Writer.Allocating = .init(testing.allocator);
     defer finished.deinit();
@@ -277,8 +270,6 @@ test "checkpoint rejects wrong tags, digests, and FINISH trailing data" {
         &trailing_source,
     );
     try trailing_stream.reader().discardAll("prefix".len);
-    try testing.expectError(
-        error.TrailingData,
-        decode(.finish, &trailing_stream),
-    );
+    try decode(.finish, &trailing_stream);
+    try testing.expectEqual(@as(u8, 0), try trailing_source.takeByte());
 }

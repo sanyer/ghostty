@@ -10,7 +10,8 @@ doc: |
   A complete snapshot contains an envelope, terminal-wide state, one or two
   renderable screen sequences, a READY checkpoint, matching history sequences,
   and a FINISH checkpoint. SCREEN pages are oldest-to-newest. HISTORY pages are
-  newest-to-oldest.
+  newest-to-oldest. FINISH terminates the snapshot; bytes that follow belong to
+  the containing transport and are outside this schema.
 
   Record CRC32C values and checkpoint BLAKE3-256 digests are represented here
   but cannot be calculated by portable Kaitai Struct expressions. The adjacent
@@ -32,10 +33,6 @@ seq:
     repeat-expr: terminal.payload.header.screen_count
   - id: finish
     type: checkpoint_record(6)
-  - id: trailing_data
-    size-eos: true
-    valid:
-      expr: _.size == 0
 enums:
   record_tag:
     1: terminal

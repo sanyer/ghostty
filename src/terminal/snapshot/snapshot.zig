@@ -100,11 +100,12 @@ pub const DecodeError = envelope.DecodeError ||
 
 /// Restore one complete snapshot into a native terminal.
 ///
-/// The reader must contain exactly one snapshot through FINISH. Restoration is
-/// transactional: the returned terminal is either complete and ready or
-/// not (error return). Individual record codecs normalize optional semantic
-/// state, while framing, checkpoints, declared sequence counts, and unique
-/// cross-record screen routing remain strict.
+/// This consumes one snapshot through FINISH and leaves any following bytes in
+/// the reader for the containing transport. Restoration is transactional: the
+/// returned terminal is either complete and ready or not (error return).
+/// Individual record codecs normalize optional semantic state, while framing,
+/// checkpoints, declared sequence counts, and unique cross-record screen
+/// routing remain strict.
 pub fn decode(
     source: *std.Io.Reader,
     io_: std.Io,
@@ -216,6 +217,31 @@ pub fn decode(
     // same initial state as any newly constructed ScreenSet.
     for (keys) |key| result.screens.generations.put(key, 0);
     return result;
+}
+
+/// Errors possible while restoring a snapshot that must end at end-of-file.
+pub const DecodeExactError = DecodeError || std.Io.Reader.Error || error{
+    /// FINISH was followed by additional bytes.
+    TrailingData,
+};
+
+/// Restore one snapshot and require FINISH to be followed by end-of-file.
+///
+/// This is intended for bounded snapshot files and buffers. On a live stream,
+/// checking for end-of-file may block; use `decode` to stop at FINISH instead.
+pub fn decodeExact(
+    source: *std.Io.Reader,
+    io_: std.Io,
+    alloc: Allocator,
+) DecodeExactError!Terminal {
+    var result = try decode(source, io_, alloc);
+    errdefer result.deinit(alloc);
+
+    _ = source.peekByte() catch |err| switch (err) {
+        error.EndOfStream => return result,
+        else => return err,
+    };
+    return error.TrailingData;
 }
 
 test "complete snapshot round trip with history and alternate screen" {
@@ -543,7 +569,7 @@ test "complete snapshot encoding streams from the current writer position" {
     );
 }
 
-test "complete snapshot rejects ordering checkpoints and trailing data" {
+test "complete snapshot rejects ordering and invalid checkpoints" {
     const testing = std.testing;
 
     var t = try Terminal.init(testing.io, testing.allocator, .{
@@ -596,17 +622,6 @@ test "complete snapshot rejects ordering checkpoints and trailing data" {
     try testing.expectError(
         error.InvalidDigest,
         decode(&invalid_ready_source, testing.io, testing.allocator),
-    );
-
-    // FINISH is the exact end of a complete snapshot.
-    var trailing: std.Io.Writer.Allocating = .init(testing.allocator);
-    defer trailing.deinit();
-    try encode(testing.allocator, &trailing.writer, &t);
-    try trailing.writer.writeByte(0);
-    var trailing_source: std.Io.Reader = .fixed(trailing.written());
-    try testing.expectError(
-        error.TrailingData,
-        decode(&trailing_source, testing.io, testing.allocator),
     );
 
     // A SCREEN key must name one of the slots declared by TERMINAL.
@@ -693,4 +708,66 @@ test "complete snapshot rejects ordering checkpoints and trailing data" {
         error.DuplicateHistory,
         decode(&duplicate_history_source, testing.io, testing.allocator),
     );
+}
+
+test "complete snapshot leaves continuation bytes unread" {
+    const testing = std.testing;
+
+    var t = try Terminal.init(testing.io, testing.allocator, .{
+        .cols = 2,
+        .rows = 1,
+    });
+    defer t.deinit(testing.allocator);
+
+    var encoded: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer encoded.deinit();
+    try encode(testing.allocator, &encoded.writer, &t);
+    const snapshot_len = encoded.written().len;
+    try encoded.writer.writeAll("pty");
+
+    var source: std.Io.Reader = .fixed(encoded.written());
+    var restored = try decode(&source, testing.io, testing.allocator);
+    defer restored.deinit(testing.allocator);
+
+    var continuation: [3]u8 = undefined;
+    try source.readSliceAll(&continuation);
+    try testing.expectEqualStrings("pty", &continuation);
+
+    var exact_source: std.Io.Reader = .fixed(encoded.written());
+    try testing.expectError(
+        error.TrailingData,
+        decodeExact(&exact_source, testing.io, testing.allocator),
+    );
+
+    var bounded_source: std.Io.Reader = .fixed(
+        encoded.written()[0..snapshot_len],
+    );
+    var bounded = try decodeExact(
+        &bounded_source,
+        testing.io,
+        testing.allocator,
+    );
+    defer bounded.deinit(testing.allocator);
+}
+
+test "complete snapshots decode sequentially from one reader" {
+    const testing = std.testing;
+
+    var t = try Terminal.init(testing.io, testing.allocator, .{
+        .cols = 2,
+        .rows = 1,
+    });
+    defer t.deinit(testing.allocator);
+
+    var encoded: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer encoded.deinit();
+    try encode(testing.allocator, &encoded.writer, &t);
+    try encode(testing.allocator, &encoded.writer, &t);
+
+    var source: std.Io.Reader = .fixed(encoded.written());
+    var first = try decode(&source, testing.io, testing.allocator);
+    defer first.deinit(testing.allocator);
+    var second = try decode(&source, testing.io, testing.allocator);
+    defer second.deinit(testing.allocator);
+    try testing.expectError(error.EndOfStream, source.takeByte());
 }
