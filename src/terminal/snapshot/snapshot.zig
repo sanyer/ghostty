@@ -107,9 +107,9 @@ pub const DecodeError = envelope.DecodeError ||
 /// checkpoints, declared sequence counts, and unique cross-record screen
 /// routing remain strict.
 pub fn decode(
-    source: *std.Io.Reader,
-    io_: std.Io,
     alloc: Allocator,
+    io_: std.Io,
+    source: *std.Io.Reader,
 ) DecodeError!Terminal {
     // StreamReader owns a zero-buffer hashing adapter, making checkpoint
     // boundaries part of its API rather than a caller-maintained invariant.
@@ -230,11 +230,11 @@ pub const DecodeExactError = DecodeError || std.Io.Reader.Error || error{
 /// This is intended for bounded snapshot files and buffers. On a live stream,
 /// checking for end-of-file may block; use `decode` to stop at FINISH instead.
 pub fn decodeExact(
-    source: *std.Io.Reader,
-    io_: std.Io,
     alloc: Allocator,
+    io_: std.Io,
+    source: *std.Io.Reader,
 ) DecodeExactError!Terminal {
-    var result = try decode(source, io_, alloc);
+    var result = try decode(alloc, io_, source);
     errdefer result.deinit(alloc);
 
     _ = source.peekByte() catch |err| switch (err) {
@@ -368,9 +368,9 @@ test "complete snapshot round trip with history and alternate screen" {
     var source_buffer: [1]u8 = undefined;
     var limited = encoded_source.limited(.unlimited, &source_buffer);
     var restored = try decode(
-        &limited.interface,
-        testing.io,
         testing.allocator,
+        testing.io,
+        &limited.interface,
     );
     defer restored.deinit(testing.allocator);
 
@@ -429,9 +429,9 @@ test "complete snapshot round trip with history and alternate screen" {
 
     var reversed_source: std.Io.Reader = .fixed(reversed.written());
     var reversed_restored = try decode(
-        &reversed_source,
-        testing.io,
         testing.allocator,
+        testing.io,
+        &reversed_source,
     );
     defer reversed_restored.deinit(testing.allocator);
     try testing.expectEqual(
@@ -495,9 +495,9 @@ test "complete snapshot preserves Kitty virtual placeholders" {
 
     var encoded_source: std.Io.Reader = .fixed(encoded.written());
     var restored = try decode(
-        &encoded_source,
-        testing.io,
         testing.allocator,
+        testing.io,
+        &encoded_source,
     );
     defer restored.deinit(testing.allocator);
 
@@ -544,9 +544,9 @@ test "complete snapshot encoding streams from the current writer position" {
         nonempty.written()[snapshot_offset..],
     );
     var appended = try decode(
-        &appended_source,
-        testing.io,
         testing.allocator,
+        testing.io,
+        &appended_source,
     );
     appended.deinit(testing.allocator);
 
@@ -594,7 +594,7 @@ test "complete snapshot rejects ordering and invalid checkpoints" {
     var reordered_source: std.Io.Reader = .fixed(reordered.written());
     try testing.expectError(
         error.UnexpectedRecordTag,
-        decode(&reordered_source, testing.io, testing.allocator),
+        decode(testing.allocator, testing.io, &reordered_source),
     );
 
     // Construct a correctly framed READY with an intentionally unrelated
@@ -621,7 +621,7 @@ test "complete snapshot rejects ordering and invalid checkpoints" {
     );
     try testing.expectError(
         error.InvalidDigest,
-        decode(&invalid_ready_source, testing.io, testing.allocator),
+        decode(testing.allocator, testing.io, &invalid_ready_source),
     );
 
     // A SCREEN key must name one of the slots declared by TERMINAL.
@@ -638,7 +638,7 @@ test "complete snapshot rejects ordering and invalid checkpoints" {
     var undeclared_source: std.Io.Reader = .fixed(undeclared.written());
     try testing.expectError(
         error.UnexpectedScreenKey,
-        decode(&undeclared_source, testing.io, testing.allocator),
+        decode(testing.allocator, testing.io, &undeclared_source),
     );
 
     // HISTORY sequences are also routed by key, which must name a declared
@@ -660,7 +660,7 @@ test "complete snapshot rejects ordering and invalid checkpoints" {
     );
     try testing.expectError(
         error.UnexpectedHistoryKey,
-        decode(&undeclared_history_source, testing.io, testing.allocator),
+        decode(testing.allocator, testing.io, &undeclared_history_source),
     );
 
     // The declared count cannot be satisfied by repeating the same key.
@@ -679,7 +679,7 @@ test "complete snapshot rejects ordering and invalid checkpoints" {
     var duplicate_source: std.Io.Reader = .fixed(duplicate.written());
     try testing.expectError(
         error.DuplicateScreen,
-        decode(&duplicate_source, testing.io, testing.allocator),
+        decode(testing.allocator, testing.io, &duplicate_source),
     );
 
     // The declared count cannot be satisfied by repeating one HISTORY key.
@@ -706,7 +706,7 @@ test "complete snapshot rejects ordering and invalid checkpoints" {
     );
     try testing.expectError(
         error.DuplicateHistory,
-        decode(&duplicate_history_source, testing.io, testing.allocator),
+        decode(testing.allocator, testing.io, &duplicate_history_source),
     );
 }
 
@@ -726,7 +726,7 @@ test "complete snapshot leaves continuation bytes unread" {
     try encoded.writer.writeAll("pty");
 
     var source: std.Io.Reader = .fixed(encoded.written());
-    var restored = try decode(&source, testing.io, testing.allocator);
+    var restored = try decode(testing.allocator, testing.io, &source);
     defer restored.deinit(testing.allocator);
 
     var continuation: [3]u8 = undefined;
@@ -736,16 +736,16 @@ test "complete snapshot leaves continuation bytes unread" {
     var exact_source: std.Io.Reader = .fixed(encoded.written());
     try testing.expectError(
         error.TrailingData,
-        decodeExact(&exact_source, testing.io, testing.allocator),
+        decodeExact(testing.allocator, testing.io, &exact_source),
     );
 
     var bounded_source: std.Io.Reader = .fixed(
         encoded.written()[0..snapshot_len],
     );
     var bounded = try decodeExact(
-        &bounded_source,
-        testing.io,
         testing.allocator,
+        testing.io,
+        &bounded_source,
     );
     defer bounded.deinit(testing.allocator);
 }
@@ -765,9 +765,9 @@ test "complete snapshots decode sequentially from one reader" {
     try encode(testing.allocator, &encoded.writer, &t);
 
     var source: std.Io.Reader = .fixed(encoded.written());
-    var first = try decode(&source, testing.io, testing.allocator);
+    var first = try decode(testing.allocator, testing.io, &source);
     defer first.deinit(testing.allocator);
-    var second = try decode(&source, testing.io, testing.allocator);
+    var second = try decode(testing.allocator, testing.io, &source);
     defer second.deinit(testing.allocator);
     try testing.expectError(error.EndOfStream, source.takeByte());
 }

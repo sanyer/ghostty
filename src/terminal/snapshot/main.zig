@@ -112,6 +112,11 @@
 //! that deliver live PTY data before history finishes must multiplex that data
 //! outside this ordered snapshot record sequence.
 //!
+//! ```zig
+//! var terminal = try snapshot.decode(alloc, io, &reader);
+//! defer terminal.deinit(alloc);
+//! ```
+//!
 //! Use `snapshot.decodeExact` for a bounded file or buffer that must contain
 //! only one snapshot. It preserves the stricter end-of-file check, which may
 //! block when used with a live stream.
@@ -124,9 +129,16 @@ pub const hyperlink = @import("hyperlink.zig");
 pub const page = @import("page.zig");
 pub const record = @import("record.zig");
 pub const screen = @import("screen.zig");
-pub const snapshot = @import("snapshot.zig");
 pub const style = @import("style.zig");
 pub const terminal = @import("terminal.zig");
+
+const codec = @import("snapshot.zig");
+pub const EncodeError = codec.EncodeError;
+pub const DecodeError = codec.DecodeError;
+pub const DecodeExactError = codec.DecodeExactError;
+pub const encode = codec.encode;
+pub const decode = codec.decode;
+pub const decodeExact = codec.decodeExact;
 
 test {
     @import("std").testing.refAllDecls(@This());
