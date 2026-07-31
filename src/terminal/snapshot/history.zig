@@ -288,9 +288,7 @@ pub fn decode(
         // the destination PageList to allocate the final backing memory once.
         var decoder: page.Decoder = undefined;
         try decoder.init(source);
-        var allocation = try terminal_screen.pages.allocatePage(
-            decoder.capacity(),
-        );
+        var allocation = try terminal_screen.pages.allocatePage(decoder.capacity());
         defer allocation.deinit();
         try decoder.decode(allocation.page(), alloc);
 
@@ -319,9 +317,7 @@ pub fn decode(
 }
 
 fn hasSemanticPrompt(terminal_page: *const TerminalPage) bool {
-    const rows = terminal_page.rows.ptr(
-        terminal_page.memory,
-    )[0..terminal_page.size.rows];
+    const rows = terminal_page.rows.ptr(terminal_page.memory)[0..terminal_page.size.rows];
     for (rows) |row| {
         if (row.semantic_prompt != .none) return true;
 
@@ -335,9 +331,7 @@ fn hasSemanticPrompt(terminal_page: *const TerminalPage) bool {
     return false;
 }
 
-const test_header_fixture = test_fixture.parse(
-    @embedFile("testdata/history-header-v1.hex"),
-);
+const test_header_fixture = test_fixture.parse(@embedFile("testdata/history-header-v1.hex"));
 
 test "HISTORY header golden encoding and decoding" {
     const expected: Header = .{

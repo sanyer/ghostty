@@ -271,13 +271,8 @@ fn decodePageString(
     };
 }
 
-const test_implicit_fixture = test_fixture.parse(
-    @embedFile("testdata/hyperlink-implicit-v1.hex"),
-);
-
-const test_explicit_fixture = test_fixture.parse(
-    @embedFile("testdata/hyperlink-explicit-v1.hex"),
-);
+const test_implicit_fixture = test_fixture.parse(@embedFile("testdata/hyperlink-implicit-v1.hex"));
+const test_explicit_fixture = test_fixture.parse(@embedFile("testdata/hyperlink-explicit-v1.hex"));
 
 test "golden implicit encoding" {
     const value: terminal_hyperlink.Hyperlink = .{

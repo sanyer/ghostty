@@ -547,17 +547,9 @@ fn pageHyperlink(
     };
 }
 
-const test_page_fixture = test_fixture.parse(
-    @embedFile("testdata/page-v1.hex"),
-);
-
-const test_header_fixture = test_fixture.parse(
-    @embedFile("testdata/page-header-v1.hex"),
-);
-
-const test_empty_framed_page_fixture = test_fixture.parse(
-    @embedFile("testdata/page-empty-record-v1.hex"),
-);
+const test_page_fixture = test_fixture.parse(@embedFile("testdata/page-v1.hex"));
+const test_header_fixture = test_fixture.parse(@embedFile("testdata/page-header-v1.hex"));
+const test_empty_framed_page_fixture = test_fixture.parse(@embedFile("testdata/page-empty-record-v1.hex"));
 
 test "PAGE header golden encoding and decoding" {
     const header: Header = .{

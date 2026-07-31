@@ -66,9 +66,7 @@ fn computeLen() usize {
     }
 }
 
-const test_golden_fixture = test_fixture.parse(
-    @embedFile("testdata/envelope-v1.hex"),
-);
+const test_golden_fixture = test_fixture.parse(@embedFile("testdata/envelope-v1.hex"));
 
 test "golden encoding" {
     var buf: [encoded_len]u8 = undefined;

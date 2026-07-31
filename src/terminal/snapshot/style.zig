@@ -216,9 +216,7 @@ fn computeLen() usize {
     }
 }
 
-const test_golden_fixture = test_fixture.parse(
-    @embedFile("testdata/style-v1.hex"),
-);
+const test_golden_fixture = test_fixture.parse(@embedFile("testdata/style-v1.hex"));
 
 test "golden encoding and decoding" {
     const value: terminal_style.Style = .{

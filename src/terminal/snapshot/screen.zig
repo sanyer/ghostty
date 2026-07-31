@@ -1117,13 +1117,8 @@ pub fn decodeCursorHyperlink(
     return try hyperlink.decode(reader, alloc);
 }
 
-const test_header_fixture = test_fixture.parse(
-    @embedFile("testdata/screen-header-v1.hex"),
-);
-
-const test_saved_cursor_fixture = test_fixture.parse(
-    @embedFile("testdata/screen-saved-cursor-v1.hex"),
-);
+const test_header_fixture = test_fixture.parse(@embedFile("testdata/screen-header-v1.hex"));
+const test_saved_cursor_fixture = test_fixture.parse(@embedFile("testdata/screen-saved-cursor-v1.hex"));
 
 fn testCharsetState() TerminalScreen.CharsetState {
     var result: TerminalScreen.CharsetState = .{
