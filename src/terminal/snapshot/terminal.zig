@@ -114,6 +114,11 @@
 //! is no previous character. Boolean fields are zero or one.
 //! Cursor blink and mouse shift-capture policies encode null as zero, false as
 //! one, and true as two.
+//! Canonical encoders use only the documented enum and boolean values.
+//! Decoders replace unknown semantic values with neutral native defaults,
+//! discard invalid previous codepoints, and reset each invalid scrolling axis
+//! to the terminal's full extent. Dimensions and screen count remain
+//! structural.
 //!
 //! A scrollback limit of `0xffffffffffffffff` means unlimited. Every other
 //! value is finite, including zero. The values are the source primary
@@ -124,7 +129,7 @@
 //!
 //! One bit is encoded for each column, least-significant bit first within each
 //! byte. Bit zero of the first byte is column zero. Unused high bits in the last
-//! byte are zero.
+//! byte are canonically zero and ignored by decoders.
 //!
 //! ### Dynamic RGB
 //!
@@ -143,7 +148,8 @@
 //! ```
 //!
 //! Presence values are zero or one. The corresponding RGB bytes must be zero
-//! when a value is absent.
+//! when a value is absent. Decoders treat every other presence value as absent
+//! and ignore RGB bytes belonging to an absent value.
 //!
 //! ### Palette
 //!
@@ -205,7 +211,7 @@
 //!
 //! This is the packed field order of native `ModePacked`. Its layout is
 //! well-defined and is the snapshot registry. Moving or adding a native mode
-//! therefore requires a snapshot version bump.
+//! therefore requires a snapshot version bump. Decoders ignore reserved bits.
 //!
 //! ## Field classification
 //!
@@ -290,22 +296,12 @@ const PayloadEncodeError = std.Io.Writer.Error ||
 /// Errors possible while decoding a TERMINAL payload.
 const PayloadDecodeError = std.Io.Reader.Error ||
     Allocator.Error ||
-    ValidationError ||
     error{
-        InvalidStatusDisplay,
-        InvalidCursorIsDefault,
-        InvalidCursorStyle,
-        InvalidCursorBlink,
-        InvalidShellRedraw,
-        InvalidModifyOtherKeys,
-        InvalidMouseEvent,
-        InvalidMouseFormat,
-        InvalidMouseShiftCapture,
-        InvalidMouseShape,
-        InvalidPasswordInput,
-        InvalidModes,
-        InvalidDynamicRGB,
-        InvalidTabStops,
+        /// Terminal dimensions control every following native allocation.
+        InvalidDimensions,
+
+        /// The count determines how many SCREEN and HISTORY sequences follow.
+        InvalidScreenCount,
     };
 
 /// The fixed fields at the start of every TERMINAL payload.
@@ -504,7 +500,7 @@ pub const Header = struct {
         );
     }
 
-    /// Decode and validate the fixed TERMINAL payload header.
+    /// Decode the fixed TERMINAL payload header, normalizing semantic values.
     pub fn decode(reader: *std.Io.Reader) PayloadDecodeError!Header {
         // Terminal geometry and its current scrolling region.
         const columns = try io.readInt(reader, u16);
@@ -520,77 +516,78 @@ pub const Header = struct {
         const status_display = enumFromInt(
             terminal_ansi.StatusDisplay,
             try reader.takeByte(),
-        ) orelse return error.InvalidStatusDisplay;
-        const active_screen_key = enumFromInt(
-            TerminalScreenKey,
-            try io.readInt(reader, u16),
-        ) orelse return error.InvalidActiveScreenKey;
+        ) orelse .main;
+        const active_screen_key_raw = try io.readInt(reader, u16);
         const screen_count = try io.readInt(reader, u16);
         const previous_raw = try io.readInt(reader, u32);
-        const previous_codepoint: ?u21 =
-            if (previous_raw == std.math.maxInt(u32))
-                null
-            else
-                std.math.cast(u21, previous_raw) orelse
-                    return error.InvalidPreviousCodepoint;
+        const previous_codepoint: ?u21 = previous: {
+            if (previous_raw == std.math.maxInt(u32)) break :previous null;
+            const value = std.math.cast(u21, previous_raw) orelse
+                break :previous null;
+            if (value > 0x10FFFF or
+                (value >= 0xD800 and value <= 0xDFFF))
+            {
+                break :previous null;
+            }
+            break :previous value;
+        };
 
         // Cursor presentation defaults shared by the screens.
         const cursor_is_default = switch (try reader.takeByte()) {
             0 => false,
             1 => true,
-            else => return error.InvalidCursorIsDefault,
+            else => true,
         };
         const cursor_default_style = enumFromInt(
             TerminalScreen.CursorStyle,
             try reader.takeByte(),
-        ) orelse return error.InvalidCursorStyle;
+        ) orelse .block;
         const cursor_default_blink: ?bool = switch (try reader.takeByte()) {
             0 => null,
             1 => false,
             2 => true,
-            else => return error.InvalidCursorBlink,
+            else => null,
         };
 
         // Terminal input, semantic redraw, and pointer behavior.
         const shell_redraw = enumFromInt(
             terminal_osc.semantic_prompt.Redraw,
             try reader.takeByte(),
-        ) orelse return error.InvalidShellRedraw;
+        ) orelse .true;
         const modify_other_keys_2 = switch (try reader.takeByte()) {
             0 => false,
             1 => true,
-            else => return error.InvalidModifyOtherKeys,
+            else => false,
         };
         const mouse_event = enumFromInt(
             terminal_mouse.Event,
             try reader.takeByte(),
-        ) orelse return error.InvalidMouseEvent;
+        ) orelse .none;
         const mouse_format = enumFromInt(
             terminal_mouse.Format,
             try reader.takeByte(),
-        ) orelse return error.InvalidMouseFormat;
+        ) orelse .x10;
         const mouse_shift_capture: ?bool = switch (try reader.takeByte()) {
             0 => null,
             1 => false,
             2 => true,
-            else => return error.InvalidMouseShiftCapture,
+            else => null,
         };
         const mouse_shape = enumFromInt(
             terminal_mouse.Shape,
             try reader.takeByte(),
-        ) orelse return error.InvalidMouseShape;
+        ) orelse .text;
         const password_input = switch (try reader.takeByte()) {
             0 => false,
             1 => true,
-            else => return error.InvalidPasswordInput,
+            else => false,
         };
 
         // Runtime, saved, and reset mode sets.
         var mode_values: [3]terminal_modes.ModePacked = undefined;
         for (&mode_values) |*value| {
             const raw = try io.readInt(reader, u64);
-            const bits = std.math.cast(ModeBits, raw) orelse
-                return error.InvalidModes;
+            const bits: ModeBits = @truncate(raw);
             value.* = @bitCast(bits);
         }
 
@@ -607,16 +604,52 @@ pub const Header = struct {
             try io.readInt(reader, u64),
         );
 
+        // Dimensions and sequence count are the only header fields that define
+        // following allocation or record boundaries.
+        if (columns == 0 or rows == 0) return error.InvalidDimensions;
+        if (screen_count != 1 and screen_count != 2) {
+            return error.InvalidScreenCount;
+        }
+
+        const scrolling_region_vertical_valid =
+            scrolling_region_top <= scrolling_region_bottom and
+            scrolling_region_bottom < rows;
+        const scrolling_region_horizontal_valid =
+            scrolling_region_left <= scrolling_region_right and
+            scrolling_region_right < columns;
+        const active_screen_key: TerminalScreenKey = active: {
+            const decoded = enumFromInt(
+                TerminalScreenKey,
+                active_screen_key_raw,
+            ) orelse break :active .primary;
+            if (decoded == .alternate and screen_count != 2) {
+                break :active .primary;
+            }
+            break :active decoded;
+        };
+
         const result: Header = .{
             .columns = columns,
             .rows = rows,
             .width_px = width_px,
             .height_px = height_px,
 
-            .scrolling_region_top = scrolling_region_top,
-            .scrolling_region_bottom = scrolling_region_bottom,
-            .scrolling_region_left = scrolling_region_left,
-            .scrolling_region_right = scrolling_region_right,
+            .scrolling_region_top = if (scrolling_region_vertical_valid)
+                scrolling_region_top
+            else
+                0,
+            .scrolling_region_bottom = if (scrolling_region_vertical_valid)
+                scrolling_region_bottom
+            else
+                rows - 1,
+            .scrolling_region_left = if (scrolling_region_horizontal_valid)
+                scrolling_region_left
+            else
+                0,
+            .scrolling_region_right = if (scrolling_region_horizontal_valid)
+                scrolling_region_right
+            else
+                columns - 1,
 
             .status_display = status_display,
             .active_screen_key = active_screen_key,
@@ -646,7 +679,6 @@ pub const Header = struct {
             .max_scrollback_bytes = max_scrollback_bytes,
             .max_scrollback_rows = max_scrollback_rows,
         };
-        try result.validate();
         return result;
     }
 
@@ -828,9 +860,7 @@ fn decodePayload(
         for (0..8) |bit| {
             const mask = @as(u8, 1) << @intCast(bit);
             const column = byte_index * 8 + bit;
-            if (column >= header.columns) {
-                if (raw & mask != 0) return error.InvalidTabStops;
-            } else if (raw & mask != 0) {
+            if (column < header.columns and raw & mask != 0) {
                 tabstops.set(column);
             }
         }
@@ -908,9 +938,6 @@ pub const DecodeError = PayloadDecodeError ||
     error{
         /// The next record is valid but is not a TERMINAL.
         UnexpectedRecordTag,
-
-        /// A wire scrollback policy does not fit the native platform.
-        ScrollbackLimitOverflow,
     };
 
 /// Decode one framed TERMINAL record directly into native terminal state.
@@ -940,10 +967,10 @@ pub fn decode(
     defer payload.deinit(alloc);
 
     const header = payload.header;
-    const max_scrollback_bytes = try nativeScrollbackLimit(
+    const max_scrollback_bytes = nativeScrollbackLimit(
         header.max_scrollback_bytes,
     );
-    const max_scrollback_lines = try nativeScrollbackLimit(
+    const max_scrollback_lines = nativeScrollbackLimit(
         header.max_scrollback_rows,
     );
 
@@ -1077,28 +1104,14 @@ fn encodeDynamicRGB(
 
 fn decodeDynamicRGB(
     reader: *std.Io.Reader,
-) (std.Io.Reader.Error || error{InvalidDynamicRGB})!DynamicRGB {
+) std.Io.Reader.Error!DynamicRGB {
     const default_present = try reader.takeByte();
     const default_rgb = try decodeRGB(reader);
-    const default: ?RGB = switch (default_present) {
-        0 => if (default_rgb.eql(.{}))
-            null
-        else
-            return error.InvalidDynamicRGB,
-        1 => default_rgb,
-        else => return error.InvalidDynamicRGB,
-    };
+    const default: ?RGB = if (default_present == 1) default_rgb else null;
 
     const override_present = try reader.takeByte();
     const override_rgb = try decodeRGB(reader);
-    const override: ?RGB = switch (override_present) {
-        0 => if (override_rgb.eql(.{}))
-            null
-        else
-            return error.InvalidDynamicRGB,
-        1 => override_rgb,
-        else => return error.InvalidDynamicRGB,
-    };
+    const override: ?RGB = if (override_present == 1) override_rgb else null;
 
     return .{ .default = default, .override = override };
 }
@@ -1119,10 +1132,12 @@ fn encodeScrollbackLimit(value: usize) HeaderInitError!?u64 {
 
 fn nativeScrollbackLimit(
     value: ?u64,
-) error{ScrollbackLimitOverflow}!?usize {
+) ?usize {
     const present = value orelse return null;
-    return std.math.cast(usize, present) orelse
-        error.ScrollbackLimitOverflow;
+    return @intCast(@min(
+        present,
+        @as(u64, std.math.maxInt(usize) - 1),
+    ));
 }
 
 const test_header: Header = header: {
@@ -1256,7 +1271,7 @@ test "TERMINAL header golden encoding and decoding" {
     }
 }
 
-test "TERMINAL header rejects invalid values" {
+test "TERMINAL header encoding rejects noncanonical values" {
     const testing = std.testing;
 
     // Semantic values are validated before encoding writes anything.
@@ -1278,39 +1293,20 @@ test "TERMINAL header rejects invalid values" {
         invalid_header.encode(&writer),
     );
     try testing.expectEqual(@as(usize, 0), writer.end);
+}
 
-    // Single-byte registries and boolean encodings reject every value just
-    // beyond their current snapshot range.
-    const ByteCase = struct {
-        offset: usize,
-        value: u8,
-        expected: anyerror,
-    };
-    const byte_cases = [_]ByteCase{
-        .{ .offset = 20, .value = 2, .expected = error.InvalidStatusDisplay },
-        .{ .offset = 21, .value = 2, .expected = error.InvalidActiveScreenKey },
-        .{ .offset = 29, .value = 2, .expected = error.InvalidCursorIsDefault },
-        .{ .offset = 30, .value = 4, .expected = error.InvalidCursorStyle },
-        .{ .offset = 31, .value = 3, .expected = error.InvalidCursorBlink },
-        .{ .offset = 32, .value = 3, .expected = error.InvalidShellRedraw },
-        .{ .offset = 33, .value = 2, .expected = error.InvalidModifyOtherKeys },
-        .{ .offset = 34, .value = 5, .expected = error.InvalidMouseEvent },
-        .{ .offset = 35, .value = 5, .expected = error.InvalidMouseFormat },
-        .{ .offset = 36, .value = 3, .expected = error.InvalidMouseShiftCapture },
-        .{ .offset = 37, .value = 34, .expected = error.InvalidMouseShape },
-        .{ .offset = 38, .value = 2, .expected = error.InvalidPasswordInput },
-        .{ .offset = 44, .value = 4, .expected = error.InvalidModes },
-        .{ .offset = 63, .value = 2, .expected = error.InvalidDynamicRGB },
-        .{ .offset = 68, .value = 1, .expected = error.InvalidDynamicRGB },
-    };
-    for (byte_cases) |case| {
-        var fixture = test_header_fixture;
-        fixture[case.offset] = case.value;
-        var reader: std.Io.Reader = .fixed(&fixture);
-        try testing.expectError(case.expected, Header.decode(&reader));
-    }
+test "TERMINAL header decoding rejects structural values" {
+    const testing = std.testing;
 
-    // Cross-field and multi-byte invariants are validated after decoding.
+    var invalid_dimensions = test_header_fixture;
+    invalid_dimensions[0] = 0;
+    invalid_dimensions[1] = 0;
+    var dimensions_reader: std.Io.Reader = .fixed(&invalid_dimensions);
+    try testing.expectError(
+        error.InvalidDimensions,
+        Header.decode(&dimensions_reader),
+    );
+
     var invalid_screen_count = test_header_fixture;
     invalid_screen_count[23] = 3;
     var screen_count_reader: std.Io.Reader = .fixed(&invalid_screen_count);
@@ -1318,35 +1314,109 @@ test "TERMINAL header rejects invalid values" {
         error.InvalidScreenCount,
         Header.decode(&screen_count_reader),
     );
+}
 
+test "TERMINAL header decoding normalizes semantic values" {
+    const testing = std.testing;
+
+    var fixture = test_header_fixture;
+
+    // Unknown enum and boolean encodings use their neutral native defaults.
+    fixture[20] = 2;
+    fixture[21] = 2;
+    fixture[22] = 0;
+    fixture[29] = 2;
+    fixture[30] = 4;
+    fixture[31] = 3;
+    fixture[32] = 3;
+    fixture[33] = 2;
+    fixture[34] = 5;
+    fixture[35] = 5;
+    fixture[36] = 3;
+    fixture[37] = 34;
+    fixture[38] = 2;
+
+    // Reserved mode bits are ignored while known low bits survive.
+    fixture[44] = 4;
+
+    // Unknown presence and nonzero absent-value bytes both become absent.
+    fixture[63] = 2;
+    fixture[68] = 1;
+    fixture[72] = 0xAA;
+
+    // An invalid scrolling region becomes the full terminal region.
+    fixture[14] = 0x04;
+    fixture[15] = 0x03;
+
+    // Surrogates cannot become native previous-character state.
+    fixture[25] = 0x00;
+    fixture[26] = 0xD8;
+    fixture[27] = 0x00;
+    fixture[28] = 0x00;
+
+    var reader: std.Io.Reader = .fixed(&fixture);
+    const decoded = try Header.decode(&reader);
+    try testing.expectEqual(terminal_ansi.StatusDisplay.main, decoded.status_display);
+    try testing.expectEqual(TerminalScreenKey.primary, decoded.active_screen_key);
+    try testing.expectEqual(@as(u16, 0), decoded.scrolling_region_top);
+    try testing.expectEqual(test_header.rows - 1, decoded.scrolling_region_bottom);
+    try testing.expectEqual(test_header.scrolling_region_left, decoded.scrolling_region_left);
+    try testing.expectEqual(test_header.scrolling_region_right, decoded.scrolling_region_right);
+    try testing.expectEqual(null, decoded.previous_codepoint);
+    try testing.expect(decoded.cursor_is_default);
+    try testing.expectEqual(TerminalScreen.CursorStyle.block, decoded.cursor_default_style);
+    try testing.expectEqual(null, decoded.cursor_default_blink);
+    try testing.expectEqual(terminal_osc.semantic_prompt.Redraw.true, decoded.shell_redraw);
+    try testing.expect(!decoded.modify_other_keys_2);
+    try testing.expectEqual(terminal_mouse.Event.none, decoded.mouse_event);
+    try testing.expectEqual(terminal_mouse.Format.x10, decoded.mouse_format);
+    try testing.expectEqual(null, decoded.mouse_shift_capture);
+    try testing.expectEqual(terminal_mouse.Shape.text, decoded.mouse_shape);
+    try testing.expect(!decoded.password_input);
+    try testing.expect(decoded.current_modes.disable_keyboard);
+    try testing.expectEqualDeep(DynamicRGB.unset, decoded.background);
+    try testing.expectEqual(null, decoded.foreground.default);
+    try testing.expectEqual(
+        RGB{ .r = 4, .g = 5, .b = 6 },
+        decoded.foreground.override.?,
+    );
+
+    // Each scrolling axis is normalized independently.
+    var invalid_horizontal = test_header_fixture;
+    invalid_horizontal[18] = 0x02;
+    invalid_horizontal[19] = 0x01;
+    var horizontal_reader: std.Io.Reader = .fixed(&invalid_horizontal);
+    const horizontal = try Header.decode(&horizontal_reader);
+    try testing.expectEqual(
+        test_header.scrolling_region_top,
+        horizontal.scrolling_region_top,
+    );
+    try testing.expectEqual(
+        test_header.scrolling_region_bottom,
+        horizontal.scrolling_region_bottom,
+    );
+    try testing.expectEqual(@as(u16, 0), horizontal.scrolling_region_left);
+    try testing.expectEqual(
+        test_header.columns - 1,
+        horizontal.scrolling_region_right,
+    );
+
+    // Alternate cannot be active when only the primary screen is declared.
     var missing_active_screen = test_header_fixture;
     missing_active_screen[23] = 1;
     var active_screen_reader: std.Io.Reader = .fixed(&missing_active_screen);
-    try testing.expectError(
-        error.InvalidActiveScreenKey,
-        Header.decode(&active_screen_reader),
+    try testing.expectEqual(
+        TerminalScreenKey.primary,
+        (try Header.decode(&active_screen_reader)).active_screen_key,
     );
 
-    var invalid_scrolling_region = test_header_fixture;
-    invalid_scrolling_region[14] = 0x04;
-    invalid_scrolling_region[15] = 0x03;
-    var scrolling_region_reader: std.Io.Reader = .fixed(
-        &invalid_scrolling_region,
-    );
-    try testing.expectError(
-        error.InvalidScrollingRegion,
-        Header.decode(&scrolling_region_reader),
-    );
-
-    var invalid_codepoint = test_header_fixture;
-    invalid_codepoint[25] = 0x00;
-    invalid_codepoint[26] = 0xd8;
-    invalid_codepoint[27] = 0x00;
-    invalid_codepoint[28] = 0x00;
-    var codepoint_reader: std.Io.Reader = .fixed(&invalid_codepoint);
-    try testing.expectError(
-        error.InvalidPreviousCodepoint,
-        Header.decode(&codepoint_reader),
+    const largest_finite = std.math.maxInt(u64) - 1;
+    try testing.expectEqual(
+        @as(usize, @intCast(@min(
+            largest_finite,
+            @as(u64, std.math.maxInt(usize) - 1),
+        ))),
+        nativeScrollbackLimit(largest_finite).?,
     );
 }
 
@@ -1469,7 +1539,7 @@ test "TERMINAL payload rejects noncanonical state" {
     try testing.expectEqual(@as(usize, 0), writer.end);
 }
 
-test "TERMINAL payload rejects tab-stop padding" {
+test "TERMINAL payload ignores tab-stop padding" {
     const testing = std.testing;
 
     var tabstops = try TerminalTabstops.init(
@@ -1504,10 +1574,17 @@ test "TERMINAL payload rejects tab-stop padding" {
     defer testing.allocator.free(invalid_padding);
     invalid_padding[last_tabstop] |= 1 << 7;
     var padding_reader: std.Io.Reader = .fixed(invalid_padding);
-    try testing.expectError(
-        error.InvalidTabStops,
-        decodePayload(&padding_reader, testing.allocator),
+    var decoded = try decodePayload(
+        &padding_reader,
+        testing.allocator,
     );
+    defer decoded.deinit(testing.allocator);
+    for (0..test_header.columns) |column| {
+        try testing.expectEqual(
+            tabstops.get(column),
+            decoded.tabstops.get(column),
+        );
+    }
 }
 
 test "TERMINAL record encodes native terminal state" {
