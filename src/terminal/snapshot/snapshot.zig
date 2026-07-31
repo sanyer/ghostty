@@ -11,6 +11,7 @@ const record = @import("record.zig");
 const screen = @import("screen.zig");
 const terminal = @import("terminal.zig");
 const Terminal = @import("../Terminal.zig");
+const terminal_kitty = @import("../kitty.zig");
 const TerminalPageList = @import("../PageList.zig");
 const TerminalScreen = @import("../Screen.zig");
 const TerminalScreenKey = @import("../ScreenSet.zig").Key;
@@ -360,6 +361,78 @@ test "complete snapshot round trip with history and alternate screen" {
     try testing.expectEqual(
         TerminalScreenKey.alternate,
         reversed_restored.screens.active_key,
+    );
+}
+
+test "complete snapshot preserves Kitty virtual placeholders" {
+    if (comptime !build_options.kitty_graphics) return error.SkipZigTest;
+
+    const testing = std.testing;
+    var t = try Terminal.init(testing.io, testing.allocator, .{
+        .cols = 2,
+        .rows = 1,
+    });
+    defer t.deinit(testing.allocator);
+
+    // Register a real virtual placement, then write its grid representation:
+    // U+10EEEE followed by row and column diacritics. The image and placement
+    // registry is intentionally omitted, but the grid content must remain
+    // decodable.
+    try t.screens.active.kitty_images.addImage(
+        testing.io,
+        testing.allocator,
+        .{ .id = 1 },
+    );
+    try t.screens.active.kitty_images.addPlacement(
+        testing.io,
+        testing.allocator,
+        1,
+        0,
+        .{
+            .location = .{ .virtual = {} },
+            .columns = 1,
+            .rows = 1,
+        },
+    );
+    try t.setAttribute(.{ .@"256_fg" = 1 });
+    try t.printString("\u{10EEEE}\u{0305}\u{0305}");
+    const source_cell = t.screens.active.pages.getCell(.{
+        .screen = .{},
+    }).?;
+    try testing.expectEqual(
+        terminal_kitty.graphics.unicode.placeholder,
+        source_cell.cell.codepoint(),
+    );
+    try testing.expect(source_cell.row.kitty_virtual_placeholder);
+
+    var encoded: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer encoded.deinit();
+    try encode(&t, &encoded);
+
+    var encoded_source: std.Io.Reader = .fixed(encoded.written());
+    var restored = try decode(
+        &encoded_source,
+        testing.io,
+        testing.allocator,
+    );
+    defer restored.deinit(testing.allocator);
+
+    const restored_cell = restored.screens.active.pages.getCell(.{
+        .screen = .{},
+    }).?;
+    try testing.expectEqual(
+        terminal_kitty.graphics.unicode.placeholder,
+        restored_cell.cell.codepoint(),
+    );
+    try testing.expect(restored_cell.cell.hasGrapheme());
+    try testing.expect(restored_cell.row.kitty_virtual_placeholder);
+    try testing.expectEqual(
+        @as(usize, 0),
+        restored.screens.active.kitty_images.images.count(),
+    );
+    try testing.expectEqual(
+        @as(usize, 0),
+        restored.screens.active.kitty_images.placements.count(),
     );
 }
 

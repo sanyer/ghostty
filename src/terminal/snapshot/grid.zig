@@ -40,6 +40,9 @@
 //!
 //! Value 3 is invalid in snapshot version 1.
 //!
+//! Native row cache flags are not encoded. In particular, the Kitty virtual
+//! placeholder hint is derived while decoding cells containing U+10EEEE.
+//!
 //! ## Cell
 //!
 //! Each cell has the following format:
@@ -233,9 +236,6 @@ pub const DecodeError = CellHeader.DecodeError || error{
 
     /// The hyperlink map cannot hold the encoded cell references.
     InvalidHyperlinkCapacity,
-
-    /// PAGE records do not support Kitty graphics placeholders.
-    UnsupportedKittyGraphics,
 };
 
 /// Decode every row and cell directly into an initialized, empty page.
@@ -306,13 +306,18 @@ pub fn decode(
                     {
                         return error.InvalidCodepoint;
                     }
-                    if (cp == kitty.graphics.unicode.placeholder) {
-                        return error.UnsupportedKittyGraphics;
-                    }
                     if (header.grapheme_count > 0 and cp == 0) {
                         return error.InvalidGrapheme;
                     }
                     cell.content = .{ .codepoint = .{ .data = cp } };
+
+                    // Kitty image and placement state is not part of this
+                    // snapshot version, but the placeholder is still a valid
+                    // Unicode scalar. Preserve it and derive the native row
+                    // hint so later row operations remain correct.
+                    if (cp == kitty.graphics.unicode.placeholder) {
+                        row.kitty_virtual_placeholder = true;
+                    }
                 },
                 .bg_color_palette => {
                     const palette = header.value.bg_color_palette;
@@ -370,9 +375,6 @@ pub fn decode(
                     (suffix >= 0xD800 and suffix <= 0xDFFF))
                 {
                     return error.InvalidCodepoint;
-                }
-                if (suffix == kitty.graphics.unicode.placeholder) {
-                    return error.UnsupportedKittyGraphics;
                 }
                 page.appendGrapheme(row, cell, suffix) catch
                     return error.InvalidGraphemeCapacity;
