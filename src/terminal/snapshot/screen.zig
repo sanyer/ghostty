@@ -238,16 +238,13 @@ pub const EncodeError = PayloadEncodeError || page.EncodeError || error{
 /// Encode one SCREEN and its minimal suffix of complete native pages.
 ///
 /// The suffix begins with the page containing the active area's first row and
-/// ends with the newest page. If encoding any record fails, the entire sequence
-/// is removed while earlier destination bytes remain.
+/// ends with the newest page. Completed records may already be emitted if a
+/// later record fails; the missing READY checkpoint makes that prefix invalid.
 pub fn encode(
     screen: *const TerminalScreen,
     key: TerminalScreenKey,
-    destination: *std.Io.Writer.Allocating,
+    destination: *record.Writer,
 ) EncodeError!void {
-    const sequence_start = destination.written().len;
-    errdefer destination.shrinkRetainingCapacity(sequence_start);
-
     // The active top may fall inside this page, leaving an incidental history
     // prefix. Every earlier complete page is history and is omitted.
     const first = screen.pages.getTopLeft(.active).node;
@@ -262,15 +259,15 @@ pub fn encode(
     // SCREEN declares exactly how many immediately following PAGE records
     // belong to it.
     {
-        var record_writer = try record.Writer.init(destination, .screen);
-        errdefer record_writer.cancel();
+        const payload = destination.begin(.screen);
+        errdefer destination.cancel();
         try encodePayload(
             screen,
             key,
             encoded_page_count,
-            record_writer.payloadWriter(),
+            payload,
         );
-        try record_writer.finish();
+        try destination.finish();
     }
 
     // PageList never compresses the active-boundary page or any later page.
@@ -1705,7 +1702,12 @@ test "framed native SCREEN and PAGE sequence" {
     );
     defer destination.deinit();
     try destination.writer.writeAll("prefix");
-    try encode(&screen, .alternate, &destination);
+    var stream: record.Writer = .init(
+        std.testing.allocator,
+        &destination.writer,
+    );
+    defer stream.deinit();
+    try encode(&screen, .alternate, &stream);
 
     try std.testing.expectEqualStrings(
         "prefix",
@@ -1849,7 +1851,12 @@ test "SCREEN encodes the minimal complete-page active suffix" {
         std.testing.allocator,
     );
     defer destination.deinit();
-    try encode(&screen, .primary, &destination);
+    var stream: record.Writer = .init(
+        std.testing.allocator,
+        &destination.writer,
+    );
+    defer stream.deinit();
+    try encode(&screen, .primary, &stream);
 
     var source: std.Io.Reader = .fixed(destination.written());
     var screen_record: record.Reader = undefined;
@@ -1964,6 +1971,11 @@ test "SCREEN restoration normalizes invalid cursor positions" {
             std.testing.allocator,
         );
         defer destination.deinit();
+        var stream: record.Writer = .init(
+            std.testing.allocator,
+            &destination.writer,
+        );
+        defer stream.deinit();
 
         var header = Header.init(&screen, .primary, 1);
         header.cursor_x = case.x;
@@ -1971,14 +1983,15 @@ test "SCREEN restoration normalizes invalid cursor positions" {
         header.cursor_flags.pending_wrap = case.pending_wrap;
         header.saved_cursor_present = false;
 
-        var screen_writer = try record.Writer.init(&destination, .screen);
-        try header.encode(screen_writer.payloadWriter());
-        try screen_writer.payloadWriter().writeByte(0);
-        try screen_writer.finish();
+        const screen_payload = stream.begin(.screen);
+        errdefer stream.cancel();
+        try header.encode(screen_payload);
+        try screen_payload.writeByte(0);
+        try stream.finish();
 
         const native_page = screen.pages.getTopLeft(.active).node
             .pageAssumeResident();
-        try page.encode(native_page, &destination);
+        try page.encode(native_page, &stream);
 
         var source: std.Io.Reader = .fixed(destination.written());
         var decoded = try decode(
@@ -2011,7 +2024,12 @@ test "SCREEN restoration rejects invalid and incomplete sequences" {
         std.testing.allocator,
     );
     defer destination.deinit();
-    try encode(&screen, .primary, &destination);
+    var stream: record.Writer = .init(
+        std.testing.allocator,
+        &destination.writer,
+    );
+    defer stream.deinit();
+    try encode(&screen, .primary, &stream);
 
     // Every truncation must fail without leaking a partially restored
     // PageList, cursor pin, or cursor-owned state.
@@ -2052,16 +2070,19 @@ test "SCREEN restoration rejects invalid and incomplete sequences" {
         std.testing.allocator,
     );
     defer empty_sequence.deinit();
+    var empty_stream: record.Writer = .init(
+        std.testing.allocator,
+        &empty_sequence.writer,
+    );
+    defer empty_stream.deinit();
     {
-        var record_writer = try record.Writer.init(
-            &empty_sequence,
-            .screen,
-        );
+        const payload = empty_stream.begin(.screen);
+        errdefer empty_stream.cancel();
         try Header.init(&screen, .primary, 0).encode(
-            record_writer.payloadWriter(),
+            payload,
         );
-        try record_writer.payloadWriter().writeByte(0);
-        try record_writer.finish();
+        try payload.writeByte(0);
+        try empty_stream.finish();
     }
     var empty_source: std.Io.Reader = .fixed(empty_sequence.written());
     try std.testing.expectError(
@@ -2083,21 +2104,25 @@ test "SCREEN sequence failure preserves preceding bytes" {
     );
     defer screen.deinit();
 
-    var failing = std.testing.FailingAllocator.init(
+    var destination: std.Io.Writer.Allocating = .init(
         std.testing.allocator,
-        .{},
-    );
-    var destination = try std.Io.Writer.Allocating.initCapacity(
-        failing.allocator(),
-        6 + record.Header.len + Header.len + 1,
     );
     defer destination.deinit();
     try destination.writer.writeAll("prefix");
 
-    failing.fail_index = failing.alloc_index;
+    var failing = std.testing.FailingAllocator.init(
+        std.testing.allocator,
+        .{ .fail_index = 0 },
+    );
+    var stream: record.Writer = .init(
+        failing.allocator(),
+        &destination.writer,
+    );
+    defer stream.deinit();
+
     try std.testing.expectError(
         error.WriteFailed,
-        encode(&screen, .primary, &destination),
+        encode(&screen, .primary, &stream),
     );
     try std.testing.expectEqualStrings("prefix", destination.written());
 }
@@ -2114,6 +2139,11 @@ test "SCREEN decode ignores an invalid cursor hyperlink" {
         std.testing.allocator,
     );
     defer destination.deinit();
+    var stream: record.Writer = .init(
+        std.testing.allocator,
+        &destination.writer,
+    );
+    defer stream.deinit();
 
     var header = testHeader();
     header.key = .primary;
@@ -2123,16 +2153,17 @@ test "SCREEN decode ignores an invalid cursor hyperlink" {
     header.cursor_flags.pending_wrap = false;
     header.saved_cursor_present = false;
 
-    var record_writer = try record.Writer.init(&destination, .screen);
-    try header.encode(record_writer.payloadWriter());
-    try record_writer.payloadWriter().writeByte(1); // Implicit hyperlink.
-    try io.writeInt(record_writer.payloadWriter(), u32, 1);
-    try io.writeInt(record_writer.payloadWriter(), u32, 0); // Empty URI.
-    try record_writer.finish();
+    const screen_payload = stream.begin(.screen);
+    errdefer stream.cancel();
+    try header.encode(screen_payload);
+    try screen_payload.writeByte(1); // Implicit hyperlink.
+    try io.writeInt(screen_payload, u32, 1);
+    try io.writeInt(screen_payload, u32, 0); // Empty URI.
+    try stream.finish();
 
     try page.encode(
         screen.pages.getTopLeft(.active).node.pageAssumeResident(),
-        &destination,
+        &stream,
     );
 
     var source: std.Io.Reader = .fixed(destination.written());
@@ -2151,6 +2182,11 @@ test "SCREEN decode ignores a PAGE with an empty hyperlink URI" {
         std.testing.allocator,
     );
     defer destination.deinit();
+    var stream: record.Writer = .init(
+        std.testing.allocator,
+        &destination.writer,
+    );
+    defer stream.deinit();
 
     var header = testHeader();
     header.key = .primary;
@@ -2160,10 +2196,11 @@ test "SCREEN decode ignores a PAGE with an empty hyperlink URI" {
     header.cursor_flags.pending_wrap = false;
     header.saved_cursor_present = false;
 
-    var screen_writer = try record.Writer.init(&destination, .screen);
-    try header.encode(screen_writer.payloadWriter());
-    try screen_writer.payloadWriter().writeByte(0);
-    try screen_writer.finish();
+    const screen_payload = stream.begin(.screen);
+    errdefer stream.cancel();
+    try header.encode(screen_payload);
+    try screen_payload.writeByte(0);
+    try stream.finish();
 
     const page_header: page.Header = .{
         .columns = 1,
@@ -2175,34 +2212,35 @@ test "SCREEN decode ignores a PAGE with an empty hyperlink URI" {
         .grapheme_capacity_bytes = 0,
         .string_capacity_bytes = 0,
     };
-    var page_writer = try record.Writer.init(&destination, .page);
-    try page_header.encode(page_writer.payloadWriter());
+    const page_payload = stream.begin(.page);
+    errdefer stream.cancel();
+    try page_header.encode(page_payload);
     try io.writeInt(
-        page_writer.payloadWriter(),
+        page_payload,
         terminal_hyperlink.Id,
         1,
     );
-    try page_writer.payloadWriter().writeByte(1); // Implicit hyperlink.
-    try io.writeInt(page_writer.payloadWriter(), u32, 1);
-    try io.writeInt(page_writer.payloadWriter(), u32, 0); // Empty URI.
+    try page_payload.writeByte(1); // Implicit hyperlink.
+    try io.writeInt(page_payload, u32, 1);
+    try io.writeInt(page_payload, u32, 0); // Empty URI.
 
     // One narrow codepoint cell refers to the hyperlink table entry above.
     // Since that entry is ignored, the cell must restore without a hyperlink.
-    try page_writer.payloadWriter().writeByte(0);
-    try page_writer.payloadWriter().writeAll(&.{ 0, 0, 0, 0 });
+    try page_payload.writeByte(0);
+    try page_payload.writeAll(&.{ 0, 0, 0, 0 });
     try io.writeInt(
-        page_writer.payloadWriter(),
+        page_payload,
         terminal_style.Id,
         0,
     );
     try io.writeInt(
-        page_writer.payloadWriter(),
+        page_payload,
         terminal_hyperlink.Id,
         1,
     );
-    try io.writeInt(page_writer.payloadWriter(), u32, 'A');
-    try io.writeInt(page_writer.payloadWriter(), u32, 0);
-    try page_writer.finish();
+    try io.writeInt(page_payload, u32, 'A');
+    try io.writeInt(page_payload, u32, 0);
+    try stream.finish();
 
     var source: std.Io.Reader = .fixed(destination.written());
     var decoded = try decode(

@@ -909,26 +909,25 @@ pub const EncodeError = HeaderInitError ||
 
 /// Encode terminal-wide native state as one framed TERMINAL record.
 ///
-/// State not represented by this snapshot version is ignored. Any failure
-/// removes the incomplete record while preserving bytes that were already
-/// present in `destination`.
+/// State not represented by this snapshot version is ignored. Payload failures
+/// emit no part of the TERMINAL record.
 pub fn encode(
     terminal: *const Terminal,
-    destination: *std.Io.Writer.Allocating,
+    destination: *record.Writer,
 ) EncodeError!void {
     const header = try Header.init(terminal);
 
-    var record_writer = try record.Writer.init(destination, .terminal);
-    errdefer record_writer.cancel();
+    const payload = destination.begin(.terminal);
+    errdefer destination.cancel();
     try encodePayload(
         header,
         &terminal.tabstops,
         &terminal.colors.palette,
         terminal.getPwd() orelse "",
         terminal.getTitle() orelse "",
-        record_writer.payloadWriter(),
+        payload,
     );
-    try record_writer.finish();
+    try destination.finish();
 }
 
 /// Errors possible while decoding one native TERMINAL record.
@@ -1638,7 +1637,12 @@ test "TERMINAL record encodes native terminal state" {
     // Encode and restore through the public record codec.
     var destination: std.Io.Writer.Allocating = .init(testing.allocator);
     defer destination.deinit();
-    try encode(&terminal, &destination);
+    var stream: record.Writer = .init(
+        testing.allocator,
+        &destination.writer,
+    );
+    defer stream.deinit();
+    try encode(&terminal, &stream);
 
     var source: std.Io.Reader = .fixed(destination.written());
     var restored = try decode(
@@ -1714,7 +1718,12 @@ test "TERMINAL record declares an initialized alternate screen" {
 
     var destination: std.Io.Writer.Allocating = .init(testing.allocator);
     defer destination.deinit();
-    try encode(&terminal, &destination);
+    var stream: record.Writer = .init(
+        testing.allocator,
+        &destination.writer,
+    );
+    defer stream.deinit();
+    try encode(&terminal, &stream);
 
     var source: std.Io.Reader = .fixed(destination.written());
     var restored = try decode(
@@ -1737,7 +1746,7 @@ test "TERMINAL record declares an initialized alternate screen" {
     );
 }
 
-test "TERMINAL record encoding is transactional" {
+test "TERMINAL payload failure emits no incomplete record" {
     const testing = std.testing;
 
     var terminal = try Terminal.init(testing.io, testing.allocator, .{
@@ -1749,13 +1758,18 @@ test "TERMINAL record encoding is transactional" {
     var destination: std.Io.Writer.Allocating = .init(testing.allocator);
     defer destination.deinit();
     try destination.writer.writeAll("prefix");
+    var stream: record.Writer = .init(
+        testing.allocator,
+        &destination.writer,
+    );
+    defer stream.deinit();
 
-    // Payload validation occurs after framing is reserved, so this covers the
-    // record writer's rollback path.
+    // Payload validation occurs in the reusable record scratch buffer. The
+    // invalid TERMINAL is never emitted to the destination.
     terminal.colors.palette.current[7] = .{ .r = 1, .g = 2, .b = 3 };
     try testing.expectError(
         error.InvalidPalette,
-        encode(&terminal, &destination),
+        encode(&terminal, &stream),
     );
     try testing.expectEqualStrings("prefix", destination.written());
 }
@@ -1766,9 +1780,15 @@ test "TERMINAL record decoding rejects malformed input transactionally" {
     // A valid record of another type is not accepted as TERMINAL state.
     var wrong_tag: std.Io.Writer.Allocating = .init(testing.allocator);
     defer wrong_tag.deinit();
+    var wrong_tag_stream: record.Writer = .init(
+        testing.allocator,
+        &wrong_tag.writer,
+    );
+    defer wrong_tag_stream.deinit();
     {
-        var record_writer = try record.Writer.init(&wrong_tag, .screen);
-        try record_writer.finish();
+        _ = wrong_tag_stream.begin(.screen);
+        errdefer wrong_tag_stream.cancel();
+        try wrong_tag_stream.finish();
     }
     var wrong_tag_source: std.Io.Reader = .fixed(wrong_tag.written());
     try testing.expectError(
@@ -1788,7 +1808,12 @@ test "TERMINAL record decoding rejects malformed input transactionally" {
 
     var encoded: std.Io.Writer.Allocating = .init(testing.allocator);
     defer encoded.deinit();
-    try encode(&terminal, &encoded);
+    var encoded_stream: record.Writer = .init(
+        testing.allocator,
+        &encoded.writer,
+    );
+    defer encoded_stream.deinit();
+    try encode(&terminal, &encoded_stream);
 
     for (0..encoded.written().len) |fixture_len| {
         var source: std.Io.Reader = .fixed(

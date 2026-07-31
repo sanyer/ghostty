@@ -30,7 +30,7 @@ const record = @import("record.zig");
 const Blake3 = std.crypto.hash.Blake3;
 
 /// The prefix digest exchanged by checkpoint codecs and the snapshot driver.
-pub const Digest = [Blake3.digest_length]u8;
+pub const Digest = record.PrefixDigest;
 
 comptime {
     std.debug.assert(@sizeOf(Digest) == 32);
@@ -52,21 +52,20 @@ pub const Kind = enum {
 pub const EncodeError = std.Io.Writer.Error ||
     record.Writer.FinishError;
 
-/// Append one checkpoint covering every byte already in `destination`.
+/// Append one checkpoint covering every byte already emitted by `stream`.
 ///
-/// If writing fails, the incomplete checkpoint is removed while all covered
-/// prefix bytes remain unchanged.
+/// Finalizing does not consume the running hasher. READY is therefore included
+/// as the stream continues toward FINISH.
 pub fn encode(
     kind: Kind,
-    destination: *std.Io.Writer.Allocating,
+    stream: *record.Writer,
 ) EncodeError!void {
-    var digest: Digest = undefined;
-    Blake3.hash(destination.written(), &digest, .{});
+    const digest = stream.prefixDigest();
 
-    var record_writer = try record.Writer.init(destination, kind.tag());
-    errdefer record_writer.cancel();
-    try record_writer.payloadWriter().writeAll(&digest);
-    try record_writer.finish();
+    const payload = stream.begin(kind.tag());
+    errdefer stream.cancel();
+    try payload.writeAll(&digest);
+    try stream.finish();
 }
 
 pub const DecodeError = record.Reader.InitError ||
@@ -82,15 +81,20 @@ pub const DecodeError = record.Reader.InitError ||
         TrailingData,
     };
 
-/// Decode and validate one checkpoint against its preceding-byte digest.
+/// Decode and validate one checkpoint against the running prefix digest.
 ///
-/// `expected` must be finalized before any byte of this record is included in
-/// the caller's running digest. FINISH additionally requires end-of-file.
+/// READY is consumed through the hashing reader so FINISH covers it. FINISH is
+/// consumed from the underlying source so neither checkpoint includes itself.
 pub fn decode(
     kind: Kind,
-    expected: Digest,
-    source: *std.Io.Reader,
+    stream: *record.StreamReader,
 ) DecodeError!void {
+    const expected = stream.prefixDigest();
+    const source = if (kind == .finish)
+        stream.source()
+    else
+        stream.reader();
+
     var record_reader: record.Reader = undefined;
     try record_reader.init(source);
     if (record_reader.header.tag != kind.tag()) {
@@ -120,8 +124,13 @@ test "READY golden encoding and BLAKE3-256 registry" {
 
     var snapshot: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer snapshot.deinit();
-    try snapshot.writer.writeAll(prefix);
-    try encode(.ready, &snapshot);
+    var stream: record.Writer = .init(
+        std.testing.allocator,
+        &snapshot.writer,
+    );
+    defer stream.deinit();
+    try stream.writer().writeAll(prefix);
+    try encode(.ready, &stream);
 
     try test_fixture.expectEqual(
         .bytes,
@@ -158,8 +167,10 @@ test "READY golden encoding and BLAKE3-256 registry" {
     );
 
     // Decode the checked-in record rather than the generated candidate.
-    var source: std.Io.Reader = .fixed(test_ready_fixture[prefix.len..]);
-    try decode(.ready, actual, &source);
+    var source: std.Io.Reader = .fixed(&test_ready_fixture);
+    var source_stream: record.StreamReader = .init(&source);
+    try source_stream.reader().discardAll(prefix.len);
+    try decode(.ready, &source_stream);
 }
 
 test "READY and FINISH checkpoint coverage" {
@@ -167,30 +178,38 @@ test "READY and FINISH checkpoint coverage" {
 
     var snapshot: std.Io.Writer.Allocating = .init(testing.allocator);
     defer snapshot.deinit();
-    try snapshot.writer.writeAll("prefix");
+    var stream: record.Writer = .init(
+        testing.allocator,
+        &snapshot.writer,
+    );
+    defer stream.deinit();
+    try stream.writer().writeAll("prefix");
 
     // READY covers only the bytes that precede its own record.
     const ready_offset = snapshot.written().len;
-    var ready_digest: Digest = undefined;
-    Blake3.hash(snapshot.written(), &ready_digest, .{});
-    try encode(.ready, &snapshot);
+    const ready_digest = stream.prefixDigest();
+    try encode(.ready, &stream);
 
     // History follows READY and is included by FINISH.
-    try snapshot.writer.writeAll("history");
+    try stream.writer().writeAll("history");
     const finish_offset = snapshot.written().len;
-    var finish_digest: Digest = undefined;
-    Blake3.hash(snapshot.written(), &finish_digest, .{});
-    try encode(.finish, &snapshot);
+    const finish_digest = stream.prefixDigest();
+    try encode(.finish, &stream);
 
-    var ready_source: std.Io.Reader = .fixed(
-        snapshot.written()[ready_offset..],
-    );
-    try decode(.ready, ready_digest, &ready_source);
+    // The running stream reaches both checkpoints without rehashing its prefix.
+    var source: std.Io.Reader = .fixed(snapshot.written());
+    var source_stream: record.StreamReader = .init(&source);
+    try source_stream.reader().discardAll(ready_offset);
+    try testing.expectEqual(ready_digest, source_stream.prefixDigest());
+    try decode(.ready, &source_stream);
+    try source_stream.reader().discardAll("history".len);
+    try testing.expectEqual(finish_digest, source_stream.prefixDigest());
+    try decode(.finish, &source_stream);
 
-    var finish_source: std.Io.Reader = .fixed(
-        snapshot.written()[finish_offset..],
+    try testing.expectEqual(
+        snapshot.written().len - finish_offset,
+        record.Header.len + @sizeOf(Digest),
     );
-    try decode(.finish, finish_digest, &finish_source);
 }
 
 test "checkpoint rejects wrong tags, digests, and FINISH trailing data" {
@@ -198,42 +217,68 @@ test "checkpoint rejects wrong tags, digests, and FINISH trailing data" {
 
     var snapshot: std.Io.Writer.Allocating = .init(testing.allocator);
     defer snapshot.deinit();
-    try snapshot.writer.writeAll("prefix");
+    var stream: record.Writer = .init(
+        testing.allocator,
+        &snapshot.writer,
+    );
+    defer stream.deinit();
+    try stream.writer().writeAll("prefix");
     const checkpoint_offset = snapshot.written().len;
-    var digest: Digest = undefined;
-    Blake3.hash(snapshot.written(), &digest, .{});
-    try encode(.ready, &snapshot);
+    try encode(.ready, &stream);
 
-    var wrong_tag: std.Io.Reader = .fixed(
+    var wrong_tag_source: std.Io.Reader = .fixed(
         snapshot.written()[checkpoint_offset..],
     );
+    var wrong_tag: record.StreamReader = .init(&wrong_tag_source);
     try testing.expectError(
         error.UnexpectedRecordTag,
-        decode(.finish, digest, &wrong_tag),
+        decode(.finish, &wrong_tag),
     );
 
-    var invalid_digest = digest;
-    invalid_digest[0] ^= 1;
-    var invalid_digest_source: std.Io.Reader = .fixed(
-        snapshot.written()[checkpoint_offset..],
+    // Build a correctly framed checkpoint containing an unrelated digest.
+    var invalid: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer invalid.deinit();
+    var invalid_stream: record.Writer = .init(
+        testing.allocator,
+        &invalid.writer,
     );
+    defer invalid_stream.deinit();
+    try invalid_stream.writer().writeAll("prefix");
+    var invalid_digest = invalid_stream.prefixDigest();
+    invalid_digest[0] ^= 1;
+    const invalid_payload = invalid_stream.begin(.ready);
+    errdefer invalid_stream.cancel();
+    try invalid_payload.writeAll(&invalid_digest);
+    try invalid_stream.finish();
+
+    var invalid_digest_source: std.Io.Reader = .fixed(invalid.written());
+    var invalid_digest_stream: record.StreamReader = .init(
+        &invalid_digest_source,
+    );
+    try invalid_digest_stream.reader().discardAll("prefix".len);
     try testing.expectError(
         error.InvalidDigest,
-        decode(.ready, invalid_digest, &invalid_digest_source),
+        decode(.ready, &invalid_digest_stream),
     );
 
     var finished: std.Io.Writer.Allocating = .init(testing.allocator);
     defer finished.deinit();
-    try finished.writer.writeAll("prefix");
-    const finish_offset = finished.written().len;
-    try encode(.finish, &finished);
+    var finished_stream: record.Writer = .init(
+        testing.allocator,
+        &finished.writer,
+    );
+    defer finished_stream.deinit();
+    try finished_stream.writer().writeAll("prefix");
+    try encode(.finish, &finished_stream);
     try finished.writer.writeByte(0);
 
-    var trailing_source: std.Io.Reader = .fixed(
-        finished.written()[finish_offset..],
+    var trailing_source: std.Io.Reader = .fixed(finished.written());
+    var trailing_stream: record.StreamReader = .init(
+        &trailing_source,
     );
+    try trailing_stream.reader().discardAll("prefix".len);
     try testing.expectError(
         error.TrailingData,
-        decode(.finish, digest, &trailing_source),
+        decode(.finish, &trailing_stream),
     );
 }

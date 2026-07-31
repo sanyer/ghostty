@@ -162,16 +162,13 @@ pub const EncodeError = Allocator.Error ||
 /// Encode one screen's HISTORY and its complete historical pages.
 ///
 /// Pages are encoded newest-to-oldest. Compressed source pages are inspected
-/// without changing their storage state. On failure, the entire sequence is
-/// removed while earlier destination bytes remain.
+/// without changing their storage state. Completed records may already be
+/// emitted if a later page fails.
 pub fn encode(
     terminal_screen: *const TerminalScreen,
     key: TerminalScreenKey,
-    destination: *std.Io.Writer.Allocating,
+    destination: *record.Writer,
 ) EncodeError!void {
-    const sequence_start = destination.written().len;
-    errdefer destination.shrinkRetainingCapacity(sequence_start);
-
     // SCREEN begins at the page containing the active area's first row. Its
     // leading rows are already resident; every previous complete page belongs
     // to this HISTORY sequence.
@@ -205,10 +202,10 @@ pub fn encode(
     // HISTORY declares exactly how many PAGE records follow and how their rows
     // combine with the overlap already carried by SCREEN.
     {
-        var record_writer = try record.Writer.init(destination, .history);
-        errdefer record_writer.cancel();
-        try header.encode(record_writer.payloadWriter());
-        try record_writer.finish();
+        const payload = destination.begin(.history);
+        errdefer destination.cancel();
+        try header.encode(payload);
+        try destination.finish();
     }
 
     // Walk backward so each page can be prepended by the decoder immediately.
@@ -432,13 +429,18 @@ test "HISTORY encodes newest first and restores complete history" {
         std.testing.allocator,
     );
     defer destination.deinit();
-    try screen.encode(&source_screen, .primary, &destination);
+    var stream: record.Writer = .init(
+        std.testing.allocator,
+        &destination.writer,
+    );
+    defer stream.deinit();
+    try screen.encode(&source_screen, .primary, &stream);
     const history_offset = destination.written().len;
 
     _ = source_screen.pages.compress(.full);
     const oldest_storage = oldest_history.storage();
     const newest_storage = newest_history.storage();
-    try encode(&source_screen, .primary, &destination);
+    try encode(&source_screen, .primary, &stream);
     try std.testing.expectEqual(oldest_storage, oldest_history.storage());
     try std.testing.expectEqual(newest_storage, newest_history.storage());
 
@@ -645,7 +647,12 @@ test "HISTORY encodes and restores an empty sequence" {
         std.testing.allocator,
     );
     defer destination.deinit();
-    try encode(&terminal_screen, .primary, &destination);
+    var stream: record.Writer = .init(
+        std.testing.allocator,
+        &destination.writer,
+    );
+    defer stream.deinit();
+    try encode(&terminal_screen, .primary, &stream);
 
     var inspect_source: std.Io.Reader = .fixed(destination.written());
     var history_record: record.Reader = undefined;
@@ -705,9 +712,15 @@ test "HISTORY accepts row metadata mismatches and rejects structural ones" {
             std.testing.allocator,
         );
         defer destination.deinit();
-        var record_writer = try record.Writer.init(&destination, .history);
-        try header.encode(record_writer.payloadWriter());
-        try record_writer.finish();
+        var stream: record.Writer = .init(
+            std.testing.allocator,
+            &destination.writer,
+        );
+        defer stream.deinit();
+        const payload = stream.begin(.history);
+        errdefer stream.cancel();
+        try header.encode(payload);
+        try stream.finish();
 
         var source: std.Io.Reader = .fixed(destination.written());
         try decode(
@@ -752,9 +765,15 @@ test "HISTORY accepts row metadata mismatches and rejects structural ones" {
             std.testing.allocator,
         );
         defer destination.deinit();
-        var record_writer = try record.Writer.init(&destination, .history);
-        try case.header.encode(record_writer.payloadWriter());
-        try record_writer.finish();
+        var stream: record.Writer = .init(
+            std.testing.allocator,
+            &destination.writer,
+        );
+        defer stream.deinit();
+        const payload = stream.begin(.history);
+        errdefer stream.cancel();
+        try case.header.encode(payload);
+        try stream.finish();
 
         var source: std.Io.Reader = .fixed(destination.written());
         try std.testing.expectError(

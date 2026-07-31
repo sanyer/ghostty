@@ -19,8 +19,15 @@
 //! Supported tags are in `Tag`.
 
 const std = @import("std");
+const assert = std.debug.assert;
+const Allocator = std.mem.Allocator;
 const test_fixture = @import("fixture.zig");
 const io = @import("io.zig");
+
+const Blake3 = std.crypto.hash.Blake3;
+
+/// The running digest shared by snapshot stream codecs and checkpoints.
+pub const PrefixDigest = [Blake3.digest_length]u8;
 
 /// CRC32C as specified by the snapshot format. Zig names this standard
 /// parameter set after its iSCSI use.
@@ -57,7 +64,7 @@ pub const Header = struct {
     comptime {
         // This size is part of the wire format. If it changes, the snapshot
         // version and golden fixtures must also change.
-        std.debug.assert(len == 10);
+        assert(len == 10);
     }
 
     /// Determines how the payload is decoded.
@@ -142,71 +149,140 @@ pub const Checksum = struct {
     }
 };
 
-/// Builds one complete record.
+/// Streams complete records while retaining only one payload at a time.
 ///
-/// This Writer requires an Allocating std.Io.Writer because the record
-/// format requires reading the full payload and rewinding in order to
-/// write the length + CRC without encoding twice.
+/// All emitted bytes pass through one unbuffered BLAKE3 writer. The scratch
+/// allocation is retained between records so a stream's peak memory is the
+/// largest record payload rather than the complete snapshot.
 pub const Writer = struct {
-    destination: *std.Io.Writer.Allocating,
-    tag: Tag,
-    record_start: usize,
+    hashing: std.Io.Writer.Hashed(Blake3),
+    scratch: std.Io.Writer.Allocating,
+    active_tag: ?Tag,
 
-    /// Reserve space for a record at the current end of `destination`.
-    /// Once this is called, callers MUST NOT write anything else to
-    /// the writer until `finish` or `cancel` is called.
     pub fn init(
-        destination: *std.Io.Writer.Allocating,
-        tag: Tag,
-    ) std.Io.Writer.Error!Writer {
-        const record_start = destination.written().len;
-        errdefer destination.shrinkRetainingCapacity(record_start);
-        try destination.writer.splatByteAll(0, Header.len);
+        alloc: Allocator,
+        destination: *std.Io.Writer,
+    ) Writer {
         return .{
-            .destination = destination,
-            .tag = tag,
-            .record_start = record_start,
+            .hashing = destination.hashed(Blake3.init(.{}), &.{}),
+            .scratch = .init(alloc),
+            .active_tag = null,
         };
     }
 
-    /// Return the writer through which the payload is encoded exactly once.
-    pub fn payloadWriter(self: *Writer) *std.Io.Writer {
-        return &self.destination.writer;
+    pub fn deinit(self: *Writer) void {
+        assert(self.active_tag == null);
+        assert(self.scratch.writer.end == 0);
+        self.scratch.deinit();
+        self.* = undefined;
     }
 
-    pub const FinishError = error{
+    /// Return the digest-updating writer for unframed snapshot bytes.
+    pub fn writer(self: *Writer) *std.Io.Writer {
+        assert(self.active_tag == null);
+        return &self.hashing.writer;
+    }
+
+    /// Begin one record and return its reusable payload writer.
+    pub fn begin(self: *Writer, tag: Tag) *std.Io.Writer {
+        assert(self.active_tag == null);
+        assert(self.scratch.writer.end == 0);
+        self.active_tag = tag;
+        return &self.scratch.writer;
+    }
+
+    pub const FinishError = std.Io.Writer.Error || error{
         /// The payload cannot be represented by the record's `u32` length.
         PayloadTooLarge,
     };
 
-    /// Marked the completed record with the payload length and CRC32C.
+    /// Finish and emit the active record's header followed by its payload.
+    ///
+    /// Payload validation failures occur before this function and emit no part
+    /// of the record. A destination failure here may have emitted a prefix.
     pub fn finish(self: *Writer) FinishError!void {
-        const bytes = self.destination.written();
-        const payload_start = self.record_start + Header.len;
+        assert(self.active_tag != null);
+        const tag = self.active_tag.?;
+        defer self.cancel();
+
+        const payload = self.scratch.written();
         const payload_len = std.math.cast(
             u32,
-            bytes.len - payload_start,
+            payload.len,
         ) orelse return error.PayloadTooLarge;
-        const payload = bytes[payload_start..];
 
-        // Calculate our CRC
-        var checksum: Checksum = .init(self.tag, payload_len);
+        // The CRC prefix contains the payload length, so checksum the retained
+        // payload only after its final length is known.
+        var checksum: Checksum = .init(tag, payload_len);
         checksum.writer().writeAll(payload) catch unreachable;
 
-        // Build the header and encode it directly into the header
         const header: Header = .{
-            .tag = self.tag,
+            .tag = tag,
             .payload_len = payload_len,
             .crc32c = checksum.final(),
         };
-        var header_writer: std.Io.Writer = .fixed(bytes[self.record_start..payload_start]);
+        var header_bytes: [Header.len]u8 = undefined;
+        var header_writer: std.Io.Writer = .fixed(&header_bytes);
         header.encode(&header_writer) catch unreachable;
+
+        try self.hashing.writer.writeAll(&header_bytes);
+        try self.hashing.writer.writeAll(payload);
     }
 
-    /// Discard this record. This makes it safe to use the underlying
-    /// alloating writer again as if nothing happened.
+    /// Discard the active record without emitting any bytes.
+    ///
+    /// This is idempotent so an outer error cleanup may call it after `finish`
+    /// has already cleared state following a destination failure.
     pub fn cancel(self: *Writer) void {
-        self.destination.shrinkRetainingCapacity(self.record_start);
+        self.scratch.shrinkRetainingCapacity(0);
+        self.active_tag = null;
+    }
+
+    /// Finalize the prefix written so far without consuming the hasher.
+    pub fn prefixDigest(self: *const Writer) PrefixDigest {
+        // Checkpoints require an exact byte boundary. Writer owns this
+        // adapter and always constructs it without a buffer.
+        assert(self.active_tag == null);
+        assert(self.scratch.writer.end == 0);
+        assert(self.hashing.writer.buffer.len == 0);
+        assert(self.hashing.writer.buffered().len == 0);
+
+        var result: PrefixDigest = undefined;
+        self.hashing.hasher.final(&result);
+        return result;
+    }
+};
+
+/// Hashes snapshot bytes as they are consumed without reading ahead.
+pub const StreamReader = struct {
+    hashing: std.Io.Reader.Hashed(Blake3),
+
+    pub fn init(input: *std.Io.Reader) StreamReader {
+        return .{
+            .hashing = input.hashed(Blake3.init(.{}), &.{}),
+        };
+    }
+
+    /// Return the digest-updating reader used before and through READY.
+    pub fn reader(self: *StreamReader) *std.Io.Reader {
+        return &self.hashing.reader;
+    }
+
+    /// Return the source used to consume FINISH without hashing it.
+    pub fn source(self: *StreamReader) *std.Io.Reader {
+        return self.hashing.in;
+    }
+
+    /// Finalize the prefix consumed so far without consuming the hasher.
+    pub fn prefixDigest(self: *const StreamReader) PrefixDigest {
+        // A nonempty adapter buffer could contain bytes beyond a checkpoint.
+        // Construction is private to this type and fixes its capacity at zero.
+        assert(self.hashing.reader.buffer.len == 0);
+        assert(self.hashing.reader.bufferedLen() == 0);
+
+        var result: PrefixDigest = undefined;
+        self.hashing.hasher.final(&result);
+        return result;
     }
 };
 
@@ -437,14 +513,20 @@ test "payload limit does not consume the next record" {
     try std.testing.expectEqualStrings("next", try source.take(4));
 }
 
-test "record writer appends and backpatches framing" {
+test "record writer buffers a payload and appends framing" {
     var destination: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer destination.deinit();
     try destination.writer.writeAll("prefix");
+    var stream: Writer = .init(
+        std.testing.allocator,
+        &destination.writer,
+    );
+    defer stream.deinit();
 
-    var record_writer = try Writer.init(&destination, .page);
-    try record_writer.payloadWriter().writeAll("payload");
-    try record_writer.finish();
+    const payload = stream.begin(.page);
+    errdefer stream.cancel();
+    try payload.writeAll("payload");
+    try stream.finish();
 
     const encoded = destination.written();
     try std.testing.expectEqualStrings("prefix", encoded[0..6]);
@@ -468,10 +550,50 @@ test "record writer cancel preserves preceding bytes" {
     var destination: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer destination.deinit();
     try destination.writer.writeAll("prefix");
+    var stream: Writer = .init(
+        std.testing.allocator,
+        &destination.writer,
+    );
+    defer stream.deinit();
 
-    var record_writer = try Writer.init(&destination, .page);
-    try record_writer.payloadWriter().writeAll("partial");
-    record_writer.cancel();
+    const partial = stream.begin(.page);
+    errdefer stream.cancel();
+    try partial.writeAll("partial");
+    const scratch_capacity = stream.scratch.writer.buffer.len;
+    stream.cancel();
 
     try std.testing.expectEqualStrings("prefix", destination.written());
+    try std.testing.expectEqual(
+        scratch_capacity,
+        stream.scratch.writer.buffer.len,
+    );
+
+    // Cancel retains the allocation but leaves it ready for the next record.
+    const next = stream.begin(.page);
+    try next.writeAll("next");
+    try stream.finish();
+
+    var source: std.Io.Reader = .fixed(destination.written()[6..]);
+    var record_reader: Reader = undefined;
+    try record_reader.init(&source);
+    try std.testing.expectEqualStrings(
+        "next",
+        try record_reader.payloadReader().take(4),
+    );
+    try record_reader.finish();
+}
+
+test "record writer clears active state after destination failure" {
+    // The header fits but the payload does not, leaving a permitted partial
+    // record in the destination while the reusable writer becomes idle again.
+    var destination_bytes: [Header.len]u8 = undefined;
+    var destination: std.Io.Writer = .fixed(&destination_bytes);
+    var stream: Writer = .init(std.testing.allocator, &destination);
+    defer stream.deinit();
+
+    const payload = stream.begin(.page);
+    try payload.writeByte(0);
+    try std.testing.expectError(error.WriteFailed, stream.finish());
+    try std.testing.expectEqual(@as(?Tag, null), stream.active_tag);
+    try std.testing.expectEqual(@as(usize, 0), stream.scratch.writer.end);
 }

@@ -77,20 +77,26 @@
 //!
 //! ## Encoding
 //!
-//! Encode a complete snapshot into an empty allocating writer:
+//! Encode a complete snapshot into any writer:
 //!
 //! ```zig
 //! var output: std.Io.Writer.Allocating = .init(alloc);
 //! defer output.deinit();
 //!
-//! try snapshot.encode(&terminal, &output);
+//! try snapshot.encode(alloc, &output.writer, &terminal);
 //!
 //! const bytes = output.written();
 //! ```
 //!
-//! We have to use an allocating writer because record formats require
-//! encoding the length and CRC in the header, so we need a seekable
-//! format.
+//! Encoding begins at the writer's current position, so unrelated bytes may
+//! precede the snapshot. The encoder buffers only the current record payload
+//! to calculate its length and CRC32C; completed records stream immediately
+//! and BLAKE3 checkpoint coverage is updated incrementally. Buffering is an
+//! encoder implementation detail, not a requirement of the wire format.
+//!
+//! A failure may leave prior complete records, or a partial record if the
+//! destination itself fails. Such a prefix has no valid FINISH checkpoint and
+//! cannot be restored as a complete snapshot.
 //!
 //! Each record type usually exposes an `encode` function that encodes
 //! a complete record, such as `screen.encode`.

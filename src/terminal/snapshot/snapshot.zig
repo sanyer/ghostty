@@ -24,61 +24,58 @@ const test_complete_fixture = test_fixture.parse(
 pub const EncodeError = terminal.EncodeError ||
     screen.EncodeError ||
     history.EncodeError ||
-    checkpoint.EncodeError ||
-    error{
-        /// A snapshot envelope must begin at byte zero.
-        DestinationNotEmpty,
-    };
+    checkpoint.EncodeError;
 
 /// Encode one complete terminal snapshot.
 ///
-/// `destination` must be empty because checkpoint digests cover every byte
-/// from the snapshot envelope onward. The operation is transactional: any
-/// failure restores the destination to empty.
+/// Encoding starts at the destination's current position. Only one record
+/// payload is buffered at a time; completed records stream immediately. On
+/// failure, the destination may contain a snapshot prefix without its required
+/// checkpoints, and an output failure may have written part of a record.
 pub fn encode(
+    alloc: Allocator,
+    destination: *std.Io.Writer,
     t: *const Terminal,
-    destination: *std.Io.Writer.Allocating,
 ) EncodeError!void {
-    // We require empty for checkpoint digests
-    if (destination.written().len != 0) return error.DestinationNotEmpty;
-    errdefer destination.shrinkRetainingCapacity(0);
+    var stream: record.Writer = .init(alloc, destination);
+    defer stream.deinit();
 
     // 1. Envelope
-    try envelope.encode(&destination.writer);
+    try envelope.encode(stream.writer());
 
     // 2. Terminal
-    try terminal.encode(t, destination);
+    try terminal.encode(t, &stream);
 
     // 3. Primary and alt screen
     try screen.encode(
         t.screens.get(.primary).?,
         .primary,
-        destination,
+        &stream,
     );
     if (t.screens.get(.alternate)) |alternate| try screen.encode(
         alternate,
         .alternate,
-        destination,
+        &stream,
     );
 
     // 4. Ready checkpoint. In the future we'll put our continuation
     // state before this so pty bytes can also flow.
-    try checkpoint.encode(.ready, destination);
+    try checkpoint.encode(.ready, &stream);
 
     // 5. History
     try history.encode(
         t.screens.get(.primary).?,
         .primary,
-        destination,
+        &stream,
     );
     if (t.screens.get(.alternate)) |alternate| try history.encode(
         alternate,
         .alternate,
-        destination,
+        &stream,
     );
 
     // 6. Finish
-    try checkpoint.encode(.finish, destination);
+    try checkpoint.encode(.finish, &stream);
 }
 
 /// Errors possible while restoring one complete terminal snapshot.
@@ -113,11 +110,10 @@ pub fn decode(
     io_: std.Io,
     alloc: Allocator,
 ) DecodeError!Terminal {
-    // Keep this reader unbuffered so the hasher never reads past a checkpoint
-    // boundary. Record readers provide their own bounded buffers.
-    const Blake3 = std.crypto.hash.Blake3;
-    var hashing = source.hashed(Blake3.init(.{}), &.{});
-    const reader = &hashing.reader;
+    // StreamReader owns a zero-buffer hashing adapter, making checkpoint
+    // boundaries part of its API rather than a caller-maintained invariant.
+    var stream: record.StreamReader = .init(source);
+    const reader = stream.reader();
 
     // Read the envelope, which is currently just a verification step.
     try envelope.decode(reader);
@@ -179,9 +175,7 @@ pub fn decode(
 
     // READY covers the exact envelope-through-SCREEN prefix. Finalizing does
     // not consume the hasher, so the same stream continues toward FINISH.
-    var digest: checkpoint.Digest = undefined;
-    hashing.hasher.final(&digest);
-    try checkpoint.decode(.ready, digest, reader);
+    try checkpoint.decode(.ready, &stream);
 
     // HISTORY keys make this sequence order-independent just like SCREEN.
     // Although a decoder may publish recent pages as they validate, any later
@@ -206,8 +200,7 @@ pub fn decode(
 
     // FINISH authenticates READY and all history. Decode it directly from the
     // underlying reader so the digest does not include FINISH itself.
-    hashing.hasher.final(&digest);
-    try checkpoint.decode(.finish, digest, source);
+    try checkpoint.decode(.finish, &stream);
 
     const keys = [_]TerminalScreenKey{ .primary, .alternate };
     if (comptime build_options.slow_runtime_safety) {
@@ -311,7 +304,7 @@ test "complete snapshot round trip with history and alternate screen" {
 
     var encoded: std.Io.Writer.Allocating = .init(testing.allocator);
     defer encoded.deinit();
-    try encode(&t, &encoded);
+    try encode(testing.allocator, &encoded.writer, &t);
     try testing.expectEqualDeep(source_memory, primary.pages.memoryStats());
     try test_fixture.expectEqual(
         .snapshot,
@@ -320,6 +313,29 @@ test "complete snapshot round trip with history and alternate screen" {
         &test_complete_fixture,
         encoded.written(),
     );
+
+    // A complete snapshot can stream through a non-allocating destination.
+    // Independently hash that output so both its length and complete byte
+    // sequence are checked without retaining a second snapshot copy.
+    var discard: std.Io.Writer.Discarding = .init(&.{});
+    var hashing = discard.writer.hashed(
+        std.crypto.hash.Blake3.init(.{}),
+        &.{},
+    );
+    try encode(testing.allocator, &hashing.writer, &t);
+    try testing.expectEqual(
+        @as(u64, test_complete_fixture.len),
+        discard.fullCount(),
+    );
+    var expected_digest: checkpoint.Digest = undefined;
+    std.crypto.hash.Blake3.hash(
+        &test_complete_fixture,
+        &expected_digest,
+        .{},
+    );
+    var actual_digest: checkpoint.Digest = undefined;
+    hashing.hasher.final(&actual_digest);
+    try testing.expectEqual(expected_digest, actual_digest);
 
     // Restore the checked-in reference rather than the just-generated bytes.
     var encoded_source: std.Io.Reader = .fixed(&test_complete_fixture);
@@ -354,7 +370,7 @@ test "complete snapshot round trip with history and alternate screen" {
     // SCREEN, PAGE, and HISTORY fields and both checkpoint boundaries.
     var reencoded: std.Io.Writer.Allocating = .init(testing.allocator);
     defer reencoded.deinit();
-    try encode(&restored, &reencoded);
+    try encode(testing.allocator, &reencoded.writer, &restored);
     try testing.expectEqualStrings(
         &test_complete_fixture,
         reencoded.written(),
@@ -363,18 +379,27 @@ test "complete snapshot round trip with history and alternate screen" {
     // SCREEN and HISTORY keys make both sequence groups order independent.
     var reversed: std.Io.Writer.Allocating = .init(testing.allocator);
     defer reversed.deinit();
-    try envelope.encode(&reversed.writer);
-    try terminal.encode(&t, &reversed);
-    try screen.encode(t.screens.get(.alternate).?, .alternate, &reversed);
-    try screen.encode(primary, .primary, &reversed);
-    try checkpoint.encode(.ready, &reversed);
+    var reversed_stream: record.Writer = .init(
+        testing.allocator,
+        &reversed.writer,
+    );
+    defer reversed_stream.deinit();
+    try envelope.encode(reversed_stream.writer());
+    try terminal.encode(&t, &reversed_stream);
+    try screen.encode(
+        t.screens.get(.alternate).?,
+        .alternate,
+        &reversed_stream,
+    );
+    try screen.encode(primary, .primary, &reversed_stream);
+    try checkpoint.encode(.ready, &reversed_stream);
     try history.encode(
         t.screens.get(.alternate).?,
         .alternate,
-        &reversed,
+        &reversed_stream,
     );
-    try history.encode(primary, .primary, &reversed);
-    try checkpoint.encode(.finish, &reversed);
+    try history.encode(primary, .primary, &reversed_stream);
+    try checkpoint.encode(.finish, &reversed_stream);
 
     var reversed_source: std.Io.Reader = .fixed(reversed.written());
     var reversed_restored = try decode(
@@ -440,7 +465,7 @@ test "complete snapshot preserves Kitty virtual placeholders" {
 
     var encoded: std.Io.Writer.Allocating = .init(testing.allocator);
     defer encoded.deinit();
-    try encode(&t, &encoded);
+    try encode(testing.allocator, &encoded.writer, &t);
 
     var encoded_source: std.Io.Reader = .fixed(encoded.written());
     var restored = try decode(
@@ -469,7 +494,7 @@ test "complete snapshot preserves Kitty virtual placeholders" {
     );
 }
 
-test "complete snapshot encoding is transactional" {
+test "complete snapshot encoding streams from the current writer position" {
     const testing = std.testing;
 
     var t = try Terminal.init(testing.io, testing.allocator, .{
@@ -478,27 +503,44 @@ test "complete snapshot encoding is transactional" {
     });
     defer t.deinit(testing.allocator);
 
-    // A complete snapshot cannot be appended after unrelated bytes because
-    // its envelope and checkpoint coverage both begin at byte zero.
+    // Prefix hashing begins with this call's envelope, independent of bytes
+    // that were already present in the destination.
     var nonempty: std.Io.Writer.Allocating = .init(testing.allocator);
     defer nonempty.deinit();
     try nonempty.writer.writeAll("prefix");
-    try testing.expectError(
-        error.DestinationNotEmpty,
-        encode(&t, &nonempty),
+    const snapshot_offset = nonempty.written().len;
+    try encode(testing.allocator, &nonempty.writer, &t);
+    try testing.expectEqualStrings(
+        "prefix",
+        nonempty.written()[0..snapshot_offset],
     );
-    try testing.expectEqualStrings("prefix", nonempty.written());
+    var appended_source: std.Io.Reader = .fixed(
+        nonempty.written()[snapshot_offset..],
+    );
+    var appended = try decode(
+        &appended_source,
+        testing.io,
+        testing.allocator,
+    );
+    appended.deinit(testing.allocator);
 
-    // A failure after validation enters a record codec still rolls back every
-    // preceding record in this complete snapshot operation.
+    // Payload validation happens in the record-local scratch allocation. The
+    // already-streamed envelope remains, but no partial TERMINAL is emitted.
     t.colors.palette.current[7] = .{ .r = 1, .g = 2, .b = 3 };
     var destination: std.Io.Writer.Allocating = .init(testing.allocator);
     defer destination.deinit();
+    try destination.writer.writeAll("prefix");
     try testing.expectError(
         error.InvalidPalette,
-        encode(&t, &destination),
+        encode(testing.allocator, &destination.writer, &t),
     );
-    try testing.expectEqual(@as(usize, 0), destination.written().len);
+    var expected_envelope: [envelope.encoded_len]u8 = undefined;
+    var envelope_writer: std.Io.Writer = .fixed(&expected_envelope);
+    try envelope.encode(&envelope_writer);
+    try testing.expectEqualStrings(
+        &expected_envelope,
+        destination.written()["prefix".len..],
+    );
 }
 
 test "complete snapshot rejects ordering checkpoints and trailing data" {
@@ -515,9 +557,14 @@ test "complete snapshot rejects ordering checkpoints and trailing data" {
     // primary SCREEN before READY.
     var reordered: std.Io.Writer.Allocating = .init(testing.allocator);
     defer reordered.deinit();
-    try envelope.encode(&reordered.writer);
-    try terminal.encode(&t, &reordered);
-    try history.encode(primary, .primary, &reordered);
+    var reordered_stream: record.Writer = .init(
+        testing.allocator,
+        &reordered.writer,
+    );
+    defer reordered_stream.deinit();
+    try envelope.encode(reordered_stream.writer());
+    try terminal.encode(&t, &reordered_stream);
+    try history.encode(primary, .primary, &reordered_stream);
     var reordered_source: std.Io.Reader = .fixed(reordered.written());
     try testing.expectError(
         error.UnexpectedRecordTag,
@@ -528,15 +575,21 @@ test "complete snapshot rejects ordering checkpoints and trailing data" {
     // digest so the full driver, rather than record CRC validation, rejects it.
     var invalid_ready: std.Io.Writer.Allocating = .init(testing.allocator);
     defer invalid_ready.deinit();
-    try envelope.encode(&invalid_ready.writer);
-    try terminal.encode(&t, &invalid_ready);
-    try screen.encode(primary, .primary, &invalid_ready);
-    var record_writer = try record.Writer.init(&invalid_ready, .ready);
-    try record_writer.payloadWriter().splatByteAll(
+    var invalid_ready_stream: record.Writer = .init(
+        testing.allocator,
+        &invalid_ready.writer,
+    );
+    defer invalid_ready_stream.deinit();
+    try envelope.encode(invalid_ready_stream.writer());
+    try terminal.encode(&t, &invalid_ready_stream);
+    try screen.encode(primary, .primary, &invalid_ready_stream);
+    const ready_payload = invalid_ready_stream.begin(.ready);
+    errdefer invalid_ready_stream.cancel();
+    try ready_payload.splatByteAll(
         0,
         @sizeOf(checkpoint.Digest),
     );
-    try record_writer.finish();
+    try invalid_ready_stream.finish();
     var invalid_ready_source: std.Io.Reader = .fixed(
         invalid_ready.written(),
     );
@@ -548,7 +601,7 @@ test "complete snapshot rejects ordering checkpoints and trailing data" {
     // FINISH is the exact end of a complete snapshot.
     var trailing: std.Io.Writer.Allocating = .init(testing.allocator);
     defer trailing.deinit();
-    try encode(&t, &trailing);
+    try encode(testing.allocator, &trailing.writer, &t);
     try trailing.writer.writeByte(0);
     var trailing_source: std.Io.Reader = .fixed(trailing.written());
     try testing.expectError(
@@ -559,9 +612,14 @@ test "complete snapshot rejects ordering checkpoints and trailing data" {
     // A SCREEN key must name one of the slots declared by TERMINAL.
     var undeclared: std.Io.Writer.Allocating = .init(testing.allocator);
     defer undeclared.deinit();
-    try envelope.encode(&undeclared.writer);
-    try terminal.encode(&t, &undeclared);
-    try screen.encode(primary, .alternate, &undeclared);
+    var undeclared_stream: record.Writer = .init(
+        testing.allocator,
+        &undeclared.writer,
+    );
+    defer undeclared_stream.deinit();
+    try envelope.encode(undeclared_stream.writer());
+    try terminal.encode(&t, &undeclared_stream);
+    try screen.encode(primary, .alternate, &undeclared_stream);
     var undeclared_source: std.Io.Reader = .fixed(undeclared.written());
     try testing.expectError(
         error.UnexpectedScreenKey,
@@ -572,11 +630,16 @@ test "complete snapshot rejects ordering checkpoints and trailing data" {
     // screen even when the sequence contains no PAGE records.
     var undeclared_history: std.Io.Writer.Allocating = .init(testing.allocator);
     defer undeclared_history.deinit();
-    try envelope.encode(&undeclared_history.writer);
-    try terminal.encode(&t, &undeclared_history);
-    try screen.encode(primary, .primary, &undeclared_history);
-    try checkpoint.encode(.ready, &undeclared_history);
-    try history.encode(primary, .alternate, &undeclared_history);
+    var undeclared_history_stream: record.Writer = .init(
+        testing.allocator,
+        &undeclared_history.writer,
+    );
+    defer undeclared_history_stream.deinit();
+    try envelope.encode(undeclared_history_stream.writer());
+    try terminal.encode(&t, &undeclared_history_stream);
+    try screen.encode(primary, .primary, &undeclared_history_stream);
+    try checkpoint.encode(.ready, &undeclared_history_stream);
+    try history.encode(primary, .alternate, &undeclared_history_stream);
     var undeclared_history_source: std.Io.Reader = .fixed(
         undeclared_history.written(),
     );
@@ -589,10 +652,15 @@ test "complete snapshot rejects ordering checkpoints and trailing data" {
     _ = try t.switchScreen(.alternate);
     var duplicate: std.Io.Writer.Allocating = .init(testing.allocator);
     defer duplicate.deinit();
-    try envelope.encode(&duplicate.writer);
-    try terminal.encode(&t, &duplicate);
-    try screen.encode(primary, .primary, &duplicate);
-    try screen.encode(primary, .primary, &duplicate);
+    var duplicate_stream: record.Writer = .init(
+        testing.allocator,
+        &duplicate.writer,
+    );
+    defer duplicate_stream.deinit();
+    try envelope.encode(duplicate_stream.writer());
+    try terminal.encode(&t, &duplicate_stream);
+    try screen.encode(primary, .primary, &duplicate_stream);
+    try screen.encode(primary, .primary, &duplicate_stream);
     var duplicate_source: std.Io.Reader = .fixed(duplicate.written());
     try testing.expectError(
         error.DuplicateScreen,
@@ -602,17 +670,22 @@ test "complete snapshot rejects ordering checkpoints and trailing data" {
     // The declared count cannot be satisfied by repeating one HISTORY key.
     var duplicate_history: std.Io.Writer.Allocating = .init(testing.allocator);
     defer duplicate_history.deinit();
-    try envelope.encode(&duplicate_history.writer);
-    try terminal.encode(&t, &duplicate_history);
-    try screen.encode(primary, .primary, &duplicate_history);
+    var duplicate_history_stream: record.Writer = .init(
+        testing.allocator,
+        &duplicate_history.writer,
+    );
+    defer duplicate_history_stream.deinit();
+    try envelope.encode(duplicate_history_stream.writer());
+    try terminal.encode(&t, &duplicate_history_stream);
+    try screen.encode(primary, .primary, &duplicate_history_stream);
     try screen.encode(
         t.screens.get(.alternate).?,
         .alternate,
-        &duplicate_history,
+        &duplicate_history_stream,
     );
-    try checkpoint.encode(.ready, &duplicate_history);
-    try history.encode(primary, .primary, &duplicate_history);
-    try history.encode(primary, .primary, &duplicate_history);
+    try checkpoint.encode(.ready, &duplicate_history_stream);
+    try history.encode(primary, .primary, &duplicate_history_stream);
+    try history.encode(primary, .primary, &duplicate_history_stream);
     var duplicate_history_source: std.Io.Reader = .fixed(
         duplicate_history.written(),
     );

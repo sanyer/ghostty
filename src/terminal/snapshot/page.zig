@@ -135,17 +135,16 @@ pub const EncodeError = PayloadEncodeError || record.Writer.FinishError;
 
 /// Encode one complete PAGE record from a native page.
 ///
-/// The record is appended to `destination`. Its header is reserved before the
-/// payload is encoded, then backpatched with the payload length and CRC32C. If
-/// encoding fails, the partial record is removed while earlier bytes remain.
+/// The payload is built in the stream's reusable record buffer. If payload
+/// encoding fails, no bytes from this record are emitted.
 pub fn encode(
     page: *const TerminalPage,
-    destination: *std.Io.Writer.Allocating,
+    destination: *record.Writer,
 ) EncodeError!void {
-    var record_writer = try record.Writer.init(destination, .page);
-    errdefer record_writer.cancel();
-    try encodePayload(page, record_writer.payloadWriter());
-    try record_writer.finish();
+    const payload = destination.begin(.page);
+    errdefer destination.cancel();
+    try encodePayload(page, payload);
+    try destination.finish();
 }
 
 /// Errors possible while decoding and validating a complete PAGE record.
@@ -755,7 +754,12 @@ test "framed PAGE golden empty record" {
 
     var destination: std.Io.Writer.Allocating = .init(std.testing.allocator);
     defer destination.deinit();
-    try encode(&page, &destination);
+    var stream: record.Writer = .init(
+        std.testing.allocator,
+        &destination.writer,
+    );
+    defer stream.deinit();
+    try encode(&page, &stream);
     try test_fixture.expectEqual(
         .bytes,
         "src/terminal/snapshot/testdata/page-empty-record-v1.hex",
@@ -794,9 +798,14 @@ test "framed PAGE rejects incomplete wide cells transactionally" {
         var destination: std.Io.Writer.Allocating = .init(testing.allocator);
         defer destination.deinit();
         try destination.writer.writeAll("prefix");
+        var stream: record.Writer = .init(
+            testing.allocator,
+            &destination.writer,
+        );
+        defer stream.deinit();
         try testing.expectError(
             error.InvalidWideCell,
-            encode(&page, &destination),
+            encode(&page, &stream),
         );
         try testing.expectEqualStrings("prefix", destination.written());
     }
