@@ -297,9 +297,6 @@ pub const DecodeError = PayloadDecodeError ||
 
         /// A SCREEN must declare at least one PAGE.
         InvalidPageCount,
-
-        /// The cursor is outside the restored active area.
-        InvalidCursorPosition,
     };
 
 /// One decoded SCREEN sequence and the native screen identified by its header.
@@ -359,13 +356,6 @@ pub fn decode(
     if (options.cols == 0 or options.rows == 0) {
         return error.InvalidDimensions;
     }
-    if (header.cursor_x >= options.cols or
-        header.cursor_y >= options.rows or
-        (header.cursor_flags.pending_wrap and
-            header.cursor_x != options.cols - 1))
-    {
-        return error.InvalidCursorPosition;
-    }
 
     // Build the native page list transactionally. Alternate screens never
     // retain scrollback, while primary screens inherit the caller's limits.
@@ -400,12 +390,38 @@ pub fn decode(
 
         // Convert the payload-relative cursor position into the tracked native
         // pin and page-local row/cell pointers required by TerminalScreen.
-        const cursor_pin_value = pages.pin(.{ .active = .{
-            .x = header.cursor_x,
-            .y = header.cursor_y,
-        } }) orelse return error.InvalidCursorPosition;
-        const cursor_pin = try pages.trackPin(cursor_pin_value);
-        const cursor_rac = cursor_pin.rowAndCell();
+        const cursor: TerminalScreen.Cursor = cursor: {
+            const y = @min(header.cursor_y, options.rows - 1);
+
+            // The active area can temporarily contain mixed-width pages after
+            // a reflow. Locate the row at column zero, then clamp the encoded
+            // x coordinate to the width of that physical page.
+            const row_pin = pages.pin(.{ .active = .{ .y = y } }) orelse unreachable;
+            const x = @min(header.cursor_x, row_pin.node.cols() - 1);
+            const pin = try pages.trackPin(.{
+                .node = row_pin.node,
+                .x = x,
+                .y = row_pin.y,
+            });
+            const rac = pin.rowAndCell();
+
+            break :cursor .{
+                .x = x,
+                .y = y,
+                .cursor_style = header.cursor_style,
+                .pending_wrap = header.cursor_flags.pending_wrap and
+                    x == options.cols - 1,
+                .protected = header.cursor_flags.protected,
+                .style = header.cursor_pen,
+                .hyperlink_implicit_id = header.hyperlink_implicit_id,
+                .semantic_content = header.cursor_flags.semantic_content,
+                .semantic_content_clear_eol = header.cursor_flags
+                    .semantic_content_clear_eol,
+                .page_pin = pin,
+                .page_row = rac.row,
+                .page_cell = rac.cell,
+            };
+        };
 
         // Assemble the remaining native state from stable snapshot registries.
         // Derived state and page-local table references are repaired below.
@@ -415,21 +431,7 @@ pub fn decode(
             .pages = pages,
             .no_scrollback = key == .alternate or
                 options.max_scrollback_bytes == 0,
-            .cursor = .{
-                .x = header.cursor_x,
-                .y = header.cursor_y,
-                .cursor_style = header.cursor_style,
-                .pending_wrap = header.cursor_flags.pending_wrap,
-                .protected = header.cursor_flags.protected,
-                .style = header.cursor_pen,
-                .hyperlink_implicit_id = header.hyperlink_implicit_id,
-                .semantic_content = header.cursor_flags.semantic_content,
-                .semantic_content_clear_eol = header.cursor_flags
-                    .semantic_content_clear_eol,
-                .page_pin = cursor_pin,
-                .page_row = cursor_rac.row,
-                .page_cell = cursor_rac.cell,
-            },
+            .cursor = cursor,
             .saved_cursor = if (saved_cursor) |value|
                 value.terminal()
             else
@@ -513,19 +515,7 @@ pub fn decode(
 }
 
 /// Errors possible while decoding fixed SCREEN payload fields.
-const PayloadDecodeError = style.DecodeError || error{
-    InvalidKey,
-    InvalidCursorStyle,
-    InvalidCursorFlags,
-    InvalidSemanticContent,
-    InvalidCharsetState,
-    InvalidProtectedMode,
-    InvalidKittyKeyboardIndex,
-    InvalidKittyKeyboardFlags,
-    InvalidSemanticClick,
-    InvalidSavedCursorPresent,
-    InvalidSavedCursorFlags,
-};
+const PayloadDecodeError = style.DecodeError || error{InvalidKey};
 
 /// Flags encoded after the cursor's visual shape.
 pub const CursorFlags = packed struct(u8) {
@@ -545,18 +535,22 @@ pub const CursorFlags = packed struct(u8) {
         };
     }
 
-    /// Decode and validate the cursor flag registry.
-    pub fn decode(reader: *std.Io.Reader) PayloadDecodeError!CursorFlags {
+    /// Decode the cursor flag registry, normalizing unknown semantic state.
+    pub fn decode(reader: *std.Io.Reader) std.Io.Reader.Error!CursorFlags {
         const raw = try reader.takeByte();
-        const semantic_content_raw: u2 = @truncate(raw >> 2);
-        _ = std.enums.fromInt(
+        const bits: CursorFlags = @bitCast(raw);
+        const semantic_content_raw: u2 = @truncate(raw >> @bitOffsetOf(CursorFlags, "semantic_content"));
+        const semantic_content = std.enums.fromInt(
             terminal_page.Cell.SemanticContent,
             semantic_content_raw,
-        ) orelse return error.InvalidSemanticContent;
+        ) orelse .output;
 
-        const result: CursorFlags = @bitCast(raw);
-        if (result._padding != 0) return error.InvalidCursorFlags;
-        return result;
+        return .{
+            .pending_wrap = bits.pending_wrap,
+            .protected = bits.protected,
+            .semantic_content = semantic_content,
+            .semantic_content_clear_eol = bits.semantic_content_clear_eol,
+        };
     }
 };
 
@@ -631,56 +625,54 @@ fn encodeCharsetState(
 
 fn decodeCharsetState(
     raw: u16,
-) error{InvalidCharsetState}!TerminalScreen.CharsetState {
+) TerminalScreen.CharsetState {
     const bits: CharsetBits = @bitCast(raw);
-    if (bits._padding != 0 or bits.single_shift > 4) {
-        return error.InvalidCharsetState;
-    }
 
-    var result: TerminalScreen.CharsetState = .{
-        .gl = enumFromInt(
+    var result: TerminalScreen.CharsetState = .{};
+    result.gl = enumFromInt(
+        terminal_charsets.Slots,
+        bits.gl,
+    ) orelse result.gl;
+    result.gr = enumFromInt(
+        terminal_charsets.Slots,
+        bits.gr,
+    ) orelse result.gr;
+    result.single_shift = if (bits.single_shift == 0)
+        null
+    else if (bits.single_shift <= 4)
+        enumFromInt(
             terminal_charsets.Slots,
-            bits.gl,
-        ) orelse return error.InvalidCharsetState,
-        .gr = enumFromInt(
-            terminal_charsets.Slots,
-            bits.gr,
-        ) orelse return error.InvalidCharsetState,
-        .single_shift = if (bits.single_shift == 0)
-            null
-        else
-            enumFromInt(
-                terminal_charsets.Slots,
-                bits.single_shift - 1,
-            ) orelse return error.InvalidCharsetState,
-    };
+            bits.single_shift - 1,
+        )
+    else
+        null;
     result.charsets.set(
         .G0,
         enumFromInt(
             terminal_charsets.Charset,
             bits.g0,
-        ) orelse return error.InvalidCharsetState,
+        ) orelse .utf8,
     );
     result.charsets.set(
         .G1,
         enumFromInt(
             terminal_charsets.Charset,
             bits.g1,
-        ) orelse return error.InvalidCharsetState,
+        ) orelse .utf8,
     );
     result.charsets.set(
         .G2,
         enumFromInt(
             terminal_charsets.Charset,
             bits.g2,
-        ) orelse return error.InvalidCharsetState,
+        ) orelse .utf8,
     );
     result.charsets.set(
         .G3,
         enumFromInt(
             terminal_charsets.Charset,
             bits.g3,
-        ) orelse return error.InvalidCharsetState,
+        ) orelse .utf8,
     );
     return result;
 }
@@ -699,12 +691,10 @@ pub const KittyKeyboard = struct {
         report_associated: bool = false,
         _padding: u3 = 0,
 
-        /// Decode and validate one Kitty keyboard flag byte.
-        pub fn decode(reader: *std.Io.Reader) PayloadDecodeError!Flags {
-            const result: Flags = @bitCast(try reader.takeByte());
-            if (result._padding != 0) {
-                return error.InvalidKittyKeyboardFlags;
-            }
+        /// Decode one Kitty keyboard flag byte, ignoring reserved bits.
+        pub fn decode(reader: *std.Io.Reader) std.Io.Reader.Error!Flags {
+            var result: Flags = @bitCast(try reader.takeByte());
+            result._padding = 0;
             return result;
         }
     };
@@ -739,10 +729,10 @@ pub const KittyKeyboard = struct {
         return result;
     }
 
-    /// Decode and validate the complete fixed Kitty keyboard stack.
-    pub fn decode(reader: *std.Io.Reader) PayloadDecodeError!KittyKeyboard {
-        const index = try reader.takeByte();
-        if (index >= 8) return error.InvalidKittyKeyboardIndex;
+    /// Decode the complete fixed Kitty keyboard stack.
+    pub fn decode(reader: *std.Io.Reader) std.Io.Reader.Error!KittyKeyboard {
+        const index_raw = try reader.takeByte();
+        const index = if (index_raw < 8) index_raw else 0;
 
         var flags: [8]Flags = undefined;
         for (&flags) |*entry| entry.* = try Flags.decode(reader);
@@ -750,29 +740,26 @@ pub const KittyKeyboard = struct {
     }
 };
 
-/// Decode and validate the semantic-click kind and value bytes.
+/// Decode semantic-click state, falling back to disabled for unknown values.
 fn decodeSemanticClick(
     reader: *std.Io.Reader,
-) PayloadDecodeError!TerminalScreen.SemanticPrompt.SemanticClick {
+) std.Io.Reader.Error!TerminalScreen.SemanticPrompt.SemanticClick {
     const kind = enumFromInt(
         TerminalScreen.SemanticPrompt.SemanticClickKind,
         try reader.takeByte(),
-    ) orelse return error.InvalidSemanticClick;
+    );
     const value = try reader.takeByte();
 
-    return switch (kind) {
-        .none => if (value == 0)
-            .none
-        else
-            error.InvalidSemanticClick,
+    return switch (kind orelse return .none) {
+        .none => .none,
         .click_events => .{ .click_events = enumFromInt(
             terminal_osc.semantic_prompt.ClickEvents,
             value,
-        ) orelse return error.InvalidSemanticClick },
+        ) orelse return .none },
         .cl => .{ .cl = enumFromInt(
             terminal_osc.semantic_prompt.Click,
             value,
-        ) orelse return error.InvalidSemanticClick },
+        ) orelse return .none },
     };
 }
 
@@ -798,10 +785,10 @@ pub const SavedCursor = struct {
         origin: bool = false,
         _padding: u5 = 0,
 
-        /// Decode and validate saved cursor flags.
-        pub fn decode(reader: *std.Io.Reader) PayloadDecodeError!Flags {
-            const result: Flags = @bitCast(try reader.takeByte());
-            if (result._padding != 0) return error.InvalidSavedCursorFlags;
+        /// Decode saved cursor flags, ignoring reserved bits.
+        pub fn decode(reader: *std.Io.Reader) std.Io.Reader.Error!Flags {
+            var result: Flags = @bitCast(try reader.takeByte());
+            result._padding = 0;
             return result;
         }
     };
@@ -856,7 +843,7 @@ pub const SavedCursor = struct {
             .y = try io.readInt(reader, u16),
             .pen = try style.decode(reader),
             .flags = try Flags.decode(reader),
-            .charset = try decodeCharsetState(
+            .charset = decodeCharsetState(
                 try io.readInt(reader, u16),
             ),
         };
@@ -987,7 +974,10 @@ pub const Header = struct {
         try writer.writeByte(@intFromBool(self.saved_cursor_present));
     }
 
-    /// Decode and validate the fixed SCREEN payload header.
+    /// Decode the fixed SCREEN payload header.
+    ///
+    /// The screen key remains structural because it routes the following PAGE
+    /// sequence. Unknown semantic fields use native defaults instead.
     pub fn decode(reader: *std.Io.Reader) PayloadDecodeError!Header {
         // Screen identity and cursor position.
         const key = enumFromInt(
@@ -1002,30 +992,26 @@ pub const Header = struct {
         const cursor_style = enumFromInt(
             TerminalScreen.CursorStyle,
             try reader.takeByte(),
-        ) orelse return error.InvalidCursorStyle;
+        ) orelse .block;
         const cursor_flags = try CursorFlags.decode(reader);
         const cursor_pen = try style.decode(reader);
         const hyperlink_implicit_id = try io.readInt(reader, u32);
 
         // Charset and selective-erase state.
-        const charset = try decodeCharsetState(
+        const charset = decodeCharsetState(
             try io.readInt(reader, u16),
         );
         const protected_mode = enumFromInt(
             terminal_ansi.ProtectedMode,
             try reader.takeByte(),
-        ) orelse return error.InvalidProtectedMode;
+        ) orelse .off;
 
         // Keyboard modes and semantic-click state.
         const kitty_keyboard = try KittyKeyboard.decode(reader);
         const semantic_click = try decodeSemanticClick(reader);
 
         // Presence of the optional saved-cursor suffix.
-        const saved_cursor_present = switch (try reader.takeByte()) {
-            0 => false,
-            1 => true,
-            else => return error.InvalidSavedCursorPresent,
-        };
+        const saved_cursor_present = try reader.takeByte() != 0;
 
         return .{
             .key = key,
@@ -1434,39 +1420,13 @@ test "header encoding rejects invalid state" {
     );
 }
 
-test "header decoding rejects invalid values" {
+test "header decoding rejects structural values" {
     const valid = [_]u8{0} ** Header.len;
 
     var invalid_key = valid;
     invalid_key[0] = 2;
     var key_reader: std.Io.Reader = .fixed(&invalid_key);
     try std.testing.expectError(error.InvalidKey, Header.decode(&key_reader));
-
-    var invalid_cursor_style = valid;
-    invalid_cursor_style[8] = 4;
-    var cursor_style_reader: std.Io.Reader = .fixed(&invalid_cursor_style);
-    try std.testing.expectError(
-        error.InvalidCursorStyle,
-        Header.decode(&cursor_style_reader),
-    );
-
-    var invalid_cursor_flags = valid;
-    invalid_cursor_flags[9] = 1 << 5;
-    var cursor_flags_reader: std.Io.Reader = .fixed(&invalid_cursor_flags);
-    try std.testing.expectError(
-        error.InvalidCursorFlags,
-        Header.decode(&cursor_flags_reader),
-    );
-
-    var invalid_semantic_content = valid;
-    invalid_semantic_content[9] = 3 << 2;
-    var semantic_content_reader: std.Io.Reader = .fixed(
-        &invalid_semantic_content,
-    );
-    try std.testing.expectError(
-        error.InvalidSemanticContent,
-        Header.decode(&semantic_content_reader),
-    );
 
     var invalid_style = valid;
     invalid_style[10] = 3;
@@ -1475,88 +1435,78 @@ test "header decoding rejects invalid values" {
         error.InvalidColorKind,
         Header.decode(&style_reader),
     );
+}
 
-    var invalid_charset_reserved = valid;
-    invalid_charset_reserved[31] = 1 << 7;
-    var charset_reserved_reader: std.Io.Reader = .fixed(
-        &invalid_charset_reserved,
-    );
-    try std.testing.expectError(
-        error.InvalidCharsetState,
-        Header.decode(&charset_reserved_reader),
-    );
+test "header decoding normalizes unknown semantic values" {
+    var fixture = [_]u8{0} ** Header.len;
 
-    var invalid_single_shift = valid;
-    invalid_single_shift[31] = 5 << 4;
-    var single_shift_reader: std.Io.Reader = .fixed(&invalid_single_shift);
-    try std.testing.expectError(
-        error.InvalidCharsetState,
-        Header.decode(&single_shift_reader),
-    );
+    fixture[8] = 4; // Unknown cursor style.
+    fixture[9] = 0xFF; // Known flags, unknown semantic value, reserved bits.
+    fixture[31] = 0xD0; // Invalid single shift plus a reserved bit.
+    fixture[32] = 3; // Unknown protected mode.
+    fixture[33] = 8; // Out-of-range Kitty keyboard index.
+    @memset(fixture[34..42], 0xFF); // Known flags plus reserved bits.
+    fixture[42] = 3; // Unknown semantic-click kind.
+    fixture[43] = 0xFF;
+    fixture[44] = 2; // Noncanonical true.
 
-    var invalid_protected_mode = valid;
-    invalid_protected_mode[32] = 3;
-    var protected_mode_reader: std.Io.Reader = .fixed(
-        &invalid_protected_mode,
-    );
-    try std.testing.expectError(
-        error.InvalidProtectedMode,
-        Header.decode(&protected_mode_reader),
-    );
+    var reader: std.Io.Reader = .fixed(&fixture);
+    const decoded = try Header.decode(&reader);
 
-    var invalid_kitty_index = valid;
-    invalid_kitty_index[33] = 8;
-    var kitty_index_reader: std.Io.Reader = .fixed(&invalid_kitty_index);
-    try std.testing.expectError(
-        error.InvalidKittyKeyboardIndex,
-        Header.decode(&kitty_index_reader),
+    try std.testing.expectEqual(
+        TerminalScreen.CursorStyle.block,
+        decoded.cursor_style,
     );
+    try std.testing.expect(decoded.cursor_flags.pending_wrap);
+    try std.testing.expect(decoded.cursor_flags.protected);
+    try std.testing.expectEqual(
+        terminal_page.Cell.SemanticContent.output,
+        decoded.cursor_flags.semantic_content,
+    );
+    try std.testing.expect(
+        decoded.cursor_flags.semantic_content_clear_eol,
+    );
+    try std.testing.expectEqual(@as(u3, 0), decoded.cursor_flags._padding);
 
-    for (34..42) |offset| {
-        var invalid_kitty_flags = valid;
-        invalid_kitty_flags[offset] = 1 << 5;
-        var reader: std.Io.Reader = .fixed(&invalid_kitty_flags);
-        try std.testing.expectError(
-            error.InvalidKittyKeyboardFlags,
-            Header.decode(&reader),
-        );
+    try std.testing.expectEqual(null, decoded.charset.single_shift);
+    try std.testing.expectEqual(terminal_charsets.Slots.G0, decoded.charset.gr);
+    try std.testing.expectEqual(
+        terminal_ansi.ProtectedMode.off,
+        decoded.protected_mode,
+    );
+    try std.testing.expectEqual(@as(u8, 0), decoded.kitty_keyboard.index);
+    for (decoded.kitty_keyboard.flags) |flags| {
+        try std.testing.expect(flags.disambiguate);
+        try std.testing.expect(flags.report_events);
+        try std.testing.expect(flags.report_alternates);
+        try std.testing.expect(flags.report_all);
+        try std.testing.expect(flags.report_associated);
+        try std.testing.expectEqual(@as(u3, 0), flags._padding);
     }
-
-    var invalid_semantic_click_kind = valid;
-    invalid_semantic_click_kind[42] = 3;
-    var semantic_click_kind_reader: std.Io.Reader = .fixed(
-        &invalid_semantic_click_kind,
+    try std.testing.expectEqual(
+        TerminalScreen.SemanticPrompt.SemanticClick.none,
+        decoded.semantic_click,
     );
-    try std.testing.expectError(
-        error.InvalidSemanticClick,
-        Header.decode(&semantic_click_kind_reader),
-    );
+    try std.testing.expect(decoded.saved_cursor_present);
 
+    // Known semantic-click kinds with unknown or noncanonical values also
+    // degrade to disabled while consuming both fixed bytes.
     const invalid_semantic_clicks = [_][2]u8{
         .{ 0, 1 },
         .{ 1, 2 },
         .{ 2, 4 },
     };
     for (invalid_semantic_clicks) |invalid| {
-        var fixture = valid;
-        fixture[42] = invalid[0];
-        fixture[43] = invalid[1];
-        var reader: std.Io.Reader = .fixed(&fixture);
-        try std.testing.expectError(
-            error.InvalidSemanticClick,
-            Header.decode(&reader),
+        var semantic_fixture = [_]u8{0} ** Header.len;
+        semantic_fixture[42] = invalid[0];
+        semantic_fixture[43] = invalid[1];
+        var semantic_reader: std.Io.Reader = .fixed(&semantic_fixture);
+        const semantic_decoded = try Header.decode(&semantic_reader);
+        try std.testing.expectEqual(
+            TerminalScreen.SemanticPrompt.SemanticClick.none,
+            semantic_decoded.semantic_click,
         );
     }
-
-    var invalid_saved_cursor_present = valid;
-    invalid_saved_cursor_present[44] = 2;
-    var saved_cursor_present_reader: std.Io.Reader = .fixed(
-        &invalid_saved_cursor_present,
-    );
-    try std.testing.expectError(
-        error.InvalidSavedCursorPresent,
-        Header.decode(&saved_cursor_present_reader),
-    );
 }
 
 test "header decoding rejects every truncation" {
@@ -1617,7 +1567,7 @@ test "saved cursor golden encoding and decoding" {
     );
 }
 
-test "saved cursor rejects invalid state" {
+test "saved cursor encoding rejects and decoding normalizes invalid state" {
     var encoded: [SavedCursor.len]u8 = undefined;
 
     var invalid_flags = testSavedCursor();
@@ -1628,32 +1578,20 @@ test "saved cursor rejects invalid state" {
         invalid_flags.encode(&flags_writer),
     );
 
-    const valid = [_]u8{0} ** SavedCursor.len;
+    var invalid = [_]u8{0} ** SavedCursor.len;
+    invalid[20] = 0xF9; // Protected plus reserved bits.
+    invalid[22] = 0xD0; // Invalid single shift plus a reserved bit.
+    var reader: std.Io.Reader = .fixed(&invalid);
+    const decoded = try SavedCursor.decode(&reader);
 
-    var invalid_flags_bytes = valid;
-    invalid_flags_bytes[20] = 1 << 3;
-    var flags_reader: std.Io.Reader = .fixed(&invalid_flags_bytes);
-    try std.testing.expectError(
-        error.InvalidSavedCursorFlags,
-        SavedCursor.decode(&flags_reader),
-    );
-
-    var invalid_charset_reserved = valid;
-    invalid_charset_reserved[22] = 1 << 7;
-    var charset_reserved_reader: std.Io.Reader = .fixed(
-        &invalid_charset_reserved,
-    );
-    try std.testing.expectError(
-        error.InvalidCharsetState,
-        SavedCursor.decode(&charset_reserved_reader),
-    );
-
-    var invalid_single_shift = valid;
-    invalid_single_shift[22] = 5 << 4;
-    var single_shift_reader: std.Io.Reader = .fixed(&invalid_single_shift);
-    try std.testing.expectError(
-        error.InvalidCharsetState,
-        SavedCursor.decode(&single_shift_reader),
+    try std.testing.expect(decoded.flags.protected);
+    try std.testing.expect(!decoded.flags.pending_wrap);
+    try std.testing.expect(!decoded.flags.origin);
+    try std.testing.expectEqual(@as(u5, 0), decoded.flags._padding);
+    try std.testing.expectEqual(null, decoded.charset.single_shift);
+    try std.testing.expectEqual(
+        terminal_charsets.Slots.G0,
+        decoded.charset.gr,
     );
 }
 
@@ -1969,6 +1907,85 @@ test "SCREEN encodes the minimal complete-page active suffix" {
     restored.pages.assertIntegrity();
     restored.assertIntegrity();
     try std.testing.expectError(error.EndOfStream, restore_source.takeByte());
+}
+
+test "SCREEN restoration normalizes invalid cursor positions" {
+    var screen = try TerminalScreen.init(
+        std.testing.io,
+        std.testing.allocator,
+        .{ .cols = 2, .rows = 2, .max_scrollback_bytes = 0 },
+    );
+    defer screen.deinit();
+
+    const Case = struct {
+        x: u16,
+        y: u16,
+        pending_wrap: bool,
+        expected_x: u16,
+        expected_y: u16,
+        expected_pending_wrap: bool,
+    };
+    const cases = [_]Case{
+        // Out-of-range coordinates clamp to the bottom-right. Pending wrap is
+        // valid there and can be retained.
+        .{
+            .x = std.math.maxInt(u16),
+            .y = std.math.maxInt(u16),
+            .pending_wrap = true,
+            .expected_x = 1,
+            .expected_y = 1,
+            .expected_pending_wrap = true,
+        },
+        // Pending wrap away from the final column would trip native printing
+        // assertions, so retain the position and clear only that flag.
+        .{
+            .x = 0,
+            .y = 0,
+            .pending_wrap = true,
+            .expected_x = 0,
+            .expected_y = 0,
+            .expected_pending_wrap = false,
+        },
+    };
+
+    for (cases) |case| {
+        var destination: std.Io.Writer.Allocating = .init(
+            std.testing.allocator,
+        );
+        defer destination.deinit();
+
+        var header = Header.init(&screen, .primary, 1);
+        header.cursor_x = case.x;
+        header.cursor_y = case.y;
+        header.cursor_flags.pending_wrap = case.pending_wrap;
+        header.saved_cursor_present = false;
+
+        var screen_writer = try record.Writer.init(&destination, .screen);
+        try header.encode(screen_writer.payloadWriter());
+        try screen_writer.payloadWriter().writeByte(0);
+        try screen_writer.finish();
+
+        const native_page = screen.pages.getTopLeft(.active).node
+            .pageAssumeResident();
+        try page.encode(native_page, &destination);
+
+        var source: std.Io.Reader = .fixed(destination.written());
+        var decoded = try decode(
+            &source,
+            std.testing.io,
+            std.testing.allocator,
+            .{ .cols = 2, .rows = 2, .max_scrollback_bytes = 0 },
+        );
+        defer decoded.deinit();
+
+        try std.testing.expectEqual(case.expected_x, decoded.screen.cursor.x);
+        try std.testing.expectEqual(case.expected_y, decoded.screen.cursor.y);
+        try std.testing.expectEqual(
+            case.expected_pending_wrap,
+            decoded.screen.cursor.pending_wrap,
+        );
+        decoded.screen.assertIntegrity();
+    }
 }
 
 test "SCREEN restoration rejects invalid and incomplete sequences" {
