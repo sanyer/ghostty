@@ -223,22 +223,87 @@ pub fn encode(
 }
 
 /// Errors possible while restoring one HISTORY and its PAGE sequence.
-pub const DecodeError = Allocator.Error ||
-    Header.DecodeError ||
-    page.DecodeError ||
-    record.Reader.InitError ||
-    record.Reader.FinishError ||
-    TerminalPageList.PageAllocation.FinalizeError ||
+pub const DecodeError = Decoder.InitError ||
+    Decoder.RestoreError ||
     error{
-        /// The next record is valid but is not a HISTORY.
-        UnexpectedRecordTag,
-
         /// The HISTORY key does not match the caller-selected screen.
         UnexpectedScreenKey,
-
-        /// The Screen already contains complete pages before its active page.
-        ExistingHistory,
     };
+
+/// A decoded HISTORY manifest ready to restore its following PAGE records.
+///
+/// Keeping manifest decoding separate lets the full snapshot wrapper route a
+/// HISTORY sequence by its encoded key before any pages mutate a Screen.
+pub const Decoder = struct {
+    source: *std.Io.Reader,
+    header: Header,
+
+    pub const InitError = Header.DecodeError ||
+        record.Reader.InitError ||
+        record.Reader.FinishError ||
+        error{
+            /// The next record is valid but is not a HISTORY.
+            UnexpectedRecordTag,
+        };
+
+    pub const RestoreError = Allocator.Error ||
+        page.DecodeError ||
+        TerminalPageList.PageAllocation.FinalizeError ||
+        error{
+            /// The Screen already contains complete pages before its active page.
+            ExistingHistory,
+        };
+
+    /// Decode and finish the self-contained HISTORY manifest.
+    pub fn init(self: *Decoder, source: *std.Io.Reader) InitError!void {
+        var record_reader: record.Reader = undefined;
+        try record_reader.init(source);
+        if (record_reader.header.tag != .history) {
+            return error.UnexpectedRecordTag;
+        }
+        const header = try Header.decode(record_reader.payloadReader());
+        try record_reader.finish();
+        self.* = .{ .source = source, .header = header };
+    }
+
+    /// Restore the declared PAGE records into the selected native Screen.
+    pub fn decode(
+        self: *Decoder,
+        alloc: Allocator,
+        terminal_screen: *TerminalScreen,
+    ) RestoreError!void {
+        // A freshly restored SCREEN may carry overlap inside its first page,
+        // but cannot already contain a complete historical page before that
+        // boundary.
+        const active_top = terminal_screen.pages.getTopLeft(.active);
+        if (terminal_screen.pages.getTopLeft(.screen).node != active_top.node) {
+            return error.ExistingHistory;
+        }
+
+        // Row metadata is redundant with the restored SCREEN and PAGE
+        // topology. Consume the declared PAGE records, but derive all native
+        // row totals from their actual dimensions.
+        for (0..self.header.page_count) |_| {
+            // PAGE exposes its exact capacity before decoding the payload,
+            // allowing the destination PageList to allocate the final backing
+            // memory once.
+            var decoder: page.Decoder = undefined;
+            try decoder.init(self.source);
+            var allocation = try terminal_screen.pages.allocatePage(
+                decoder.capacity(),
+            );
+            defer allocation.deinit();
+            try decoder.decode(allocation.page(), alloc);
+
+            const contains_prompt = hasSemanticPrompt(allocation.page());
+            try allocation.finalize(.prepend);
+            if (contains_prompt) terminal_screen.semantic_prompt.seen = true;
+        }
+
+        terminal_screen.pages.assertIntegrity();
+        terminal_screen.assertIntegrity();
+    }
+};
 
 /// Restore one HISTORY and its declared PAGE records into a native Screen.
 ///
@@ -252,46 +317,10 @@ pub fn decode(
     expected_key: TerminalScreenKey,
     terminal_screen: *TerminalScreen,
 ) DecodeError!void {
-    // Decode and finish the self-contained HISTORY manifest before consuming
-    // any of its following PAGE records.
-    const header: Header = header: {
-        var record_reader: record.Reader = undefined;
-        try record_reader.init(source);
-        if (record_reader.header.tag != .history) return error.UnexpectedRecordTag;
-        const header = try Header.decode(record_reader.payloadReader());
-        try record_reader.finish();
-        break :header header;
-    };
-
-    if (header.key != expected_key) return error.UnexpectedScreenKey;
-
-    // A freshly restored SCREEN may carry overlap inside its first page, but
-    // cannot already contain a complete historical page before that boundary.
-    const active_top = terminal_screen.pages.getTopLeft(.active);
-    if (terminal_screen.pages.getTopLeft(.screen).node != active_top.node) {
-        return error.ExistingHistory;
-    }
-
-    // Row metadata is redundant with the restored SCREEN and PAGE topology.
-    // Consume the declared number of PAGE records, but derive all native row
-    // totals from their actual dimensions instead of rejecting inconsistent
-    // metadata from another implementation.
-    for (0..header.page_count) |_| {
-        // PAGE exposes its exact capacity before decoding the payload, allowing
-        // the destination PageList to allocate the final backing memory once.
-        var decoder: page.Decoder = undefined;
-        try decoder.init(source);
-        var allocation = try terminal_screen.pages.allocatePage(decoder.capacity());
-        defer allocation.deinit();
-        try decoder.decode(allocation.page(), alloc);
-
-        const contains_prompt = hasSemanticPrompt(allocation.page());
-        try allocation.finalize(.prepend);
-        if (contains_prompt) terminal_screen.semantic_prompt.seen = true;
-    }
-
-    terminal_screen.pages.assertIntegrity();
-    terminal_screen.assertIntegrity();
+    var decoder: Decoder = undefined;
+    try decoder.init(source);
+    if (decoder.header.key != expected_key) return error.UnexpectedScreenKey;
+    try decoder.decode(alloc, terminal_screen);
 }
 
 fn hasSemanticPrompt(terminal_page: *const TerminalPage) bool {

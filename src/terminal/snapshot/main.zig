@@ -55,23 +55,20 @@
 //! +----------------------------------------+
 //! | READY                                  |
 //! +----------------------------------------+
-//! | HISTORY (primary)                      |
-//! | PAGE * history.page_count              |
-//! +----------------------------------------+
-//! | HISTORY (alternate, when present)      |
-//! | PAGE * history.page_count              |
+//! | HISTORY * terminal.screen_count        |
+//! | PAGE * each history.page_count         |
 //! +----------------------------------------+
 //! | FINISH                                 |
 //! +----------------------------------------+
 //! ```
 //!
-//! The SCREEN sequences may appear in any key order. Each key must be unique
-//! and must identify one of the screens declared by TERMINAL. They contain the
-//! complete pages needed to restore each active area. A HISTORY sequence
-//! contains the older complete pages for its screen in newest-to-oldest order
-//! so they can be prepended as they arrive. Every SCREEN has one corresponding
-//! HISTORY, even when its history page count is zero. FINISH is followed by
-//! end-of-file.
+//! The SCREEN and HISTORY sequence groups may each appear in any key order.
+//! Each key must occur exactly once in each group and must identify one of the
+//! screens declared by TERMINAL. SCREEN contains the complete pages needed to
+//! restore each active area. HISTORY contains the older complete pages for its
+//! screen in newest-to-oldest order so they can be prepended as they arrive.
+//! Every SCREEN has one corresponding HISTORY, even when its history page count
+//! is zero. FINISH is followed by end-of-file.
 //!
 //! READY and FINISH contain BLAKE3-256 digests of all preceding snapshot bytes.
 //! READY therefore validates the renderable active-state prefix. FINISH covers

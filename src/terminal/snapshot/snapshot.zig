@@ -93,13 +93,21 @@ pub const DecodeError = envelope.DecodeError ||
 
         /// More than one SCREEN names the same key.
         DuplicateScreen,
+
+        /// A HISTORY names a key not declared by TERMINAL.
+        UnexpectedHistoryKey,
+
+        /// More than one HISTORY names the same key.
+        DuplicateHistory,
     };
 
 /// Restore one complete snapshot into a native terminal.
 ///
 /// The reader must contain exactly one snapshot through FINISH. Restoration is
 /// transactional: the returned terminal is either complete and ready or
-/// not (error return).
+/// not (error return). Individual record codecs normalize optional semantic
+/// state, while framing, checkpoints, declared sequence counts, and unique
+/// cross-record screen routing remain strict.
 pub fn decode(
     source: *std.Io.Reader,
     io_: std.Io,
@@ -175,13 +183,25 @@ pub fn decode(
     hashing.hasher.final(&digest);
     try checkpoint.decode(.ready, digest, reader);
 
-    // HISTORY mutates only the restored terminal owned by this function.
-    // Although an individual history decoder may publish recent pages as they
-    // validate, any later full-snapshot failure deinitializes the whole result.
-    const keys = [_]TerminalScreenKey{ .primary, .alternate };
-    for (keys) |key| {
-        const restored = result.screens.get(key) orelse continue;
-        try history.decode(reader, alloc, key, restored);
+    // HISTORY keys make this sequence order-independent just like SCREEN.
+    // Although a decoder may publish recent pages as they validate, any later
+    // full-snapshot failure deinitializes the whole result.
+    for (0..screen_count) |_| {
+        var decoder: history.Decoder = undefined;
+        try decoder.init(reader);
+
+        const key = decoder.header.key;
+        const restored = result.screens.get(key) orelse
+            return error.UnexpectedHistoryKey;
+
+        // SCREEN routing advanced every decoded slot from generation zero to
+        // one. A value other than one means this key already received HISTORY.
+        if (result.screens.generation(key) != 1) {
+            return error.DuplicateHistory;
+        }
+
+        try decoder.decode(alloc, restored);
+        result.screens.generations.put(key, 2);
     }
 
     // FINISH authenticates READY and all history. Decode it directly from the
@@ -189,6 +209,7 @@ pub fn decode(
     hashing.hasher.final(&digest);
     try checkpoint.decode(.finish, digest, source);
 
+    const keys = [_]TerminalScreenKey{ .primary, .alternate };
     if (comptime build_options.slow_runtime_safety) {
         for (keys) |key| {
             const restored = result.screens.get(key) orelse continue;
@@ -196,6 +217,11 @@ pub fn decode(
             restored.assertIntegrity();
         }
     }
+
+    // Generations are only scratch state while routing the two keyed sequence
+    // groups. The completed terminal has not escaped yet, so reset them to the
+    // same initial state as any newly constructed ScreenSet.
+    for (keys) |key| result.screens.generations.put(key, 0);
     return result;
 }
 
@@ -334,8 +360,7 @@ test "complete snapshot round trip with history and alternate screen" {
         reencoded.written(),
     );
 
-    // SCREEN keys make their order independent. Keep HISTORY canonical here;
-    // only the active-state screen sequences are intentionally reversed.
+    // SCREEN and HISTORY keys make both sequence groups order independent.
     var reversed: std.Io.Writer.Allocating = .init(testing.allocator);
     defer reversed.deinit();
     try envelope.encode(&reversed.writer);
@@ -343,12 +368,12 @@ test "complete snapshot round trip with history and alternate screen" {
     try screen.encode(t.screens.get(.alternate).?, .alternate, &reversed);
     try screen.encode(primary, .primary, &reversed);
     try checkpoint.encode(.ready, &reversed);
-    try history.encode(primary, .primary, &reversed);
     try history.encode(
         t.screens.get(.alternate).?,
         .alternate,
         &reversed,
     );
+    try history.encode(primary, .primary, &reversed);
     try checkpoint.encode(.finish, &reversed);
 
     var reversed_source: std.Io.Reader = .fixed(reversed.written());
@@ -361,6 +386,14 @@ test "complete snapshot round trip with history and alternate screen" {
     try testing.expectEqual(
         TerminalScreenKey.alternate,
         reversed_restored.screens.active_key,
+    );
+    try testing.expectEqual(
+        @as(usize, 0),
+        reversed_restored.screens.generation(.primary),
+    );
+    try testing.expectEqual(
+        @as(usize, 0),
+        reversed_restored.screens.generation(.alternate),
     );
 }
 
@@ -535,6 +568,23 @@ test "complete snapshot rejects ordering checkpoints and trailing data" {
         decode(&undeclared_source, testing.io, testing.allocator),
     );
 
+    // HISTORY sequences are also routed by key, which must name a declared
+    // screen even when the sequence contains no PAGE records.
+    var undeclared_history: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer undeclared_history.deinit();
+    try envelope.encode(&undeclared_history.writer);
+    try terminal.encode(&t, &undeclared_history);
+    try screen.encode(primary, .primary, &undeclared_history);
+    try checkpoint.encode(.ready, &undeclared_history);
+    try history.encode(primary, .alternate, &undeclared_history);
+    var undeclared_history_source: std.Io.Reader = .fixed(
+        undeclared_history.written(),
+    );
+    try testing.expectError(
+        error.UnexpectedHistoryKey,
+        decode(&undeclared_history_source, testing.io, testing.allocator),
+    );
+
     // The declared count cannot be satisfied by repeating the same key.
     _ = try t.switchScreen(.alternate);
     var duplicate: std.Io.Writer.Allocating = .init(testing.allocator);
@@ -547,5 +597,27 @@ test "complete snapshot rejects ordering checkpoints and trailing data" {
     try testing.expectError(
         error.DuplicateScreen,
         decode(&duplicate_source, testing.io, testing.allocator),
+    );
+
+    // The declared count cannot be satisfied by repeating one HISTORY key.
+    var duplicate_history: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer duplicate_history.deinit();
+    try envelope.encode(&duplicate_history.writer);
+    try terminal.encode(&t, &duplicate_history);
+    try screen.encode(primary, .primary, &duplicate_history);
+    try screen.encode(
+        t.screens.get(.alternate).?,
+        .alternate,
+        &duplicate_history,
+    );
+    try checkpoint.encode(.ready, &duplicate_history);
+    try history.encode(primary, .primary, &duplicate_history);
+    try history.encode(primary, .primary, &duplicate_history);
+    var duplicate_history_source: std.Io.Reader = .fixed(
+        duplicate_history.written(),
+    );
+    try testing.expectError(
+        error.DuplicateHistory,
+        decode(&duplicate_history_source, testing.io, testing.allocator),
     );
 }
