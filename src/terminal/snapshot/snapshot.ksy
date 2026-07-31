@@ -11,7 +11,8 @@ doc: |
   renderable screen sequences, a READY checkpoint, matching history sequences,
   and a FINISH checkpoint. SCREEN pages are oldest-to-newest. HISTORY pages are
   newest-to-oldest. FINISH terminates the snapshot; bytes that follow belong to
-  the containing transport and are outside this schema.
+  the containing transport and are outside this schema. Each SCREEN declares
+  its complete logical history extent before READY.
 
   Record CRC32C values and checkpoint BLAKE3-256 digests are represented here
   but cannot be calculated by portable Kaitai Struct expressions. The adjacent
@@ -568,6 +569,8 @@ types:
         type: u2
         valid:
           min: 1
+      - id: history_rows
+        type: u8
       - id: cursor_x
         type: u2
       - id: cursor_y
@@ -710,10 +713,6 @@ types:
           expr: _.to_i <= 1
       - id: page_count
         type: u4
-      - id: total_rows
-        type: u8
-      - id: screen_overlap_rows
-        type: u2
       - id: trailing_data
         size-eos: true
         valid:

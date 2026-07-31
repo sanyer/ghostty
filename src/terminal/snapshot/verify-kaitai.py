@@ -256,19 +256,14 @@ def validate_complete_snapshot(snapshot: Any, data: bytes) -> None:
                 "the active area"
             )
         overlap_rows = screen_rows - terminal_header.rows
-        if payload.screen_overlap_rows != overlap_rows:
-            raise ValueError(
-                f"HISTORY key {payload.key}: screen_overlap_rows "
-                f"{payload.screen_overlap_rows} does not match {overlap_rows}"
-            )
-
-        total_rows = payload.screen_overlap_rows + sum(
+        history_rows = overlap_rows + sum(
             page.payload.header.rows for page in sequence.pages
         )
-        if total_rows != payload.total_rows:
+        if history_rows != screen.screen.payload.header.history_rows:
             raise ValueError(
-                f"HISTORY key {payload.key}: total_rows "
-                f"{payload.total_rows} does not match {total_rows}"
+                f"SCREEN key {payload.key}: history_rows "
+                f"{screen.screen.payload.header.history_rows} "
+                f"does not match {history_rows}"
             )
 
     for record in all_snapshot_records(snapshot):

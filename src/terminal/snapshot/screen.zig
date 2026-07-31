@@ -9,13 +9,14 @@
 //!
 //! The final screen-height rows are the active area. When its boundary falls
 //! inside the first encoded page, that page also contains an incidental history
-//! prefix. A client may expose or ignore those resident rows, but must not
-//! require them or infer the complete history extent from them.
+//! prefix. `history_rows` declares the complete logical history extent so a
+//! client can size its scrollbar at READY without waiting for HISTORY. A client
+//! may expose or ignore the resident overlap carried by SCREEN. The extent is
+//! advisory; native row totals remain derived from decoded PAGE records.
 //!
 //! Screen dimensions are terminal-wide state and are not repeated here. Page
-//! capacities, native page IDs and pointers, authoritative history extent and
-//! availability, scrollbar state, selection, viewport, dirty state, and derived
-//! semantic-prompt state are also omitted.
+//! capacities, native page IDs and pointers, history availability, selection,
+//! viewport, dirty state, and derived semantic-prompt state are also omitted.
 //!
 //! All integers are unsigned and little-endian.
 //!
@@ -37,10 +38,9 @@
 //!  n = page_count
 //! ```
 //!
-//! The HISTORY record for this screen provides the authoritative history
-//! manifest. It counts any incidental prefix above as the SCREEN overlap, then
-//! sends the older complete pages after the terminal becomes ready. The prefix
-//! is not sent again.
+//! The HISTORY record for this screen declares and sends the older complete
+//! pages after the terminal becomes ready. The incidental prefix is already
+//! present in SCREEN and is not sent again.
 //!
 //! The SCREEN payload begins with a fixed header. When the header says there is
 //! no saved cursor, the payload is:
@@ -48,7 +48,7 @@
 //! ```text
 //!   0 +----------------------+
 //!     | Header               |
-//!  45 +----------------------+
+//!  53 +----------------------+
 //!     | Cursor hyperlink     |
 //!     | variable             |
 //! end +----------------------+
@@ -59,9 +59,9 @@
 //! ```text
 //!   0 +----------------------+
 //!     | Header               |
-//!  45 +----------------------+
+//!  53 +----------------------+
 //!     | Saved cursor         |
-//!  68 +----------------------+
+//!  76 +----------------------+
 //!     | Cursor hyperlink     |
 //!     | variable             |
 //! end +----------------------+
@@ -79,33 +79,35 @@
 //!   2 +----------------------------------+
 //!     | Page count (u16)                 |
 //!   4 +----------------------------------+
+//!     | Logical history rows (u64)       |
+//!  12 +----------------------------------+
 //!     | Cursor x (u16)                   |
-//!   6 +----------------------------------+
+//!  14 +----------------------------------+
 //!     | Cursor y (u16)                   |
-//!   8 +----------------------------------+
+//!  16 +----------------------------------+
 //!     | Cursor visual style (u8)         |
-//!   9 +----------------------------------+
+//!  17 +----------------------------------+
 //!     | Cursor flags (u8)                |
-//!  10 +----------------------------------+
+//!  18 +----------------------------------+
 //!     | Concrete cursor pen (Style)      |
-//!  26 +----------------------------------+
-//!     | Hyperlink implicit counter (u32) |
-//!  30 +----------------------------------+
-//!     | Current charset (CharsetState)   |
-//!  32 +----------------------------------+
-//!     | Protected mode (u8)              |
-//!  33 +----------------------------------+
-//!     | Kitty keyboard stack index (u8)  |
 //!  34 +----------------------------------+
+//!     | Hyperlink implicit counter (u32) |
+//!  38 +----------------------------------+
+//!     | Current charset (CharsetState)   |
+//!  40 +----------------------------------+
+//!     | Protected mode (u8)              |
+//!  41 +----------------------------------+
+//!     | Kitty keyboard stack index (u8)  |
+//!  42 +----------------------------------+
 //!     | Kitty keyboard stack flags       |
 //!     | 8 * u8                           |
-//!  42 +----------------------------------+
+//!  50 +----------------------------------+
 //!     | Semantic-click kind (u8)         |
-//!  43 +----------------------------------+
+//!  51 +----------------------------------+
 //!     | Semantic-click value (u8)        |
-//!  44 +----------------------------------+
+//!  52 +----------------------------------+
 //!     | Saved-cursor-present (u8)        |
-//!  45 +----------------------------------+
+//!  53 +----------------------------------+
 //! ```
 //!
 //! The concrete cursor pen uses the fixed style encoding from `style.zig`.
@@ -298,6 +300,8 @@ pub const DecodeError = PayloadDecodeError ||
 /// One decoded SCREEN sequence and the native screen identified by its header.
 pub const Decoded = struct {
     key: TerminalScreenKey,
+    /// Expected history extent at READY, including resident SCREEN overlap.
+    history_rows: u64,
     screen: TerminalScreen,
 
     /// Release the decoded native screen before ownership is transferred.
@@ -507,7 +511,11 @@ pub fn decode(
     // before transferring ownership to the caller.
     result.pages.assertIntegrity();
     result.assertIntegrity();
-    return .{ .key = key, .screen = result };
+    return .{
+        .key = key,
+        .history_rows = header.history_rows,
+        .screen = result,
+    };
 }
 
 /// Errors possible while decoding fixed SCREEN payload fields.
@@ -868,12 +876,15 @@ pub const Header = struct {
     pub const len = computeLen();
 
     comptime {
-        std.debug.assert(len == 45);
+        std.debug.assert(len == 53);
     }
 
     key: TerminalScreenKey,
     /// Complete pages in the minimal suffix covering the active area.
     page_count: u16,
+    /// Advisory logical rows before the active area, including resident
+    /// SCREEN overlap.
+    history_rows: u64,
     cursor_x: u16,
     cursor_y: u16,
     cursor_style: TerminalScreen.CursorStyle,
@@ -895,6 +906,9 @@ pub const Header = struct {
         return .{
             .key = key,
             .page_count = page_count,
+            .history_rows = @intCast(
+                screen.pages.total_rows - screen.pages.rows,
+            ),
             .cursor_x = screen.cursor.x,
             .cursor_y = screen.cursor.y,
             .cursor_style = screen.cursor.cursor_style,
@@ -932,9 +946,10 @@ pub const Header = struct {
             }
         }
 
-        // Screen identity and cursor position.
+        // Screen identity, expected history extent, and cursor position.
         try io.writeInt(writer, u16, @intCast(@intFromEnum(self.key)));
         try io.writeInt(writer, u16, self.page_count);
+        try io.writeInt(writer, u64, self.history_rows);
         try io.writeInt(writer, u16, self.cursor_x);
         try io.writeInt(writer, u16, self.cursor_y);
 
@@ -975,12 +990,13 @@ pub const Header = struct {
     /// The screen key remains structural because it routes the following PAGE
     /// sequence. Unknown semantic fields use native defaults instead.
     pub fn decode(reader: *std.Io.Reader) PayloadDecodeError!Header {
-        // Screen identity and cursor position.
+        // Screen identity, expected history extent, and cursor position.
         const key = enumFromInt(
             TerminalScreenKey,
             try io.readInt(reader, u16),
         ) orelse return error.InvalidKey;
         const page_count = try io.readInt(reader, u16);
+        const history_rows = try io.readInt(reader, u64);
         const cursor_x = try io.readInt(reader, u16);
         const cursor_y = try io.readInt(reader, u16);
 
@@ -1012,6 +1028,7 @@ pub const Header = struct {
         return .{
             .key = key,
             .page_count = page_count,
+            .history_rows = history_rows,
             .cursor_x = cursor_x,
             .cursor_y = cursor_y,
 
@@ -1037,6 +1054,7 @@ pub const Header = struct {
             const value: Header = .{
                 .key = .primary,
                 .page_count = 0,
+                .history_rows = 0,
                 .cursor_x = 0,
                 .cursor_y = 0,
                 .cursor_style = .bar,
@@ -1135,6 +1153,7 @@ fn testHeader() Header {
     return .{
         .key = .alternate,
         .page_count = 0x0203,
+        .history_rows = 0x0102030405060708,
         .cursor_x = 0x0405,
         .cursor_y = 0x0607,
         .cursor_style = .block_hollow,
@@ -1444,16 +1463,16 @@ test "header decoding rejects structural values" {
 test "header decoding normalizes unknown semantic values" {
     var fixture = [_]u8{0} ** Header.len;
 
-    fixture[8] = 4; // Unknown cursor style.
-    fixture[9] = 0xFF; // Known flags, unknown semantic value, reserved bits.
-    fixture[10] = 3; // Unknown cursor foreground color kind.
-    fixture[31] = 0xD0; // Invalid single shift plus a reserved bit.
-    fixture[32] = 3; // Unknown protected mode.
-    fixture[33] = 8; // Out-of-range Kitty keyboard index.
-    @memset(fixture[34..42], 0xFF); // Known flags plus reserved bits.
-    fixture[42] = 3; // Unknown semantic-click kind.
-    fixture[43] = 0xFF;
-    fixture[44] = 2; // Noncanonical true.
+    fixture[16] = 4; // Unknown cursor style.
+    fixture[17] = 0xFF; // Known flags, unknown semantic value, reserved bits.
+    fixture[18] = 3; // Unknown cursor foreground color kind.
+    fixture[39] = 0xD0; // Invalid single shift plus a reserved bit.
+    fixture[40] = 3; // Unknown protected mode.
+    fixture[41] = 8; // Out-of-range Kitty keyboard index.
+    @memset(fixture[42..50], 0xFF); // Known flags plus reserved bits.
+    fixture[50] = 3; // Unknown semantic-click kind.
+    fixture[51] = 0xFF;
+    fixture[52] = 2; // Noncanonical true.
 
     var reader: std.Io.Reader = .fixed(&fixture);
     const decoded = try Header.decode(&reader);
@@ -1504,8 +1523,8 @@ test "header decoding normalizes unknown semantic values" {
     };
     for (invalid_semantic_clicks) |invalid| {
         var semantic_fixture = [_]u8{0} ** Header.len;
-        semantic_fixture[42] = invalid[0];
-        semantic_fixture[43] = invalid[1];
+        semantic_fixture[50] = invalid[0];
+        semantic_fixture[51] = invalid[1];
         var semantic_reader: std.Io.Reader = .fixed(&semantic_fixture);
         const semantic_decoded = try Header.decode(&semantic_reader);
         try std.testing.expectEqual(
@@ -1541,6 +1560,7 @@ test "native SCREEN payload omits absent optional state" {
     const header = try Header.decode(&reader);
     try std.testing.expectEqual(TerminalScreenKey.primary, header.key);
     try std.testing.expectEqual(@as(u16, 1), header.page_count);
+    try std.testing.expectEqual(@as(u64, 0), header.history_rows);
     try std.testing.expect(!header.saved_cursor_present);
     try std.testing.expectEqual(
         null,
@@ -1867,6 +1887,10 @@ test "SCREEN encodes the minimal complete-page active suffix" {
     const header = try Header.decode(payload_reader);
     try std.testing.expectEqual(TerminalScreenKey.primary, header.key);
     try std.testing.expectEqual(@as(u16, 2), header.page_count);
+    try std.testing.expectEqual(
+        @as(u64, @intCast(screen.pages.total_rows - screen.pages.rows)),
+        header.history_rows,
+    );
     try std.testing.expect(!header.saved_cursor_present);
     try std.testing.expectEqual(
         null,
@@ -1904,11 +1928,22 @@ test "SCREEN encodes the minimal complete-page active suffix" {
     );
     defer decoded.deinit();
     try std.testing.expectEqual(TerminalScreenKey.primary, decoded.key);
+    try std.testing.expectEqual(header.history_rows, decoded.history_rows);
     const restored = &decoded.screen;
 
     try std.testing.expectEqual(@as(usize, 2), restored.pages.totalPages());
     const restored_top = restored.pages.getTopLeft(.active);
     try std.testing.expectEqual(@as(u16, 1), restored_top.y);
+    try std.testing.expectEqual(
+        @as(usize, restored_top.y),
+        restored.pages.total_rows - restored.pages.rows,
+    );
+    try std.testing.expect(
+        decoded.history_rows > @as(
+            u64,
+            @intCast(restored.pages.total_rows - restored.pages.rows),
+        ),
+    );
     try std.testing.expectEqual(
         @as(u21, 'B'),
         restored.pages.getTopLeft(.screen).node

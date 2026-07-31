@@ -74,7 +74,9 @@
 //! READY and FINISH contain BLAKE3-256 digests of all preceding snapshot bytes.
 //! READY therefore validates the renderable active-state prefix. FINISH covers
 //! READY and all history as well, validating the complete snapshot and its
-//! record ordering.
+//! record ordering. Each SCREEN declares its complete logical history extent,
+//! allowing a client to size its scrollbar at READY even though older PAGE
+//! records arrive afterward.
 //!
 //! ## Encoding
 //!
