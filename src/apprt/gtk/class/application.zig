@@ -2034,15 +2034,14 @@ const Action = struct {
         chooser.setCreateFolders(1);
         chooser.setCurrentName("ghostty-terminal-io.txt");
 
-        const native = dialog.as(gtk.NativeDialog);
         _ = gtk.NativeDialog.signals.response.connect(
-            native,
+            dialog,
             *ExportTerminalIORequest,
             ExportTerminalIORequest.response,
             request,
             .{ .destroyData = ExportTerminalIORequest.destroy },
         );
-        native.show();
+        dialog.as(gtk.NativeDialog).show();
         return true;
     }
 
@@ -2056,7 +2055,7 @@ const Action = struct {
         }
 
         fn response(
-            dialog: *gtk.NativeDialog,
+            dialog: *gtk.FileChooserNative,
             response_id: c_int,
             self: *ExportTerminalIORequest,
         ) callconv(.c) void {
