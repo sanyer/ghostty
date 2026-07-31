@@ -245,14 +245,24 @@ fn runInner(
 
         const cache: ?DiskCache = if (opts.cache) cache: {
             const path = DiskCache.defaultPath(alloc, "ghostty") catch |err| {
-                warnPrint(stderr, "ghostty terminfo cache unavailable: {}", .{err});
+                warnPrint(stderr, "ghostty terminfo cache unavailable: {t}", .{err});
                 break :session .{ .term = "xterm-256color" };
             };
             break :cache .{ .path = path };
         } else null;
 
         if (cache) |c| {
-            if (c.contains(alloc, dest) catch false) {
+            const cached = c.contains(alloc, dest) catch |err| cached: {
+                // An invalid key is a bad destination, not a bad cache.
+                if (err != error.InvalidCacheKey) warnPrint(
+                    stderr,
+                    "unable to add '{s}' to the cache: {t}",
+                    .{ c.path, err },
+                );
+                break :cached false;
+            };
+
+            if (cached) {
                 verbosePrint(opts, stderr, "dest: {s} (cached, skipping install)", .{dest});
                 break :session .{ .term = "xterm-ghostty" };
             } else {
@@ -266,7 +276,7 @@ fn runInner(
         stderr.flush() catch {};
 
         installRemoteTerminfo(alloc, opts, stderr) catch |err| {
-            warnPrint(stderr, "failed to install terminfo: {}", .{err});
+            warnPrint(stderr, "failed to install terminfo: {t}", .{err});
             break :session .{ .term = "xterm-256color" };
         };
         break :session .{
@@ -297,7 +307,7 @@ fn runInner(
     verbosePrint(opts, stderr, "exec: {f}", .{Joined{ .items = argv }});
 
     const exit_code = childExec(argv) catch |err| {
-        try stderr.print("Error: failed to run {s}: {}\n", .{ argv[0], err });
+        try stderr.print("Error: failed to run {s}: {t}\n", .{ argv[0], err });
         return 1;
     };
     verbosePrint(opts, stderr, "exit: {d}", .{exit_code});
@@ -309,8 +319,23 @@ fn runInner(
             .real,
         ).toSeconds())) |_| {
             verbosePrint(opts, stderr, "cache: wrote {s}", .{entry.dest});
-        } else |err| {
-            log.debug("cache add failed for '{s}': {}", .{ entry.dest, err });
+        } else |err| switch (err) {
+            // An uncacheable destination was already reported above, and a
+            // lock held by a concurrent `+ssh` resolves itself.
+            error.InvalidCacheKey,
+            error.CacheLocked,
+            => verbosePrint(
+                opts,
+                stderr,
+                "cache: skipped {s}: {t}",
+                .{ entry.dest, err },
+            ),
+
+            else => warnPrint(
+                stderr,
+                "unable to add '{s}' to the cache '{s}': {t}",
+                .{ entry.dest, entry.cache.path, err },
+            ),
         }
     };
 
