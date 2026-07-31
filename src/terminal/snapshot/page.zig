@@ -764,13 +764,6 @@ test "framed PAGE encode and decode a sparse native page" {
     try std.testing.expectEqual(null, hyperlink_it.next());
 
     const decoded_first = decoded.getRowAndCell(0, 0);
-    try std.testing.expectEqual(@as(u21, 'A'), decoded_first.cell.codepoint());
-    try std.testing.expectEqual(TerminalCell.Wide.wide, decoded_first.cell.wide);
-    try std.testing.expect(decoded_first.cell.protected);
-    try std.testing.expectEqual(
-        TerminalCell.SemanticContent.prompt,
-        decoded_first.cell.semantic_content,
-    );
     try std.testing.expectEqual(@as(TerminalStyleId, 1), decoded_first.cell.style_id);
     try std.testing.expectEqual(
         @as(TerminalHyperlinkId, 1),
@@ -778,37 +771,10 @@ test "framed PAGE encode and decode a sparse native page" {
     );
 
     const decoded_second = decoded.getRowAndCell(1, 0);
-    try std.testing.expectEqual(TerminalCell.Wide.spacer_tail, decoded_second.cell.wide);
     try std.testing.expectEqual(@as(TerminalStyleId, 2), decoded_second.cell.style_id);
     try std.testing.expectEqual(
         @as(TerminalHyperlinkId, 2),
         decoded.lookupHyperlink(decoded_second.cell).?,
-    );
-
-    const decoded_grapheme = decoded.getRowAndCell(0, 1);
-    try std.testing.expectEqualSlices(
-        u21,
-        &.{ 0x0301, 0x0302 },
-        decoded.lookupGrapheme(decoded_grapheme.cell).?,
-    );
-
-    const decoded_rgb = decoded.getRowAndCell(1, 1);
-    try std.testing.expectEqual(TerminalCell.ContentTag.bg_color_rgb, decoded_rgb.cell.content_tag);
-    try std.testing.expectEqual(
-        TerminalCell.RGB{ .r = 0xaa, .g = 0xbb, .b = 0xcc },
-        decoded_rgb.cell.content.color_rgb,
-    );
-
-    const decoded_spacer_head = decoded.getRowAndCell(2, 1);
-    try std.testing.expectEqual(
-        TerminalCell.Wide.spacer_head,
-        decoded_spacer_head.cell.wide,
-    );
-    try std.testing.expect(decoded_spacer_head.row.wrap);
-    try std.testing.expect(decoded_spacer_head.row.wrap_continuation);
-    try std.testing.expectEqual(
-        TerminalRow.SemanticPrompt.prompt_continuation,
-        decoded_spacer_head.row.semantic_prompt,
     );
 
     // The first re-encode reflects compacted IDs; subsequent round trips must

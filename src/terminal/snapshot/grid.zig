@@ -105,6 +105,7 @@
 //! nonzero base codepoint.
 
 const std = @import("std");
+const test_fixture = @import("fixture.zig");
 const io = @import("io.zig");
 const kitty = @import("../kitty.zig");
 const terminal_hyperlink = @import("../hyperlink.zig");
@@ -543,3 +544,164 @@ const CellHeader = struct {
         _padding: u5 = 0,
     };
 };
+
+const test_golden_fixture = test_fixture.parse(
+    @embedFile("testdata/grid-v1.hex"),
+);
+
+test "grid golden encoding and decoding" {
+    const capacity: terminal_page.Capacity = .{
+        .cols = 3,
+        .rows = 2,
+        .styles = 0,
+        .hyperlink_bytes = 0,
+        .grapheme_bytes = 64,
+        .string_bytes = 0,
+    };
+    var source = try TerminalPage.init(capacity);
+    defer source.deinit();
+
+    // The first row covers semantic metadata, a wide-cell pair, and a
+    // multi-codepoint grapheme.
+    const wide = source.getRowAndCell(0, 0);
+    wide.row.semantic_prompt = .prompt;
+    wide.cell.* = .init('A');
+    wide.cell.wide = .wide;
+    wide.cell.protected = true;
+    wide.cell.semantic_content = .prompt;
+
+    const tail = source.getRowAndCell(1, 0);
+    tail.cell.wide = .spacer_tail;
+    tail.cell.semantic_content = .input;
+
+    const grapheme = source.getRowAndCell(2, 0);
+    grapheme.cell.* = .init('x');
+    try source.setGraphemes(
+        grapheme.row,
+        grapheme.cell,
+        &.{ 0x0301, 0x0302 },
+    );
+
+    // The second row covers both background-color kinds and a wrapped spacer
+    // head with the remaining row semantic value.
+    const palette = source.getRowAndCell(0, 1);
+    palette.cell.content_tag = .bg_color_palette;
+    palette.cell.content = .{ .color_palette = .{ .data = 7 } };
+
+    const rgb = source.getRowAndCell(1, 1);
+    rgb.cell.content_tag = .bg_color_rgb;
+    rgb.cell.content = .{ .color_rgb = .{
+        .r = 0xaa,
+        .g = 0xbb,
+        .b = 0xcc,
+    } };
+    rgb.cell.protected = true;
+
+    const head = source.getRowAndCell(2, 1);
+    head.cell.wide = .spacer_head;
+    head.row.wrap = true;
+    head.row.wrap_continuation = true;
+    head.row.semantic_prompt = .prompt_continuation;
+
+    var encoded: [128]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&encoded);
+    try encode(&source, &writer);
+    try test_fixture.expectEqual(
+        .bytes,
+        "src/terminal/snapshot/testdata/grid-v1.hex",
+        "snapshot_fixture-grid-v1.hex",
+        &test_golden_fixture,
+        writer.buffered(),
+    );
+
+    var destination = try TerminalPage.init(capacity);
+    defer destination.deinit();
+    var style_remap = StyleRemap.init(std.testing.allocator);
+    defer style_remap.deinit();
+    var hyperlink_remap = HyperlinkRemap.init(std.testing.allocator);
+    defer hyperlink_remap.deinit();
+
+    // Decode the checked-in reference through a one-byte reader buffer.
+    var fixture_reader: std.Io.Reader = .fixed(&test_golden_fixture);
+    var read_buffer: [1]u8 = undefined;
+    var limited = fixture_reader.limited(.unlimited, &read_buffer);
+    try decode(
+        &destination,
+        &limited.interface,
+        &style_remap,
+        &hyperlink_remap,
+    );
+    try destination.verifyIntegrity(std.testing.allocator);
+
+    const decoded_wide = destination.getRowAndCell(0, 0);
+    try std.testing.expectEqual(@as(u21, 'A'), decoded_wide.cell.codepoint());
+    try std.testing.expectEqual(TerminalCell.Wide.wide, decoded_wide.cell.wide);
+    try std.testing.expect(decoded_wide.cell.protected);
+    try std.testing.expectEqual(
+        TerminalCell.SemanticContent.prompt,
+        decoded_wide.cell.semantic_content,
+    );
+    try std.testing.expectEqual(
+        TerminalRow.SemanticPrompt.prompt,
+        decoded_wide.row.semantic_prompt,
+    );
+
+    const decoded_tail = destination.getRowAndCell(1, 0);
+    try std.testing.expectEqual(
+        TerminalCell.Wide.spacer_tail,
+        decoded_tail.cell.wide,
+    );
+    try std.testing.expectEqual(
+        TerminalCell.SemanticContent.input,
+        decoded_tail.cell.semantic_content,
+    );
+
+    const decoded_grapheme = destination.getRowAndCell(2, 0);
+    try std.testing.expectEqualSlices(
+        u21,
+        &.{ 0x0301, 0x0302 },
+        destination.lookupGrapheme(decoded_grapheme.cell).?,
+    );
+
+    const decoded_palette = destination.getRowAndCell(0, 1);
+    try std.testing.expectEqual(
+        TerminalCell.ContentTag.bg_color_palette,
+        decoded_palette.cell.content_tag,
+    );
+    try std.testing.expectEqual(
+        @as(u8, 7),
+        decoded_palette.cell.content.color_palette.data,
+    );
+
+    const decoded_rgb = destination.getRowAndCell(1, 1);
+    try std.testing.expectEqual(
+        TerminalCell.ContentTag.bg_color_rgb,
+        decoded_rgb.cell.content_tag,
+    );
+    try std.testing.expectEqual(
+        TerminalCell.RGB{ .r = 0xaa, .g = 0xbb, .b = 0xcc },
+        decoded_rgb.cell.content.color_rgb,
+    );
+    try std.testing.expect(decoded_rgb.cell.protected);
+
+    const decoded_head = destination.getRowAndCell(2, 1);
+    try std.testing.expectEqual(
+        TerminalCell.Wide.spacer_head,
+        decoded_head.cell.wide,
+    );
+    try std.testing.expect(decoded_head.row.wrap);
+    try std.testing.expect(decoded_head.row.wrap_continuation);
+    try std.testing.expectEqual(
+        TerminalRow.SemanticPrompt.prompt_continuation,
+        decoded_head.row.semantic_prompt,
+    );
+
+    // A re-encode proves the decoded native page retains every wire field.
+    var reencoded: [128]u8 = undefined;
+    var rewriter: std.Io.Writer = .fixed(&reencoded);
+    try encode(&destination, &rewriter);
+    try std.testing.expectEqualStrings(
+        &test_golden_fixture,
+        rewriter.buffered(),
+    );
+}

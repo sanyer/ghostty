@@ -24,6 +24,7 @@
 //! ```
 
 const std = @import("std");
+const test_fixture = @import("fixture.zig");
 const record = @import("record.zig");
 
 const Blake3 = std.crypto.hash.Blake3;
@@ -110,27 +111,55 @@ pub fn decode(
     }
 }
 
-test "checkpoint BLAKE3-256 registry" {
-    const expected = [_]u8{
-        0x64, 0x37, 0xb3, 0xac, 0x38, 0x46, 0x51, 0x33,
-        0xff, 0xb6, 0x3b, 0x75, 0x27, 0x3a, 0x8d, 0xb5,
-        0x48, 0xc5, 0x58, 0x46, 0x5d, 0x79, 0xdb, 0x03,
-        0xfd, 0x35, 0x9c, 0x6c, 0xd5, 0xbd, 0x9d, 0x85,
-    };
-    var actual: Digest = undefined;
-    Blake3.hash("abc", &actual, .{});
-    try std.testing.expectEqual(expected, actual);
+const test_ready_fixture = test_fixture.parse(
+    @embedFile("testdata/checkpoint-ready-v1.hex"),
+);
 
+test "READY golden encoding and BLAKE3-256 registry" {
+    const prefix = "abc";
+
+    var snapshot: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer snapshot.deinit();
+    try snapshot.writer.writeAll(prefix);
+    try encode(.ready, &snapshot);
+
+    try test_fixture.expectEqual(
+        .bytes,
+        "src/terminal/snapshot/testdata/checkpoint-ready-v1.hex",
+        "snapshot_fixture-checkpoint-ready-v1.hex",
+        &test_ready_fixture,
+        snapshot.written(),
+    );
+
+    // The checked-in payload independently locks the BLAKE3-256 registry.
+    var actual: Digest = undefined;
+    Blake3.hash(prefix, &actual, .{});
+    const payload_offset = prefix.len + record.Header.len;
+    try std.testing.expectEqualSlices(
+        u8,
+        test_ready_fixture[payload_offset..][0..actual.len],
+        &actual,
+    );
+
+    // Finalizing a streaming hasher neither consumes nor resets it.
     var hasher = Blake3.init(.{});
     hasher.update("a");
-    var prefix: Digest = undefined;
-    Blake3.hash("a", &prefix, .{});
+    var prefix_digest: Digest = undefined;
+    Blake3.hash("a", &prefix_digest, .{});
     hasher.final(&actual);
-    try std.testing.expectEqual(prefix, actual);
+    try std.testing.expectEqual(prefix_digest, actual);
 
     hasher.update("bc");
     hasher.final(&actual);
-    try std.testing.expectEqual(expected, actual);
+    try std.testing.expectEqualSlices(
+        u8,
+        test_ready_fixture[payload_offset..][0..actual.len],
+        &actual,
+    );
+
+    // Decode the checked-in record rather than the generated candidate.
+    var source: std.Io.Reader = .fixed(test_ready_fixture[prefix.len..]);
+    try decode(.ready, actual, &source);
 }
 
 test "READY and FINISH checkpoint coverage" {
