@@ -373,8 +373,4 @@ msgstr "Клипбордът е изчистен"
 msgid "Ghostty Developers"
 msgstr "Разработчици на Ghostty"
 
-#~ msgid "Command succeeded"
-#~ msgstr "Командата завърши успешно"
 
-#~ msgid "Command failed"
-#~ msgstr "Командата завърши неуспешно"

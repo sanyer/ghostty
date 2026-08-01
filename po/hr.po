@@ -373,8 +373,4 @@ msgstr "Očišćen međuspremnik"
 msgid "Ghostty Developers"
 msgstr "Razvijatelji Ghosttyja"
 
-#~ msgid "Command succeeded"
-#~ msgstr "Naredba je uspjela"
 
-#~ msgid "Command failed"
-#~ msgstr "Naredba nije uspjela"

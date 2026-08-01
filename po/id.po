@@ -373,8 +373,4 @@ msgstr "Papan klip dibersihkan"
 msgid "Ghostty Developers"
 msgstr "Pengembang Ghostty"
 
-#~ msgid "Command succeeded"
-#~ msgstr "Perintah berhasil"
 
-#~ msgid "Command failed"
-#~ msgstr "Perintah gagal"

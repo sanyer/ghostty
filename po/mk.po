@@ -373,8 +373,4 @@ msgstr "Исчистена привремена меморија"
 msgid "Ghostty Developers"
 msgstr "Развивачи на Ghostty"
 
-#~ msgid "Command succeeded"
-#~ msgstr "Командата успеа"
 
-#~ msgid "Command failed"
-#~ msgstr "Командата не успеа"

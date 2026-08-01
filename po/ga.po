@@ -373,8 +373,4 @@ msgstr "Gearrthaisce glanta"
 msgid "Ghostty Developers"
 msgstr "Forbróirí Ghostty"
 
-#~ msgid "Command succeeded"
-#~ msgstr "D'éirigh leis an ordú"
 
-#~ msgid "Command failed"
-#~ msgstr "Theip ar an ordú"

@@ -364,8 +364,4 @@ msgstr "已清空剪贴板"
 msgid "Ghostty Developers"
 msgstr "Ghostty 开发团队"
 
-#~ msgid "Command succeeded"
-#~ msgstr "命令执行成功"
 
-#~ msgid "Command failed"
-#~ msgstr "命令执行失败"

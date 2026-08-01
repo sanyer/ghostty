@@ -370,8 +370,4 @@ msgstr "Starpliktuve notīrīta"
 msgid "Ghostty Developers"
 msgstr "Ghostty izstrādātāji"
 
-#~ msgid "Command succeeded"
-#~ msgstr "Komanda izdevās"
 
-#~ msgid "Command failed"
-#~ msgstr "Komanda neizdevās"

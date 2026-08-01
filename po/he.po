@@ -370,8 +370,4 @@ msgstr "לוח ההעתקה רוקן"
 msgid "Ghostty Developers"
 msgstr "המפתחים של Ghostty"
 
-#~ msgid "Command succeeded"
-#~ msgstr "הפקודה הצליחה"
 
-#~ msgid "Command failed"
-#~ msgstr "הפקודה נכשלה"

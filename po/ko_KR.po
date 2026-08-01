@@ -370,8 +370,4 @@ msgstr "클립보드 지워짐"
 msgid "Ghostty Developers"
 msgstr "Ghostty 개발자들"
 
-#~ msgid "Command succeeded"
-#~ msgstr "명령 성공"
 
-#~ msgid "Command failed"
-#~ msgstr "명령 실패"

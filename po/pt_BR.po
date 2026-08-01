@@ -376,8 +376,4 @@ msgstr "Área de transferência limpa"
 msgid "Ghostty Developers"
 msgstr "Desenvolvedores do Ghostty"
 
-#~ msgid "Command succeeded"
-#~ msgstr "Comando executado com sucesso"
 
-#~ msgid "Command failed"
-#~ msgstr "Comando falhou"

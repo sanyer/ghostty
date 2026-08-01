@@ -374,8 +374,4 @@ msgstr "Portapapeles vaciado"
 msgid "Ghostty Developers"
 msgstr "Desarrolladores de Ghostty"
 
-#~ msgid "Command succeeded"
-#~ msgstr "Comando completado"
 
-#~ msgid "Command failed"
-#~ msgstr "Comando fallido"

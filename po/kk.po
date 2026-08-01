@@ -375,8 +375,4 @@ msgstr "Алмасу буфері тазартылды"
 msgid "Ghostty Developers"
 msgstr "Ghostty әзірлеушілері"
 
-#~ msgid "Command succeeded"
-#~ msgstr "Команда сәтті орындалды"
 
-#~ msgid "Command failed"
-#~ msgstr "Команда сәтсіз аяқталды"

@@ -362,8 +362,4 @@ msgstr "已清除剪貼簿"
 msgid "Ghostty Developers"
 msgstr "Ghostty 開發者"
 
-#~ msgid "Command succeeded"
-#~ msgstr "命令執行成功"
 
-#~ msgid "Command failed"
-#~ msgstr "命令執行失敗"

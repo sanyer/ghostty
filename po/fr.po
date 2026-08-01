@@ -374,8 +374,4 @@ msgstr "Presse-papiers vidé"
 msgid "Ghostty Developers"
 msgstr "Les développeurs de Ghostty"
 
-#~ msgid "Command succeeded"
-#~ msgstr "Commande réussie"
 
-#~ msgid "Command failed"
-#~ msgstr "La commande a échoué"

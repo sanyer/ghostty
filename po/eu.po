@@ -370,8 +370,4 @@ msgstr "Arbela garbitu da"
 msgid "Ghostty Developers"
 msgstr "Ghostty garatzaileak"
 
-#~ msgid "Command succeeded"
-#~ msgstr "Komandoa ondo amaitu da"
 
-#~ msgid "Command failed"
-#~ msgstr "Komandoak huts egin du"

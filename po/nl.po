@@ -374,8 +374,4 @@ msgstr "Klembord geleegd"
 msgid "Ghostty Developers"
 msgstr "Ghostty-ontwikkelaars"
 
-#~ msgid "Command succeeded"
-#~ msgstr "Opdracht geslaagd"
 
-#~ msgid "Command failed"
-#~ msgstr "Opdracht mislukt"

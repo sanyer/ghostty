@@ -373,8 +373,4 @@ msgstr "Vágólap törölve"
 msgid "Ghostty Developers"
 msgstr "Ghostty fejlesztők"
 
-#~ msgid "Command succeeded"
-#~ msgstr "Parancs sikeres"
 
-#~ msgid "Command failed"
-#~ msgstr "Parancs sikertelen"

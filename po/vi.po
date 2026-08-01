@@ -372,8 +372,4 @@ msgstr "Đã xóa sạch bảng tạm"
 msgid "Ghostty Developers"
 msgstr "Các nhà phát triển Ghostty"
 
-#~ msgid "Command succeeded"
-#~ msgstr "Lệnh thành công"
 
-#~ msgid "Command failed"
-#~ msgstr "Lệnh thất bại"

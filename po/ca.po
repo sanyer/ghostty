@@ -375,8 +375,4 @@ msgstr "Porta-retalls netejat"
 msgid "Ghostty Developers"
 msgstr "Desenvolupadors de Ghostty"
 
-#~ msgid "Command succeeded"
-#~ msgstr "Comanda completada amb èxit"
 
-#~ msgid "Command failed"
-#~ msgstr "Comanda fallida"

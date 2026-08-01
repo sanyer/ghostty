@@ -373,8 +373,4 @@ msgstr "Буфер обміну очищено"
 msgid "Ghostty Developers"
 msgstr "Розробники Ghostty"
 
-#~ msgid "Command succeeded"
-#~ msgstr "Команда завершилась успішно"
 
-#~ msgid "Command failed"
-#~ msgstr "Команда завершилась з помилкою"

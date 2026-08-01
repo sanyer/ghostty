@@ -374,8 +374,4 @@ msgstr "Utklippstavle tømt"
 msgid "Ghostty Developers"
 msgstr "Ghostty-utviklere"
 
-#~ msgid "Command succeeded"
-#~ msgstr "Kommando lyktes"
 
-#~ msgid "Command failed"
-#~ msgstr "Kommando mislyktes"

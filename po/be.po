@@ -373,8 +373,4 @@ msgstr "Буфер абмену ачышчаны"
 msgid "Ghostty Developers"
 msgstr "Распрацоўшчыкі Ghostty"
 
-#~ msgid "Command succeeded"
-#~ msgstr "Каманда выканана паспяхова"
 
-#~ msgid "Command failed"
-#~ msgstr "Каманда завершылася з памылкай"

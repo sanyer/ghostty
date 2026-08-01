@@ -374,8 +374,4 @@ msgstr "Wyczyszczono schowek"
 msgid "Ghostty Developers"
 msgstr "Twórcy Ghostty"
 
-#~ msgid "Command succeeded"
-#~ msgstr "Komenda wykonana pomyślnie"
 
-#~ msgid "Command failed"
-#~ msgstr "Komenda nie powiodła się"

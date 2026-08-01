@@ -372,8 +372,4 @@ msgstr "クリップボードを空にしました"
 msgid "Ghostty Developers"
 msgstr "Ghostty 開発者"
 
-#~ msgid "Command succeeded"
-#~ msgstr "コマンド実行成功"
 
-#~ msgid "Command failed"
-#~ msgstr "コマンド実行失敗"

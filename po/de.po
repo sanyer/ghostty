@@ -378,8 +378,4 @@ msgstr "Zwischenablage geleert"
 msgid "Ghostty Developers"
 msgstr "Ghostty-Entwickler"
 
-#~ msgid "Command succeeded"
-#~ msgstr "Befehl erfolgreich"
 
-#~ msgid "Command failed"
-#~ msgstr "Befehl fehlgeschlagen"

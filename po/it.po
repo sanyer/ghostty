@@ -375,8 +375,4 @@ msgstr "Appunti svuotati"
 msgid "Ghostty Developers"
 msgstr "Sviluppatori di Ghostty"
 
-#~ msgid "Command succeeded"
-#~ msgstr "Comando riuscito"
 
-#~ msgid "Command failed"
-#~ msgstr "Comando fallito"

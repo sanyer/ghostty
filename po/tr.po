@@ -374,8 +374,4 @@ msgstr "Pano temizlendi"
 msgid "Ghostty Developers"
 msgstr "Ghostty Geliştiricileri"
 
-#~ msgid "Command succeeded"
-#~ msgstr "Komut başarılı oldu"
 
-#~ msgid "Command failed"
-#~ msgstr "Komut başarısız oldu"

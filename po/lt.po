@@ -373,8 +373,4 @@ msgstr "Iškarpinė išvalyta"
 msgid "Ghostty Developers"
 msgstr "Ghostty kūrėjai"
 
-#~ msgid "Command succeeded"
-#~ msgstr "Komanda sėkminga"
 
-#~ msgid "Command failed"
-#~ msgstr "Komanda nepavyko"
