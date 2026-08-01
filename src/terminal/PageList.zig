@@ -1532,6 +1532,15 @@ const ReflowCursor = struct {
     /// page change goes through init() which resets this.
     style_cache: StyleCache,
 
+    /// Memoizes the capacity adjustment for new destination pages
+    /// (see reflowRow). It only depends on the source page so this is
+    /// keyed by the source page pointer, which reflow visits
+    /// sequentially and never revisits.
+    cap_memo: ?struct {
+        src_page: *const Page,
+        cap: Capacity,
+    },
+
     const StyleCache = struct {
         src_page: ?*const Page,
         src_id: stylepkg.Id,
@@ -1561,6 +1570,7 @@ const ReflowCursor = struct {
             .total_rows = node.rows(),
 
             .style_cache = .invalid,
+            .cap_memo = null,
         };
     }
 
@@ -1643,18 +1653,16 @@ const ReflowCursor = struct {
 
         // Inherit increased styles or grapheme bytes from the src page
         // we're reflowing from for new pages.
-        const cap = src_page.capacity.adjust(
-            .{ .cols = self.page.size.cols },
-        ) catch |err| err: {
-            comptime assert(@TypeOf(err) == error{OutOfMemory});
-
-            var cap = src_page.capacity;
-            cap.cols = self.page.size.cols;
-            // We're already a non-standard page. We don't want to
-            // inherit a massive set of rows, so cap it at our std size.
-            cap.rows = @min(src_page.size.rows, std_capacity.rows);
-            break :err cap;
-        };
+        //
+        // This only depends on the source page, which we process row
+        // by row, so memoize it: computing the adjustment requires a
+        // full page layout calculation which is much too expensive to
+        // do for every row.
+        const cap: Capacity = if (self.cap_memo) |memo| cap: {
+            if (memo.src_page == src_page) break :cap memo.cap;
+            // Source page changed, fall through to recompute.
+            break :cap self.computeAndMemoizeCap(src_page);
+        } else self.computeAndMemoizeCap(src_page);
 
         // Our row isn't blank, write any new rows we deferred.
         while (self.new_rows > 0) {
@@ -1763,6 +1771,29 @@ const ReflowCursor = struct {
         if (!src_row.wrap) {
             self.new_rows += 1;
         }
+    }
+
+    /// Compute and memoize the new-page capacity for the given source
+    /// page. See the call site in reflowRow for details.
+    fn computeAndMemoizeCap(
+        self: *ReflowCursor,
+        src_page: *const Page,
+    ) Capacity {
+        const cap = src_page.capacity.adjust(
+            .{ .cols = self.page.size.cols },
+        ) catch |err| err: {
+            comptime assert(@TypeOf(err) == error{OutOfMemory});
+
+            var cap = src_page.capacity;
+            cap.cols = self.page.size.cols;
+            // We're already a non-standard page. We don't want to
+            // inherit a massive set of rows, so cap it at our std size.
+            cap.rows = @min(src_page.size.rows, std_capacity.rows);
+            break :err cap;
+        };
+
+        self.cap_memo = .{ .src_page = src_page, .cap = cap };
+        return cap;
     }
 
     /// True if this cell can be copied verbatim as part of a bulk
