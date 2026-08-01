@@ -402,6 +402,15 @@ page_size: usize,
 /// in the state struct.
 page_compression: IncrementalCompressionState = .{},
 
+/// A node available for immediate reuse by createPage, bypassing the
+/// memory pool round trip. This is only set during column reflow
+/// (resizeCols), which destroys one source page for roughly every
+/// destination page it creates: returning a page buffer to the pool
+/// decommits it and taking one back recommits it, and that syscall
+/// pair per page is a significant part of reflow cost. Always null
+/// outside of an in-progress reflow.
+recycle_node: ?*List.Node = null,
+
 /// Limits for scrollback.
 limits: Limits,
 
@@ -1416,6 +1425,14 @@ fn resizeCols(
         }
     }
 
+    // Reflowed source pages are stashed for reuse as destination
+    // pages (see recycle_node). Whether we succeed or fail, a stashed
+    // node must not outlive the reflow.
+    defer if (self.recycle_node) |node| {
+        self.recycle_node = null;
+        self.destroyNode(node);
+    };
+
     // Set our new page as the only page. This orphans the existing pages
     // in the list, but that's fine since we're gonna delete them anyway.
     self.pages.first = first_rewritten_node;
@@ -1431,11 +1448,21 @@ fn resizeCols(
                 if (preserved_cursor) |c| c.tracked_pin else null,
             );
 
-            // Once we're done reflowing a page, destroy it immediately.
-            // This frees memory and makes it more likely in memory
-            // constrained environments that the next reflow will work.
-            if (row.y == row.node.rows() - 1) {
-                self.destroyNode(row.node);
+            // Once we're done reflowing a page, we're done with it, so
+            // make it available for reuse (or destroy it). Making it
+            // immediately available frees memory and makes it more
+            // likely in memory constrained environments that the next
+            // reflow will work.
+            if (row.y == row.node.rows() - 1) destroy_node: {
+                if (self.recycle_node != null or
+                    row.node.owned != .pool or
+                    row.node.data != .resident)
+                {
+                    self.destroyNode(row.node);
+                    break :destroy_node;
+                }
+
+                self.recycle_node = row.node;
             }
         }
 
@@ -4260,6 +4287,45 @@ inline fn createPage(
     opts: CreatePage,
 ) Allocator.Error!*List.Node {
     // log.debug("create page cap={}", .{opts.cap});
+
+    // If we have a node available for recycling (only during reflow,
+    // see recycle_node), reuse it directly rather than going through
+    // the memory pool.
+    if (self.recycle_node) |node| recycle: {
+        // Only a standard pool-owned resident node can be rebuilt
+        // in place for a standard-size layout.
+        if (opts.exact_size) break :recycle;
+        if (node.owned != .pool) break :recycle;
+        if (node.data != .resident) break :recycle;
+        const layout = Page.layout(opts.cap);
+        if (layout.total_size > std_size) break :recycle;
+
+        self.recycle_node = null;
+
+        // The pool guarantees that buffers it hands out are zeroed.
+        // A pool-owned page dirties only its Page.memory prefix of
+        // the underlying standard-size item, so zeroing that prefix
+        // re-establishes the guarantee (this mirrors destroyNodeExt,
+        // minus the decommit).
+        const page = &node.data.resident;
+        const item: *align(std.heap.page_size_min) [std_size]u8 =
+            @ptrCast(@alignCast(page.memory.ptr));
+        @memset(page.memory, 0);
+
+        // Accounting: a pool-owned node always accounts for a full
+        // pool item in page_size, so destroying the node and
+        // creating a new pooled one is a net zero.
+
+        node.* = .{
+            .data = .{ .resident = .initBuf(.init(item), layout) },
+            .serial = self.page_serial,
+            .owned = .pool,
+        };
+        node.page().size.rows = 0;
+        self.page_serial += 1;
+        return node;
+    }
+
     return try createPageExt(
         &self.pool,
         opts,
