@@ -1673,6 +1673,25 @@ const ReflowCursor = struct {
                 self.page_row.wrap_continuation = true;
             }
 
+            // Fast path: bulk-copy a run of simple cells directly
+            // into the destination row. The vast majority of cells
+            // are narrow, have no managed memory (graphemes,
+            // hyperlinks), and share a single style in long runs, so
+            // this avoids the per-cell state machine below for most
+            // of the work. Rows with tracked pins take the slow path
+            // so pin remapping behaves identically.
+            if (!row_has_pins) {
+                const max_run = @min(
+                    cols_len - x,
+                    @as(usize, self.page.size.cols) - self.x,
+                );
+                const run = bulkRunLength(cells[x..][0..max_run]);
+                if (run > 0 and self.copyRun(cells[x..][0..run], src_page)) {
+                    x += run;
+                    continue;
+                }
+            }
+
             // Move any tracked pins from the source.
             if (row_has_pins) {
                 const pin_keys = list.tracked_pins.keys();
@@ -1744,6 +1763,154 @@ const ReflowCursor = struct {
         if (!src_row.wrap) {
             self.new_rows += 1;
         }
+    }
+
+    /// True if this cell can be copied verbatim as part of a bulk
+    /// run: a narrow plain-text or bg-color cell with no managed
+    /// memory (graphemes, hyperlinks) and no special reflow handling
+    /// (wide characters, spacers, Kitty virtual placeholders). For
+    /// these cells writeCell reduces to a copy of the raw cell plus
+    /// a style ref count adjustment.
+    inline fn bulkCopyable(cell: pagepkg.Cell) bool {
+        return switch (cell.content_tag) {
+            .codepoint => copyable: {
+                if (cell.wide != .narrow) break :copyable false;
+                if (cell.hyperlink) break :copyable false;
+                if (comptime build_options.kitty_graphics) {
+                    // Placeholders must set a row flag, so they take
+                    // the slow path.
+                    if (cell.content.codepoint.data ==
+                        kitty.graphics.unicode.placeholder)
+                    {
+                        break :copyable false;
+                    }
+                }
+                break :copyable true;
+            },
+
+            // Grapheme data must be cloned cell-by-cell.
+            .codepoint_grapheme => false,
+
+            // These are guaranteed to have no style or grapheme data
+            // (see writeCell) so they are pure copies. The style
+            // check is defensive so that a bg cell can never join or
+            // extend a styled run.
+            .bg_color_palette,
+            .bg_color_rgb,
+            => cell.style_id == stylepkg.default_id,
+        };
+    }
+
+    /// The length of the prefix of cells that can be copied at once
+    /// with copyRun: bulk-copyable cells sharing a single style.
+    fn bulkRunLength(cells: []const pagepkg.Cell) usize {
+        if (cells.len == 0) return 0;
+        const first = cells[0];
+        if (!bulkCopyable(first)) return 0;
+
+        var len: usize = 1;
+        while (len < cells.len) : (len += 1) {
+            const cell = cells[len];
+            if (!bulkCopyable(cell) or
+                cell.style_id != first.style_id) break;
+        }
+
+        return len;
+    }
+
+    /// Copy a run of bulk-copyable cells (see bulkCopyable) sharing
+    /// one style into the destination row at the current position,
+    /// then advance the cursor. The run must fit in the remaining
+    /// columns of the destination row.
+    ///
+    /// Returns false without any state change if the style could not
+    /// be mapped into the destination page without a capacity
+    /// change; the caller should fall back to writeCell which
+    /// handles growing capacity.
+    fn copyRun(
+        self: *ReflowCursor,
+        src_cells: []const pagepkg.Cell,
+        src_page: *const Page,
+    ) bool {
+        assert(!self.pending_wrap);
+        assert(src_cells.len >= 1);
+        assert(src_cells.len <= self.page.size.cols - self.x);
+
+        const style_id = src_cells[0].style_id;
+        const n: u16 = @intCast(src_cells.len);
+
+        // Resolve the destination style id for this run and take one
+        // reference per cell. This mirrors the per-cell style logic
+        // in writeCell, including the memoization (see StyleCache).
+        const dst_style_id: stylepkg.Id = if (style_id == stylepkg.default_id)
+            stylepkg.default_id
+        else dst: {
+            if (self.style_cache.src_page == @as(?*const Page, src_page) and
+                self.style_cache.src_id == style_id)
+            {
+                const id = self.style_cache.dst_id;
+                self.page.styles.useMultiple(self.page.memory, id, n);
+                break :dst id;
+            }
+
+            const style = src_page.styles.get(
+                src_page.memory,
+                style_id,
+            ).*;
+
+            // Any error here (set full or needs rehash) is handled
+            // by falling back to the slow path, which grows capacity.
+            // No state has been modified yet at this point.
+            const id = (self.page.styles.addWithId(
+                self.page.memory,
+                style,
+                style_id,
+            ) catch return false) orelse style_id;
+
+            // addWithId took one reference, take the rest.
+            if (n > 1) self.page.styles.useMultiple(
+                self.page.memory,
+                id,
+                n - 1,
+            );
+
+            self.style_cache = .{
+                .src_page = src_page,
+                .src_id = style_id,
+                .dst_id = id,
+            };
+
+            break :dst id;
+        };
+
+        // Copy the raw cell contents.
+        const dst_cells: []pagepkg.Cell = @as(
+            [*]pagepkg.Cell,
+            @ptrCast(self.page_cell),
+        )[0..src_cells.len];
+        @memcpy(dst_cells, src_cells);
+
+        // If the style resolved to a different id in the destination
+        // page then rewrite the copied cells to point at it.
+        if (dst_style_id != style_id) {
+            for (dst_cells) |*cell| cell.style_id = dst_style_id;
+        }
+        if (dst_style_id != stylepkg.default_id) self.page_row.styled = true;
+
+        // Advance the cursor, matching what repeated cursorForward
+        // calls after each cell write would have done.
+        const cols = self.page.size.cols;
+        const cell_ptr: [*]pagepkg.Cell = @ptrCast(self.page_cell);
+        if (self.x + n == cols) {
+            self.x = cols - 1;
+            self.page_cell = @ptrCast(cell_ptr + n - 1);
+            self.pending_wrap = true;
+        } else {
+            self.x += n;
+            self.page_cell = @ptrCast(cell_ptr + n);
+        }
+
+        return true;
     }
 
     /// Write a cell. On error, this will not unwrite the cell but
