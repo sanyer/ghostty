@@ -9,6 +9,7 @@ const build_options = @import("terminal_options");
 const Allocator = std.mem.Allocator;
 const assert = @import("../quirks.zig").inlineAssert;
 const fastmem = @import("../fastmem.zig");
+const simd = @import("../simd/main.zig");
 const tripwire = @import("../tripwire.zig");
 const DoublyLinkedList = @import("../datastruct/main.zig").IntrusiveDoublyLinkedList;
 const color = @import("color.zig");
@@ -1859,10 +1860,11 @@ const ReflowCursor = struct {
         };
     }
 
-    /// The group length for the masked-compare helpers below. This
-    /// matches the group length used by other cell scans (e.g. the
+    /// The group length for the vectorized bulk run scan below: the
+    /// SIMD lane count where the target supports it, otherwise a
+    /// plain unrolled group like other cell scans use (e.g. the
     /// render state scans).
-    const bulk_group_len = 8;
+    const bulk_group_len = simd.lanes(u64) orelse 8;
 
     /// Masked compare helper covering every cell field that a run
     /// must share to be copied by copyRun: given that the first cell
@@ -1918,6 +1920,21 @@ const ReflowCursor = struct {
         };
 
         var len: usize = 1;
+
+        // Vectorized scan: check whole groups of cells at once. If a
+        // group fully matches, the run extends by the whole group;
+        // otherwise fall through to the scalar loop below, which
+        // finds the exact end of the run within it.
+        while (cells.len - len >= bulk_group_len) {
+            if (!BulkRunMask.eql(cells, len, run_pattern)) break;
+            if (check_placeholder and PlaceholderMask.eqlAny(
+                cells,
+                len,
+                placeholder_pattern,
+            )) break;
+            len += bulk_group_len;
+        }
+
         while (len < cells.len) : (len += 1) {
             if (!BulkRunMask.eqlScalar(cells[len], run_pattern)) break;
             if (check_placeholder and PlaceholderMask.eqlScalar(
