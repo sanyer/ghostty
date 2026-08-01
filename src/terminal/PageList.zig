@@ -1566,12 +1566,21 @@ const ReflowCursor = struct {
             if (cols_len == 0 and src_row.semantic_prompt != .none) cols_len = 1;
         }
 
-        // Handle tracked pin adjustments.
+        // Handle tracked pin adjustments. We also note whether any
+        // tracked pin is on this row at all so that the per-cell loop
+        // below can skip pin scans entirely for the overwhelmingly
+        // common case of a row with no pins. Note we compare nodes
+        // rather than pages since a node owns exactly one page; this
+        // is cheaper and avoids `page()` restoring unrelated
+        // compressed nodes purely for a comparison.
+        var row_has_pins = false;
         {
             const pin_keys = list.tracked_pins.keys();
             for (pin_keys) |p| {
-                if (p.node.page() != src_page or
-                    p.y != src_y) continue;
+                if (p.node != row.node or p.y != src_y) continue;
+
+                // This row has pins
+                row_has_pins = true;
 
                 if (cursor_pin != null and p == cursor_pin.?) continue;
 
@@ -1593,7 +1602,7 @@ const ReflowCursor = struct {
         // If the cursor is after blanks on the right, those cells are still
         // before the next write and must reflow with it.
         if (cursor_pin) |p| {
-            if (p.node.page() == src_page and p.y == src_y) {
+            if (p.node == row.node and p.y == src_y) {
                 cols_len = @max(cols_len, p.x + 1);
             }
         }
@@ -1641,10 +1650,10 @@ const ReflowCursor = struct {
             }
 
             // Move any tracked pins from the source.
-            {
+            if (row_has_pins) {
                 const pin_keys = list.tracked_pins.keys();
                 for (pin_keys) |p| {
-                    if (p.node.page() != src_page or
+                    if (p.node != row.node or
                         p.y != src_y or
                         p.x != x) continue;
 
@@ -1667,16 +1676,15 @@ const ReflowCursor = struct {
                 .skip_next => {
                     // Remap any tracked pins at the skipped position (x+1)
                     // since we won't process that cell in the loop.
-                    const pin_keys = list.tracked_pins.keys();
-                    for (pin_keys) |p| {
-                        if (p.node.page() != src_page or
+                    if (row_has_pins) for (list.tracked_pins.keys()) |p| {
+                        if (p.node != row.node or
                             p.y != src_y or
                             p.x != x + 1) continue;
 
                         p.node = self.node;
                         p.x = self.x;
                         p.y = self.y;
-                    }
+                    };
 
                     x += 2;
                 },
