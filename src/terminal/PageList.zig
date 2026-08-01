@@ -1859,18 +1859,71 @@ const ReflowCursor = struct {
         };
     }
 
+    /// The group length for the masked-compare helpers below. This
+    /// matches the group length used by other cell scans (e.g. the
+    /// render state scans).
+    const bulk_group_len = 8;
+
+    /// Masked compare helper covering every cell field that a run
+    /// must share to be copied by copyRun: given that the first cell
+    /// of a run passed the full bulkCopyable predicate, equality on
+    /// these fields implies the same for every subsequent cell, with
+    /// the same style.
+    ///
+    /// Note this is slightly stricter than bulkCopyable (e.g. a
+    /// bg-color cell won't extend an unstyled text run even though it
+    /// is copyable): that only splits the copy into multiple runs,
+    /// which is still correct.
+    const BulkRunMask = pagepkg.Mask(pagepkg.Cell, &.{
+        "content_tag",
+        "style_id",
+        "wide",
+        "hyperlink",
+    }, bulk_group_len);
+
+    /// Masked compare helper for detecting the Kitty virtual
+    /// placeholder codepoint in text cells. Placeholders take the
+    /// slow path (they must set a row flag), so they terminate a run.
+    const PlaceholderMask = pagepkg.Mask(pagepkg.Cell, &.{
+        "content.codepoint.data",
+    }, bulk_group_len);
+
     /// The length of the prefix of cells that can be copied at once
-    /// with copyRun: bulk-copyable cells sharing a single style.
+    /// with copyRun: bulk-copyable cells sharing a single style. The
+    /// scan uses masked compares of the raw cell bits (see
+    /// BulkRunMask), which is significantly cheaper than the
+    /// field-wise predicate for this hot loop.
     fn bulkRunLength(cells: []const pagepkg.Cell) usize {
         if (cells.len == 0) return 0;
         const first = cells[0];
         if (!bulkCopyable(first)) return 0;
 
+        const run_pattern = BulkRunMask.pattern(first);
+
+        // Only text cells can contain a placeholder; for bg color
+        // tags the content bits are a color, so we skip the check for
+        // those (the tag is part of BulkRunMask, making tags uniform
+        // per run).
+        const check_placeholder = build_options.kitty_graphics and
+            first.content_tag == .codepoint;
+        const placeholder_pattern = comptime pattern: {
+            // Never used without kitty graphics (check_placeholder
+            // is comptime-false), but it must still compile and the
+            // placeholder codepoint doesn't exist in that build.
+            if (!build_options.kitty_graphics) break :pattern 0;
+
+            break :pattern PlaceholderMask.pattern(.init(
+                kitty.graphics.unicode.placeholder,
+            ));
+        };
+
         var len: usize = 1;
         while (len < cells.len) : (len += 1) {
-            const cell = cells[len];
-            if (!bulkCopyable(cell) or
-                cell.style_id != first.style_id) break;
+            if (!BulkRunMask.eqlScalar(cells[len], run_pattern)) break;
+            if (check_placeholder and PlaceholderMask.eqlScalar(
+                cells[len],
+                placeholder_pattern,
+            )) break;
         }
 
         return len;
