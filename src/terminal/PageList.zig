@@ -1522,6 +1522,28 @@ const ReflowCursor = struct {
     /// This is the final row count of the reflowed pages.
     total_rows: usize,
 
+    /// Memoizes the most recent source-to-destination style id
+    /// mapping. Styled cells come in long runs sharing the same style
+    /// so this lets writeCell bump the destination ref count directly
+    /// instead of performing a set lookup for every styled cell.
+    ///
+    /// The destination id is only valid for the current destination
+    /// page, which is why this lives on the cursor: every destination
+    /// page change goes through init() which resets this.
+    style_cache: StyleCache,
+
+    const StyleCache = struct {
+        src_page: ?*const Page,
+        src_id: stylepkg.Id,
+        dst_id: stylepkg.Id,
+
+        const invalid: StyleCache = .{
+            .src_page = null,
+            .src_id = stylepkg.default_id,
+            .dst_id = stylepkg.default_id,
+        };
+    };
+
     fn init(node: *List.Node) ReflowCursor {
         const page = node.page();
         const rows = page.rows.ptr(page.memory);
@@ -1537,6 +1559,8 @@ const ReflowCursor = struct {
 
             // Initially whatever size our input node is.
             .total_rows = node.rows(),
+
+            .style_cache = .invalid,
         };
     }
 
@@ -2038,6 +2062,23 @@ const ReflowCursor = struct {
 
         // Copy style data.
         if (cell.hasStyling()) style: {
+            // Fast path: styled cells come in long runs sharing the
+            // same style. If this source style was just mapped into
+            // the current destination page, bump the ref count
+            // directly and skip the set lookup. The destination id is
+            // guaranteed alive because a previously written cell in
+            // this page holds a reference, and the cache is reset
+            // whenever the destination page changes (see init).
+            if (self.style_cache.src_page == src_page and
+                self.style_cache.src_id == cell.style_id)
+            {
+                const id = self.style_cache.dst_id;
+                self.page.styles.use(self.page.memory, id);
+                self.page_row.styled = true;
+                self.page_cell.style_id = id;
+                break :style;
+            }
+
             const style = src_page.styles.get(
                 src_page.memory,
                 cell.style_id,
@@ -2079,6 +2120,14 @@ const ReflowCursor = struct {
                     break :style;
                 };
             } orelse cell.style_id;
+
+            // Update our style cache with the latest style set so runs
+            // of cells with the same style are faster to write.
+            self.style_cache = .{
+                .src_page = src_page,
+                .src_id = cell.style_id,
+                .dst_id = id,
+            };
 
             self.page_row.styled = true;
             self.page_cell.style_id = id;
