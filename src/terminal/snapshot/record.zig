@@ -302,8 +302,9 @@ pub const Reader = struct {
     // such as peek and discard.
     limited_buffer: [1]u8,
 
-    // PAGE decoding performs many small reads. 256 bytes batches several cells
-    // while CRC32C is calculated without making Reader large on the stack.
+    // Fixed-header decoding performs several small reads. 256 bytes batches
+    // them while CRC32C is calculated without making Reader large on the
+    // stack. Bulk payload reads bypass this buffer entirely.
     hashing_buffer: [256]u8,
 
     limited: std.Io.Reader.Limited,

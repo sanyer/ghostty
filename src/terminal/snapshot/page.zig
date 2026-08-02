@@ -204,10 +204,17 @@ pub const Decoder = struct {
         return self.header.pageCapacity() catch unreachable;
     }
 
+    /// Largest remaining PAGE payload staged into one contiguous buffer.
+    /// This comfortably covers every payload a standard-capacity page can
+    /// produce while keeping the allocation an untrusted length can force
+    /// far below the record framing's four-byte length limit.
+    const max_staged_payload = 8 * 1024 * 1024;
+
     /// Decode the remaining payload into caller-owned native page storage.
     ///
     /// The destination must be freshly initialized with `capacity`. `alloc`
-    /// is used only for temporary ID remaps and integrity-check storage.
+    /// is used only for temporary staging, ID remaps, and integrity-check
+    /// storage.
     pub fn decode(
         self: *Decoder,
         destination: *TerminalPage,
@@ -221,12 +228,42 @@ pub const Decoder = struct {
             .cols = self.header.columns,
             .rows = self.header.rows,
         };
-        try decodePayloadBody(
-            self.record_reader.payloadReader(),
-            alloc,
-            destination,
-            self.header,
-        );
+
+        // `init` consumed exactly the fixed header from the declared
+        // payload, so this is the byte count of the tables and grid.
+        const remaining = self.record_reader.header.payload_len - Header.len;
+
+        if (remaining <= max_staged_payload) {
+            // Stage the payload with one bulk read. The whole payload
+            // passes through both hashes as one update and the payload
+            // decoders then parse a flat buffer, which keeps per-row work
+            // free of stream adapters. The CRC and exact-length checks in
+            // `finish` are unaffected.
+            const staged = try alloc.alloc(u8, remaining);
+            defer alloc.free(staged);
+            try self.record_reader.payloadReader().readSliceAll(staged);
+
+            var staged_reader: std.Io.Reader = .fixed(staged);
+            try decodePayloadBody(
+                &staged_reader,
+                alloc,
+                destination,
+                self.header,
+            );
+            if (staged_reader.bufferedLen() != 0) {
+                return error.PayloadNotExhausted;
+            }
+        } else {
+            // A payload this large is either hostile or a page far beyond
+            // native capacities. Decode it through the streaming payload
+            // reader so its declared length cannot force an allocation.
+            try decodePayloadBody(
+                self.record_reader.payloadReader(),
+                alloc,
+                destination,
+                self.header,
+            );
+        }
         try self.record_reader.finish();
 
         // The decoder normalizes every semantic value, so a complete decode

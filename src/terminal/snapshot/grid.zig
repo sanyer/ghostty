@@ -515,11 +515,24 @@ pub fn decode(
     hyperlink_remap: *const HyperlinkRemap,
 ) DecodeError!void {
     for (0..page.size.rows) |y| {
-        // Every bit pattern is a valid header: booleans decode directly
-        // and the raw semantic value gets a default below. Reserved bits
-        // do not change the known fields.
-        const row_header: Row = @bitCast(try reader.takeByte());
-        const count = try io.readInt(reader, u16);
+        // Read the row header and cell count.
+        const row_header: Row, const count: u16 = header: {
+            // The staged payload path has every header buffered.
+            var row_header_bytes: [3]u8 = undefined;
+            if (reader.bufferedLen() >= 3) {
+                row_header_bytes = reader.buffered()[0..3].*;
+                reader.toss(3);
+            } else {
+                try reader.readSliceAll(&row_header_bytes);
+            }
+
+            // Every bit pattern is a valid header: booleans decode directly
+            // and the raw semantic value gets a default below. Reserved
+            // bits do not change the known fields.
+            const row_header: Row = @bitCast(row_header_bytes[0]);
+            const count = std.mem.readInt(u16, row_header_bytes[1..3], .little);
+            break :header .{ row_header, count };
+        };
 
         const row = page.getRow(y);
         row.wrap = row_header.wrap;
