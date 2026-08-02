@@ -16,6 +16,7 @@ const osc = @import("osc.zig");
 const osc_color = @import("osc/parsers/color.zig");
 const kitty_color = @import("kitty/color.zig");
 const size_report = @import("size_report.zig");
+const simd = @import("../simd/main.zig");
 const Terminal = @import("Terminal.zig");
 
 const log = std.log.scoped(.stream_terminal);
@@ -440,12 +441,13 @@ pub const Handler = struct {
             return;
         }
 
-        const decoder = std.base64.standard.Decoder;
-        const decoded_len = try decoder.calcSizeForSlice(data);
+        // Decode the base64 payload with the SIMD decoder (the same one
+        // used for Kitty graphics payloads) rather than the scalar std
+        // implementation; clipboard payloads can be megabytes.
         const alloc = self.terminal.gpa();
-        const decoded = try alloc.alloc(u8, decoded_len);
-        defer alloc.free(decoded);
-        try decoder.decode(decoded, data);
+        const buf = try alloc.alloc(u8, simd.base64.maxLen(data));
+        defer alloc.free(buf);
+        const decoded = try simd.base64.decode(data, buf);
 
         const contents = [_]clipboard.Content{.{
             .mime = "text/plain",
