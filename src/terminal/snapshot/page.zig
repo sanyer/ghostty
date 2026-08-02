@@ -63,19 +63,19 @@
 //! | hyperlink_count entries   |
 //! +---------------------------+
 //! | Grid                      |
-//! | one record per row        |
+//! | rows and grapheme section |
 //! +---------------------------+
 //!
 //! Style entry     = encoded ID + style record
 //! Hyperlink entry = encoded ID + hyperlink record
-//! Grid            = row 0 ... row (rows - 1)
-//! Row             = row header + cell 0 ... cell (columns - 1)
-//! Cell            = cell header + grapheme suffix codepoints
+//! Grid            = row 0 ... row (rows - 1) + grapheme suffix section
+//! Row             = row header + encoded cells
 //! ```
 //!
 //! Following the header, the payload contains exactly `style_count` style
 //! records and `hyperlink_count` hyperlink records, followed by exactly
-//! `rows` row records. There is no padding between records.
+//! `rows` row records and one grapheme suffix section. There is no padding
+//! between records.
 //!
 //! Each style begins with an ID (`u16`) followed by the typical style
 //! binary representation (in style.zig). The ID is what cells will use
@@ -119,6 +119,7 @@ const PayloadEncodeError = hyperlink.EncodeError || grid.EncodeError;
 
 const PayloadDecodeError = std.Io.Reader.Error ||
     Header.CapacityError ||
+    grid.DecodeError ||
     error{
         /// The hyperlink kind is not defined by snapshot version 1.
         InvalidKind,
@@ -284,15 +285,13 @@ fn decodePayloadBody(
     page.pauseIntegrityChecks(true);
     defer page.pauseIntegrityChecks(false);
 
-    var style_remap = grid.StyleRemap.init(alloc);
-    defer style_remap.deinit();
-    style_remap.ensureTotalCapacity(header.style_count) catch
+    var style_remap = grid.StyleRemap.init(alloc) catch
         return error.OutOfMemory;
+    defer style_remap.deinit(alloc);
 
-    var hyperlink_remap = grid.HyperlinkRemap.init(alloc);
-    defer hyperlink_remap.deinit();
-    hyperlink_remap.ensureTotalCapacity(header.hyperlink_count) catch
+    var hyperlink_remap = grid.HyperlinkRemap.init(alloc) catch
         return error.OutOfMemory;
+    defer hyperlink_remap.deinit(alloc);
 
     // Styles
     for (0..header.style_count) |_| {
@@ -316,10 +315,7 @@ fn decodePayloadBody(
                 valid,
             ) catch 0;
         } else 0;
-        style_remap.putAssumeCapacityNoClobber(
-            native_id,
-            decoded_id,
-        );
+        style_remap.put(native_id, decoded_id);
     }
 
     // Hyperlinks
@@ -338,10 +334,7 @@ fn decodePayloadBody(
 
         // Zero records an ignored table entry. Grid decoding treats every
         // reference to it as no hyperlink.
-        hyperlink_remap.putAssumeCapacityNoClobber(
-            native_id,
-            decoded_id,
-        );
+        hyperlink_remap.put(native_id, decoded_id);
     }
 
     // Rows and cells
@@ -860,8 +853,7 @@ test "decode accepts unordered sparse style IDs and ignores zero" {
     var descending: [
         Header.len +
             2 * (2 + style.len) +
-            1 +
-            16
+            7
     ]u8 = undefined;
     var descending_writer: std.Io.Writer = .fixed(&descending);
     try header.encode(&descending_writer);
@@ -869,8 +861,9 @@ test "decode accepts unordered sparse style IDs and ignores zero" {
     try style.encode(.{ .flags = .{ .bold = true } }, &descending_writer);
     try io.writeInt(&descending_writer, TerminalStyleId, 2);
     try style.encode(.{ .flags = .{ .italic = true } }, &descending_writer);
-    try descending_writer.writeByte(0);
-    try descending_writer.splatByteAll(0, 16);
+    try descending_writer.writeByte(0); // row flags
+    try io.writeInt(&descending_writer, u16, 0); // cell count
+    try io.writeInt(&descending_writer, u32, 0); // grapheme section
 
     var descending_reader: std.Io.Reader = .fixed(
         descending_writer.buffered(),
@@ -893,7 +886,7 @@ test "decode accepts unordered sparse style IDs and ignores zero" {
         .string_capacity_bytes = 0,
     };
 
-    var zero: [Header.len + 2 + style.len + 17]u8 = undefined;
+    var zero: [Header.len + 2 + style.len + 7]u8 = undefined;
     var zero_writer: std.Io.Writer = .fixed(&zero);
     try one_header.encode(&zero_writer);
     try io.writeInt(&zero_writer, TerminalStyleId, 0);
@@ -936,8 +929,7 @@ test "decode accepts unordered sparse hyperlink IDs" {
     var encoded: [
         Header.len +
             2 * 14 +
-            1 +
-            16
+            7
     ]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&encoded);
     try header.encode(&writer);
@@ -945,8 +937,9 @@ test "decode accepts unordered sparse hyperlink IDs" {
     try hyperlink.encode(first, &writer);
     try io.writeInt(&writer, TerminalHyperlinkId, 2);
     try hyperlink.encode(second, &writer);
-    try writer.writeByte(0);
-    try writer.splatByteAll(0, 16);
+    try writer.writeByte(0); // row flags
+    try io.writeInt(&writer, u16, 0); // cell count
+    try io.writeInt(&writer, u32, 0); // grapheme section
 
     var reader: std.Io.Reader = .fixed(writer.buffered());
     var decoded = try decodePayload(
@@ -973,15 +966,15 @@ test "decode defaults missing sparse cell references" {
         .string_capacity_bytes = 0,
     };
 
-    var style_encoded: [Header.len + 1 + 16]u8 = undefined;
+    var style_encoded: [Header.len + 3 + 8 + 4]u8 = undefined;
     var style_writer: std.Io.Writer = .fixed(&style_encoded);
     try style_header.encode(&style_writer);
-    try style_writer.writeByte(0);
-    try style_writer.writeAll(&.{ 0, 0, 0, 0 });
-    try io.writeInt(&style_writer, TerminalStyleId, 1);
-    try io.writeInt(&style_writer, TerminalHyperlinkId, 0);
-    try io.writeInt(&style_writer, u32, 0);
-    try io.writeInt(&style_writer, u32, 0);
+    try style_writer.writeByte(0); // row flags
+    try io.writeInt(&style_writer, u16, 1); // cell count
+    try io.writeInt(&style_writer, u64, @bitCast(grid.Cell{
+        .style_id = 1,
+    }));
+    try io.writeInt(&style_writer, u32, 0); // grapheme section
 
     var style_reader: std.Io.Reader = .fixed(style_writer.buffered());
     var style_page = try decodePayload(
@@ -1006,15 +999,16 @@ test "decode defaults missing sparse cell references" {
         .string_capacity_bytes = 0,
     };
 
-    var hyperlink_encoded: [Header.len + 1 + 16]u8 = undefined;
+    var hyperlink_encoded: [Header.len + 3 + 8 + 4]u8 = undefined;
     var hyperlink_writer: std.Io.Writer = .fixed(&hyperlink_encoded);
     try hyperlink_header.encode(&hyperlink_writer);
-    try hyperlink_writer.writeByte(0);
-    try hyperlink_writer.writeAll(&.{ 0, 0, 0, 0 });
-    try io.writeInt(&hyperlink_writer, TerminalStyleId, 0);
-    try io.writeInt(&hyperlink_writer, TerminalHyperlinkId, 1);
-    try io.writeInt(&hyperlink_writer, u32, 0);
-    try io.writeInt(&hyperlink_writer, u32, 0);
+    try hyperlink_writer.writeByte(0); // row flags
+    try io.writeInt(&hyperlink_writer, u16, 1); // cell count
+    try io.writeInt(&hyperlink_writer, u64, @bitCast(grid.Cell{
+        .hyperlink = true,
+        .hyperlink_id = 1,
+    }));
+    try io.writeInt(&hyperlink_writer, u32, 0); // grapheme section
 
     var hyperlink_reader: std.Io.Reader = .fixed(
         hyperlink_writer.buffered(),
@@ -1044,41 +1038,42 @@ test "decode normalizes invalid grid semantics" {
         .string_capacity_bytes = 0,
     };
 
-    var encoded: [Header.len + 1 + 3 * 16 + 12]u8 = undefined;
+    var encoded: [Header.len + 3 + 3 * 8 + 4 + 10]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&encoded);
     try header.encode(&writer);
 
     // Preserve wrap while degrading the unknown semantic-prompt value to none
     // and ignoring all reserved row bits.
     try writer.writeByte(0xFD);
+    try io.writeInt(&writer, u16, 3);
 
-    // An unknown content and width kind, invalid semantic content, reserved
-    // bytes, and suffix data all degrade to a blank narrow output cell.
-    try writer.writeAll(&.{ 3, 4, 0xFF, 0xFF });
-    try io.writeInt(&writer, TerminalStyleId, 0);
-    try io.writeInt(&writer, TerminalHyperlinkId, 0);
-    try io.writeInt(&writer, u32, 0xD800);
-    try io.writeInt(&writer, u32, 1);
-    try io.writeInt(&writer, u32, 0x110000);
+    // A text cell replaces an invalid Unicode scalar with U+FFFD while its
+    // reserved semantic content degrades to output.
+    try io.writeInt(&writer, u64, @bitCast(grid.Cell{
+        .content = 0xD800,
+        .semantic_content = 3,
+    }));
 
-    // A recognized text cell replaces an invalid Unicode scalar with U+FFFD.
-    // Its valid suffix cannot fit the advertised zero capacity, so decoding
-    // preserves the base character and drops the optional suffix.
-    try writer.writeAll(&.{ 0, 0, 0, 0 });
-    try io.writeInt(&writer, TerminalStyleId, 0);
-    try io.writeInt(&writer, TerminalHyperlinkId, 0);
-    try io.writeInt(&writer, u32, 0xD800);
-    try io.writeInt(&writer, u32, 1);
-    try io.writeInt(&writer, u32, 'x');
+    // A declared grapheme suffix cannot fit the advertised zero capacity,
+    // so decoding preserves the base character and drops the suffix.
+    try io.writeInt(&writer, u64, @bitCast(grid.Cell{
+        .kind = 1,
+        .content = 'x',
+    }));
 
-    // Reserved palette bits and a nonsensical suffix do not obscure the valid
-    // low palette byte; the suffix is consumed and ignored.
-    try writer.writeAll(&.{ 1, 0, 0, 0xFF });
-    try io.writeInt(&writer, TerminalStyleId, 0);
-    try io.writeInt(&writer, TerminalHyperlinkId, 0);
-    try io.writeInt(&writer, u32, 0xFFFFFF07);
+    // Reserved palette content bits do not obscure the valid low palette
+    // byte.
+    try io.writeInt(&writer, u64, @bitCast(grid.Cell{
+        .kind = 2,
+        .content = 0xFFFF07,
+    }));
+
+    // The grapheme section carries the suffix for the second cell.
     try io.writeInt(&writer, u32, 1);
-    try io.writeInt(&writer, u32, 'x');
+    try io.writeInt(&writer, u16, 0);
+    try io.writeInt(&writer, u16, 1);
+    try io.writeInt(&writer, u16, 1);
+    try io.writeInt(&writer, u32, 0x0301);
 
     var reader: std.Io.Reader = .fixed(writer.buffered());
     var page = try decodePayload(&reader, std.testing.allocator);
@@ -1091,7 +1086,7 @@ test "decode normalizes invalid grid semantics" {
         terminal_page.Row.SemanticPrompt.none,
         first.row.semantic_prompt,
     );
-    try std.testing.expectEqual(@as(u21, 0), first.cell.codepoint());
+    try std.testing.expectEqual(@as(u21, 0xFFFD), first.cell.codepoint());
     try std.testing.expectEqual(
         terminal_page.Cell.Wide.narrow,
         first.cell.wide,
@@ -1104,7 +1099,7 @@ test "decode normalizes invalid grid semantics" {
     try std.testing.expect(!first.cell.hasGrapheme());
 
     const second = page.getRowAndCell(1, 0).cell;
-    try std.testing.expectEqual(@as(u21, 0xFFFD), second.codepoint());
+    try std.testing.expectEqual(@as(u21, 'x'), second.codepoint());
     try std.testing.expect(!second.hasGrapheme());
 
     const third = page.getRowAndCell(2, 0).cell;
