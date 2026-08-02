@@ -933,7 +933,13 @@ types:
         valid:
           expr: _ <= columns
       - id: cells
-        type: grid_cell(_index, columns, flags.wrap)
+        type:
+          switch-on: flags.width_log2
+          cases:
+            0: grid_cell_1
+            1: grid_cell_2
+            2: grid_cell_4
+            3: grid_cell(_index, columns, flags.wrap)
         repeat: expr
         repeat-expr: cell_count
 
@@ -942,7 +948,7 @@ types:
       - id: raw
         type: u1
         valid:
-          expr: (_ & 0xf0) == 0 and ((_ >> 2) & 0x3) <= 2
+          expr: (_ & 0xc0) == 0 and ((_ >> 2) & 0x3) <= 2
     instances:
       wrap:
         value: (raw & 1) != 0
@@ -950,6 +956,46 @@ types:
         value: (raw & 2) != 0
       semantic_prompt:
         value: (raw >> 2) & 0x3
+      width_log2:
+        value: (raw >> 4) & 0x3
+
+  grid_cell_1:
+    doc: One-byte encoded cell; the value is a codepoint at or below U+00FF.
+    seq:
+      - id: codepoint
+        type: u1
+
+  grid_cell_2:
+    doc: |
+      Two-byte encoded cell; the value is a codepoint at or below U+FFFF.
+      Canonical encoders never emit surrogates.
+    seq:
+      - id: codepoint
+        type: u2
+        valid:
+          expr: not (_ >= 0xd800 and _ <= 0xdfff)
+
+  grid_cell_4:
+    doc: |
+      Four-byte encoded cell holding the low half of the cell word: any
+      content kind and codepoint, style IDs one through sixty-three, and no
+      width, flag, or hyperlink bits.
+    seq:
+      - id: raw
+        type: u4
+        valid:
+          expr: |
+            (content_kind >= 2 or
+              (content <= 0x10ffff and
+                not (content >= 0xd800 and content <= 0xdfff))) and
+            (content_kind != 2 or content <= 0xff)
+    instances:
+      content_kind:
+        value: raw % 4
+      content:
+        value: (raw / 4) % 16777216
+      style_id:
+        value: raw / 67108864
 
   grid_cell:
     doc: |
@@ -984,7 +1030,8 @@ types:
                 not (content >= 0xd800 and content <= 0xdfff))) and
             (content_kind != 2 or content <= 0xff) and
             (width != 2 or
-              (index > 0 and _parent.cells[index - 1].width == 1)) and
+              (index > 0 and
+                _parent.cells[index - 1].as<grid_cell>.width == 1)) and
             (width != 3 or (index + 1 == columns and row_wrap))
     instances:
       content_kind:

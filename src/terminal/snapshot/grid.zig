@@ -27,11 +27,11 @@
 //!
 //! Each row has the following format:
 //!
-//! | Offset | Size        | Field                     |
-//! | -----: | ----------: | :------------------------ |
-//! |      0 |           1 | Row flags                 |
-//! |      1 |           2 | Encoded cell count (`u16`)|
-//! |      3 | 8 * `count` | Encoded cells             |
+//! | Offset | Size              | Field                      |
+//! | -----: | ----------------: | :------------------------- |
+//! |      0 |                 1 | Row flags                  |
+//! |      1 |                 2 | Encoded cell count (`u16`) |
+//! |      3 | `width` * `count` | Encoded cells              |
 //!
 //! The row flag byte has the following format:
 //!
@@ -40,7 +40,8 @@
 //! |    0 | Wrap                      |
 //! |    1 | Wrap continuation         |
 //! |  2-3 | Semantic prompt           |
-//! |  4-7 | Reserved, zero            |
+//! |  4-5 | Encoded cell width        |
+//! |  6-7 | Reserved, zero            |
 //!
 //! Semantic prompt values are:
 //!
@@ -59,12 +60,40 @@
 //! Canonical encoders emit exactly through the row's last non-default cell,
 //! so a fully default row has a zero count and no cell words.
 //!
+//! ## Encoded cell width
+//!
+//! The two width bits select how many bytes encode each of the row's
+//! cells: `1 << width` is the size, so zero through three select one, two,
+//! four, or eight bytes. Narrower widths are truncated transports of the
+//! same cell word: a cell qualifies for a width when all of its higher
+//! word bits are zero.
+//!
+//! | Width | Bytes | Encoded value and admitted cells                     |
+//! | ----: | ----: | :--------------------------------------------------- |
+//! |     0 |     1 | Codepoint at or below U+00FF; all other bits zero    |
+//! |     1 |     2 | Codepoint at or below U+FFFF; all other bits zero    |
+//! |     2 |     4 | Word bits 0-31: any content kind and codepoint, style |
+//! |       |       | IDs 1-63, narrow, no flags, no hyperlink             |
+//! |     3 |     8 | The complete word                                    |
+//!
+//! Widths zero and one store the codepoint value itself, which is word
+//! bits 2-25 shifted down; the reconstructed word is the codepoint shifted
+//! left by two. Width two stores the word's low half unshifted. This makes
+//! every width a zero-extension on decode and a truncation on encode.
+//!
+//! Canonical encoders choose each row's smallest admissible width, which
+//! follows directly from the bitwise OR of the row's cell words. Decoders
+//! use the declared width for framing and accept rows encoded wider than
+//! necessary. The width of a row with a zero cell count is canonically
+//! zero and carries no meaning.
+//!
 //! Native row cache flags are not encoded. In particular, the Kitty virtual
 //! placeholder hint is derived while decoding cells containing U+10EEEE.
 //!
 //! ## Cell
 //!
-//! Each cell is one 64-bit little-endian word:
+//! Each cell is one 64-bit little-endian word, transported at the row's
+//! encoded cell width as described above:
 //!
 //! ```text
 //!  bit 0 +-------------------------------+
@@ -219,13 +248,14 @@ const TerminalStyleId = terminal_style.Id;
 ///
 /// The semantic prompt is a raw integer for the same reason as the wire
 /// cell fields: decoders must accept its reserved value without
-/// instantiating an invalid native enum, so every header byte bit-casts to
-/// a valid value.
+/// instantiating an invalid native enum. The width enum is exhaustive over
+/// its two bits, so every header byte bit-casts to a valid value.
 pub const Row = packed struct(u8) {
     wrap: bool = false,
     wrap_continuation: bool = false,
     semantic_prompt: u2 = 0,
-    _padding: u4 = 0,
+    cell_width: Cell.EncodedWidth = .one,
+    _padding: u2 = 0,
 };
 
 /// The wire layout of one encoded cell. This is its own registry: the bit
@@ -251,6 +281,72 @@ pub const Cell = packed struct(u64) {
         codepoint_grapheme = 1,
         bg_color_palette = 2,
         bg_color_rgb = 3,
+    };
+
+    /// The encoded cell width declared by a row header: how many bytes
+    /// transport each of the row's cell words. See the format
+    /// documentation above for the value each width transports and the
+    /// cells it admits.
+    ///
+    /// `truncate` and `extend` are the transport transform itself, so the
+    /// admission masks derive from them rather than being maintained by
+    /// hand: a cell word is admitted exactly when it round-trips.
+    pub const EncodedWidth = enum(u2) {
+        one = 0,
+        two = 1,
+        four = 2,
+        eight = 3,
+
+        /// The number of bytes transporting one cell word.
+        pub fn size(self: EncodedWidth) usize {
+            return @as(usize, 1) << @intFromEnum(self);
+        }
+
+        /// The integer type transporting one cell word.
+        pub fn Int(comptime self: EncodedWidth) type {
+            return switch (self) {
+                .one => u8,
+                .two => u16,
+                .four => u32,
+                .eight => u64,
+            };
+        }
+
+        /// Truncate one cell word to its transported value. Only words
+        /// admitted by this width round-trip; `select` proves that for
+        /// every cell in a row before an encoder may use it.
+        pub fn truncate(comptime self: EncodedWidth, word: u64) self.Int() {
+            return @truncate(switch (self) {
+                // The bare codepoint, shifted down from the content field.
+                .one, .two => @as(Cell, @bitCast(word)).content,
+
+                // The word itself.
+                .four, .eight => word,
+            });
+        }
+
+        /// Widen one transported value back to its cell word.
+        pub fn extend(comptime self: EncodedWidth, value: self.Int()) u64 {
+            return switch (self) {
+                .one, .two => @bitCast(Cell{ .content = value }),
+                .four, .eight => value,
+            };
+        }
+
+        /// The word bits a cell may use and still round-trip through this
+        /// width.
+        pub fn mask(comptime self: EncodedWidth) u64 {
+            return comptime self.extend(std.math.maxInt(self.Int()));
+        }
+
+        /// The smallest width admitting the word, typically the bitwise
+        /// OR of every cell word in a row.
+        pub fn select(word: u64) EncodedWidth {
+            inline for ([_]EncodedWidth{ .one, .two, .four }) |width| {
+                if (word & ~width.mask() == 0) return width;
+            }
+            return .eight;
+        }
     };
 };
 
@@ -380,24 +476,12 @@ pub fn encode(
             break :count 0;
         };
 
-        // Row header: flags then the encoded cell count.
-        {
-            const row_header: Row = .{
-                .wrap = row.wrap,
-                .wrap_continuation = row.wrap_continuation,
-                .semantic_prompt = @intFromEnum(row.semantic_prompt),
-            };
-            var header_bytes: [3]u8 = undefined;
-            header_bytes[0] = @bitCast(row_header);
-            std.mem.writeInt(u16, header_bytes[1..3], @intCast(count), .little);
-            try writer.writeAll(&header_bytes);
-        }
-
         // Validate the wide state of every encoded cell so we don't encode
-        // corrupt data, and detect the cells that keep this row off the
-        // direct-copy path. Trailing default cells are narrow, so checking
-        // the encoded prefix against the full row width covers every pair.
-        var direct = true;
+        // corrupt data, and accumulate the OR of the row's cell words to
+        // select its encoded cell width. Trailing default cells are narrow,
+        // so checking the encoded prefix against the full row width covers
+        // every pair.
+        var word_or: u64 = 0;
         for (cells[0..count], 0..) |*cell, x| {
             switch (cell.wide) {
                 .narrow => {},
@@ -415,29 +499,115 @@ pub fn encode(
                     return error.InvalidWideCell;
                 },
             }
-
-            // Hyperlink IDs live in a native side table, and nonzero native
-            // padding would leak into the wire hyperlink ID field.
-            if (cell.hyperlink or cell._padding != 0) direct = false;
+            word_or |= classifyWord(cell);
         }
 
-        if (comptime bulk_codec) {
-            if (direct) {
-                try writer.writeAll(std.mem.sliceAsBytes(cells[0..count]));
-                continue;
-            }
+        // Canonical rows use the smallest admissible width.
+        const cell_width: Cell.EncodedWidth = .select(word_or);
+
+        // Row header: flags then the encoded cell count.
+        {
+            const row_header: Row = .{
+                .wrap = row.wrap,
+                .wrap_continuation = row.wrap_continuation,
+                .semantic_prompt = @intFromEnum(row.semantic_prompt),
+                .cell_width = cell_width,
+            };
+            var header_bytes: [3]u8 = undefined;
+            header_bytes[0] = @bitCast(row_header);
+            std.mem.writeInt(u16, header_bytes[1..3], @intCast(count), .little);
+            try writer.writeAll(&header_bytes);
         }
 
-        for (cells[0..count]) |*cell| {
-            const link_id: TerminalHyperlinkId = if (cell.hyperlink)
-                page.lookupHyperlink(cell) orelse unreachable
-            else
-                0;
-            try io.writeInt(writer, u64, cellBits(cell.*, link_id));
+        switch (cell_width) {
+            inline .one, .two, .four => |width| try encodeNarrowCells(
+                width,
+                cells[0..count],
+                writer,
+            ),
+
+            .eight => {
+                // Hyperlink IDs live in a native side table, but we embed
+                // them in ours, so if we have any hyperlinks we need
+                // to fallback to the loop below.
+                if (comptime bulk_codec) {
+                    const witness: Cell = @bitCast(word_or);
+                    if (!witness.hyperlink and witness.hyperlink_id == 0) {
+                        try writer.writeAll(std.mem.sliceAsBytes(cells[0..count]));
+                        continue;
+                    }
+                }
+
+                for (cells[0..count]) |*cell| {
+                    const link_id: TerminalHyperlinkId = if (cell.hyperlink)
+                        page.lookupHyperlink(cell) orelse unreachable
+                    else
+                        0;
+                    try io.writeInt(
+                        writer,
+                        u64,
+                        cellBits(cell.*, link_id),
+                    );
+                }
+            },
         }
     }
 
     try encodeGraphemes(page, writer);
+}
+
+/// The word used to select a row's encoded cell width. This is the cell's
+/// wire word with the hyperlink flag reflecting the native cell, so linked
+/// cells and nonzero native padding disqualify every narrow width.
+inline fn classifyWord(cell: *const TerminalCell) u64 {
+    if (comptime native_matches_wire) return @bitCast(cell.*);
+
+    var wire: Cell = @bitCast(cellBits(cell.*, 0));
+    wire.hyperlink = cell.hyperlink;
+    return @bitCast(wire);
+}
+
+/// Write one row's cells truncated to the given encoded width.
+///
+/// Every admitted cell round-trips exactly because the row's width
+/// selection proved every cell word survives `truncate` then `extend`.
+fn encodeNarrowCells(
+    comptime width: Cell.EncodedWidth,
+    cells: []const TerminalCell,
+    writer: *std.Io.Writer,
+) std.Io.Writer.Error!void {
+    const size = comptime width.size();
+    var chunk: [1024]u8 = undefined;
+    var i: usize = 0;
+    while (i < cells.len) {
+        const n = @min(cells.len - i, chunk.len / size);
+
+        if (comptime native_matches_wire) {
+            // A pure truncating loop over integers that the compiler can
+            // vectorize.
+            const words: [*]const u64 = @ptrCast(cells.ptr);
+            for (0..n) |j| {
+                std.mem.writeInt(
+                    width.Int(),
+                    chunk[j * size ..][0..size],
+                    width.truncate(words[i + j]),
+                    .little,
+                );
+            }
+        } else {
+            for (cells[i..][0..n], 0..) |*cell, j| {
+                std.mem.writeInt(
+                    width.Int(),
+                    chunk[j * size ..][0..size],
+                    width.truncate(classifyWord(cell)),
+                    .little,
+                );
+            }
+        }
+
+        try writer.writeAll(chunk[0 .. n * size]);
+        i += n;
+    }
 }
 
 /// Encode the grapheme suffix section for every kind 1 cell in the grid.
@@ -526,9 +696,9 @@ pub fn decode(
                 try reader.readSliceAll(&row_header_bytes);
             }
 
-            // Every bit pattern is a valid header: booleans decode directly
-            // and the raw semantic value gets a default below. Reserved
-            // bits do not change the known fields.
+            // Every bit pattern is a valid header: booleans and the exhaustive
+            // width enum decode directly, and the raw semantic value gets a
+            // default below. Reserved bits do not change the known fields.
             const row_header: Row = @bitCast(row_header_bytes[0]);
             const count = std.mem.readInt(u16, row_header_bytes[1..3], .little);
             break :header .{ row_header, count };
@@ -546,48 +716,199 @@ pub fn decode(
         if (count > cells.len) return error.InvalidRowCellCount;
         if (count == 0) continue;
 
-        if (comptime bulk_codec) {
-            // Read the encoded words directly into page storage, then
-            // normalize them in place. The raw words are only ever touched
-            // as integers until normalization makes them valid cells.
-            const words: [*]u64 = @ptrCast(cells.ptr);
-            try reader.readSliceAll(
-                std.mem.sliceAsBytes(cells[0..count]),
-            );
-            for (0..count) |x| {
-                applyCell(
-                    page,
-                    row,
-                    cells,
-                    x,
-                    words[x],
-                    style_remap,
-                    hyperlink_remap,
-                );
-            }
-        } else {
-            for (0..count) |x| {
-                const bits = try io.readInt(reader, u64);
-                applyCell(
-                    page,
-                    row,
-                    cells,
-                    x,
-                    bits,
-                    style_remap,
-                    hyperlink_remap,
-                );
-            }
-        }
+        // The encoded cell width is framing: it determines exactly how many
+        // bytes this row occupies.
+        switch (row_header.cell_width) {
+            inline .one, .two => |width| try decodeNarrowCells(
+                width,
+                reader,
+                cells[0..count],
+            ),
+            .four => try decodeWordCells(
+                .four,
+                page,
+                row,
+                cells,
+                count,
+                reader,
+                style_remap,
+                hyperlink_remap,
+            ),
+            .eight => {
+                if (comptime bulk_codec) {
+                    // Read the encoded words directly into page storage,
+                    // then normalize them in place. The raw words are only
+                    // ever touched as integers until normalization makes
+                    // them valid cells.
+                    const words: [*]u64 = @ptrCast(cells.ptr);
+                    try reader.readSliceAll(
+                        std.mem.sliceAsBytes(cells[0..count]),
+                    );
+                    for (0..count) |x| {
+                        applyCell(
+                            page,
+                            row,
+                            cells,
+                            x,
+                            words[x],
+                            style_remap,
+                            hyperlink_remap,
+                        );
+                    }
+                } else {
+                    try decodeWordCells(
+                        .eight,
+                        page,
+                        row,
+                        cells,
+                        count,
+                        reader,
+                        style_remap,
+                        hyperlink_remap,
+                    );
+                }
 
-        // The implicit cell after a short row is narrow, which resolves a
-        // trailing wide marker exactly like an explicit narrow neighbor.
-        if (count < cells.len and cells[count - 1].wide == .wide) {
-            cells[count - 1].wide = .narrow;
+                // The implicit cell after a short row is narrow, which
+                // resolves a trailing wide marker exactly like an explicit
+                // narrow neighbor. Only full-width rows can encode wide
+                // markers.
+                if (count < cells.len and cells[count - 1].wide == .wide) {
+                    cells[count - 1].wide = .narrow;
+                }
+            },
         }
     }
 
     try decodeGraphemes(page, reader);
+}
+
+/// Decode one row of width-one or width-two cells.
+///
+/// These widths admit only bare codepoints, so cells store directly with at
+/// most Unicode scalar validation: no styles, hyperlinks, wide pairs, or
+/// row hints are reachable and no normalization state is needed.
+fn decodeNarrowCells(
+    comptime width: Cell.EncodedWidth,
+    reader: *std.Io.Reader,
+    cells: []TerminalCell,
+) DecodeError!void {
+    const size = comptime width.size();
+
+    // The staged payload path has the complete row buffered, making this
+    // one bounds check followed by a vectorizable widening loop.
+    const total = cells.len * size;
+    if (reader.bufferedLen() >= total) {
+        widenCells(width, reader.buffered()[0..total], cells);
+        reader.toss(total);
+        return;
+    }
+
+    // Streaming sources fall back to bounded chunks.
+    var chunk: [1024]u8 = undefined;
+    var i: usize = 0;
+    while (i < cells.len) {
+        const n = @min(cells.len - i, chunk.len / size);
+        try reader.readSliceAll(chunk[0 .. n * size]);
+        widenCells(width, chunk[0 .. n * size], cells[i..][0..n]);
+        i += n;
+    }
+}
+
+/// Store codepoint-valued encoded cells of the given width.
+fn widenCells(
+    comptime width: Cell.EncodedWidth,
+    bytes: []const u8,
+    cells: []TerminalCell,
+) void {
+    const size = comptime width.size();
+
+    // When the native cell matches the wire word, this is a pure widening
+    // loop over integers that the compiler can vectorize.
+    if (comptime native_matches_wire) {
+        const words: [*]u64 = @ptrCast(cells.ptr);
+        for (0..cells.len) |i| {
+            words[i] = width.extend(widenValue(width, bytes[i * size ..]));
+        }
+        return;
+    }
+
+    for (cells, 0..) |*cell, i| {
+        storeCell(cell, width.extend(widenValue(width, bytes[i * size ..])));
+    }
+}
+
+/// Read and validate one narrow transported value.
+inline fn widenValue(
+    comptime width: Cell.EncodedWidth,
+    bytes: []const u8,
+) width.Int() {
+    const size = comptime width.size();
+    const value = std.mem.readInt(width.Int(), bytes[0..size], .little);
+
+    // Width one cannot encode an invalid scalar. Width two admits
+    // surrogates, which degrade exactly like their full-width form.
+    if (comptime width != .one) {
+        if (!validScalar(value)) return 0xFFFD;
+    }
+    return value;
+}
+
+/// Decode one row of width-four or fallback full-width cells through the
+/// complete per-cell normalization path.
+fn decodeWordCells(
+    comptime width: Cell.EncodedWidth,
+    page: *TerminalPage,
+    row: *TerminalRow,
+    cells: []TerminalCell,
+    count: usize,
+    reader: *std.Io.Reader,
+    style_remap: *const StyleRemap,
+    hyperlink_remap: *const HyperlinkRemap,
+) DecodeError!void {
+    const size = comptime width.size();
+
+    // The staged payload path has the complete row buffered.
+    const total = count * size;
+    if (reader.bufferedLen() >= total) {
+        const bytes = reader.buffered()[0..total];
+        for (0..count) |x| {
+            const bits = width.extend(std.mem.readInt(
+                width.Int(),
+                bytes[x * size ..][0..size],
+                .little,
+            ));
+            applyCell(
+                page,
+                row,
+                cells,
+                x,
+                bits,
+                style_remap,
+                hyperlink_remap,
+            );
+        }
+        reader.toss(total);
+        return;
+    }
+
+    // Streaming sources fall back to per-cell reads.
+    for (0..count) |x| {
+        const bits = width.extend(try io.readInt(reader, width.Int()));
+        applyCell(
+            page,
+            row,
+            cells,
+            x,
+            bits,
+            style_remap,
+            hyperlink_remap,
+        );
+    }
+}
+
+/// Whether the value is a valid Unicode scalar value.
+inline fn validScalar(cp: u32) bool {
+    return cp <= 0x10FFFF and (cp < 0xD800 or cp > 0xDFFF);
 }
 
 /// Normalize one encoded cell word and store it at `cells[x]`.
@@ -713,11 +1034,6 @@ fn normalizeWide(row: *const TerminalRow, cells: []TerminalCell, x: usize) void 
             cells[x].wide = .narrow;
         },
     }
-}
-
-/// Whether the value is a valid Unicode scalar value.
-inline fn validScalar(cp: u32) bool {
-    return cp <= 0x10FFFF and (cp < 0xD800 or cp > 0xDFFF);
 }
 
 /// Decode the grapheme suffix section into already decoded cells.
@@ -903,7 +1219,6 @@ fn Remap(comptime Id: type) type {
         }
     };
 }
-
 const test_golden_fixture = test_fixture.parse(
     @embedFile("testdata/grid-v1.hex"),
 );
@@ -929,10 +1244,76 @@ test "cell wire layout registry" {
     try testing.expect(native_matches_wire);
 }
 
+test "encoded cell width transport registry" {
+    const testing = std.testing;
+
+    // Pin the transported value and admission mask of every width against
+    // the documented format: widths one and two carry the bare codepoint,
+    // width four the low word half, width eight the complete word.
+    const word: u64 = @bitCast(Cell{
+        .kind = 1,
+        .content = 0xABCDEF,
+        .style_id = 0x1234,
+        .hyperlink_id = 0x5678,
+    });
+    try testing.expectEqual(@as(u8, 0xEF), Cell.EncodedWidth.one.truncate(word));
+    try testing.expectEqual(@as(u16, 0xCDEF), Cell.EncodedWidth.two.truncate(word));
+    try testing.expectEqual(
+        @as(u32, @truncate(word)),
+        Cell.EncodedWidth.four.truncate(word),
+    );
+    try testing.expectEqual(word, Cell.EncodedWidth.eight.truncate(word));
+
+    try testing.expectEqual(
+        @as(u64, 0x0000_0000_0000_03FC),
+        Cell.EncodedWidth.one.mask(),
+    );
+    try testing.expectEqual(
+        @as(u64, 0x0000_0000_0003_FFFC),
+        Cell.EncodedWidth.two.mask(),
+    );
+    try testing.expectEqual(
+        @as(u64, 0x0000_0000_FFFF_FFFF),
+        Cell.EncodedWidth.four.mask(),
+    );
+    try testing.expectEqual(
+        @as(u64, 0xFFFF_FFFF_FFFF_FFFF),
+        Cell.EncodedWidth.eight.mask(),
+    );
+
+    // Selection returns the smallest admissible width, and every admitted
+    // word round-trips through its transport.
+    const cases = [_]struct { cell: Cell, width: Cell.EncodedWidth }{
+        .{ .cell = .{}, .width = .one },
+        .{ .cell = .{ .content = 0xFF }, .width = .one },
+        .{ .cell = .{ .content = 0x100 }, .width = .two },
+        .{ .cell = .{ .content = 0xFFFF }, .width = .two },
+        .{ .cell = .{ .content = 0x10000 }, .width = .four },
+        .{ .cell = .{ .kind = 2, .content = 7 }, .width = .four },
+        .{ .cell = .{ .content = 'a', .style_id = 63 }, .width = .four },
+        .{ .cell = .{ .content = 'a', .style_id = 64 }, .width = .eight },
+        .{ .cell = .{ .width = 1, .content = 'a' }, .width = .eight },
+        .{ .cell = .{ .protected = true }, .width = .eight },
+        .{ .cell = .{ .semantic_content = 1 }, .width = .eight },
+        .{ .cell = .{ .hyperlink = true, .hyperlink_id = 1 }, .width = .eight },
+    };
+    inline for (cases) |case| {
+        const case_word: u64 = @bitCast(case.cell);
+        try testing.expectEqual(
+            case.width,
+            Cell.EncodedWidth.select(case_word),
+        );
+        try testing.expectEqual(
+            case_word,
+            case.width.extend(case.width.truncate(case_word)),
+        );
+    }
+}
+
 test "grid golden encoding and decoding" {
     const capacity: terminal_page.Capacity = .{
         .cols = 3,
-        .rows = 2,
+        .rows = 4,
         .styles = 0,
         .hyperlink_bytes = 0,
         .grapheme_bytes = 64,
@@ -983,7 +1364,16 @@ test "grid golden encoding and decoding" {
     head.row.wrap_continuation = true;
     head.row.semantic_prompt = .prompt_continuation;
 
-    var encoded: [128]u8 = undefined;
+    // The third row is bare ASCII text with an interior blank, which uses
+    // the one-byte encoded cell width.
+    source.getRowAndCell(0, 2).cell.* = .init('h');
+    source.getRowAndCell(2, 2).cell.* = .init('i');
+
+    // The fourth row needs the two-byte width for a codepoint above U+00FF.
+    source.getRowAndCell(0, 3).cell.* = .init(0x0416); // Ж
+    source.getRowAndCell(1, 3).cell.* = .init('!');
+
+    var encoded: [160]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&encoded);
     try encode(&source, &writer);
     try test_fixture.expectEqual(
@@ -1076,8 +1466,26 @@ test "grid golden encoding and decoding" {
         decoded_head.row.semantic_prompt,
     );
 
+    try std.testing.expectEqual(
+        @as(u21, 'h'),
+        destination.getRowAndCell(0, 2).cell.codepoint(),
+    );
+    try std.testing.expect(destination.getRowAndCell(1, 2).cell.isZero());
+    try std.testing.expectEqual(
+        @as(u21, 'i'),
+        destination.getRowAndCell(2, 2).cell.codepoint(),
+    );
+    try std.testing.expectEqual(
+        @as(u21, 0x0416),
+        destination.getRowAndCell(0, 3).cell.codepoint(),
+    );
+    try std.testing.expectEqual(
+        @as(u21, '!'),
+        destination.getRowAndCell(1, 3).cell.codepoint(),
+    );
+
     // A re-encode proves the decoded native page retains every wire field.
-    var reencoded: [128]u8 = undefined;
+    var reencoded: [160]u8 = undefined;
     var rewriter: std.Io.Writer = .fixed(&reencoded);
     try encode(&destination, &rewriter);
     try std.testing.expectEqualStrings(
@@ -1102,10 +1510,11 @@ test "grid elides trailing default cells" {
     var writer: std.Io.Writer = .fixed(&encoded);
     try encode(&page, &writer);
 
-    // 3 bytes per row header, cells only through the last non-default
-    // cell, and an empty grapheme section.
+    // 3 bytes per row header and cells only through the last non-default
+    // cell, followed by an empty grapheme section. The text row uses the
+    // one-byte width while the protected flag forces the full width.
     try testing.expectEqual(
-        @as(usize, 3 + (3 + 3 * 8) + (3 + 5 * 8) + 4),
+        @as(usize, 3 + (3 + 3 * 1) + (3 + 5 * 8) + 4),
         writer.buffered().len,
     );
 
@@ -1170,7 +1579,7 @@ test "grid normalizes incomplete wide cells" {
         // content but makes the incomplete wide cell narrow.
         var payload: [64]u8 = undefined;
         var payload_writer: std.Io.Writer = .fixed(&payload);
-        try payload_writer.writeByte(@bitCast(Row{}));
+        try payload_writer.writeByte(@bitCast(Row{ .cell_width = .eight }));
         try io.writeInt(&payload_writer, u16, columns);
         try io.writeInt(&payload_writer, u64, @bitCast(Cell{
             .width = 1, // wide
@@ -1225,7 +1634,7 @@ test "grid normalizes incomplete wide cells" {
 
     var payload: [64]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&payload);
-    try writer.writeByte(@bitCast(Row{}));
+    try writer.writeByte(@bitCast(Row{ .cell_width = .eight }));
     try io.writeInt(&writer, u16, 1);
     try io.writeInt(&writer, u64, @bitCast(Cell{
         .width = 1, // wide
@@ -1255,8 +1664,9 @@ test "grid normalizes reserved cell values" {
     var payload: [64]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&payload);
 
-    // Reserved row flag bits are ignored while the unknown semantic-prompt
-    // value degrades to none and wrap survives.
+    // Reserved row flag bits six and seven are ignored while the unknown
+    // semantic-prompt value degrades to none and wrap survives. Bits four
+    // and five select the full encoded cell width.
     try writer.writeByte(0xFD);
     try io.writeInt(&writer, u16, 3);
 
@@ -1327,7 +1737,7 @@ test "grid drops undeliverable grapheme entries" {
 
     var payload: [128]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&payload);
-    try writer.writeByte(@bitCast(Row{}));
+    try writer.writeByte(@bitCast(Row{ .cell_width = .eight }));
     try io.writeInt(&writer, u16, 4);
     // A kind 1 cell that receives a valid entry.
     try io.writeInt(&writer, u64, @bitCast(Cell{ .kind = 1, .content = 'x' }));
@@ -1382,4 +1792,221 @@ test "grid drops undeliverable grapheme entries" {
     try testing.expect(!second.hasGrapheme());
     try testing.expect(!page.getRowAndCell(2, 0).cell.hasGrapheme());
     try testing.expect(!page.getRowAndCell(3, 0).cell.hasGrapheme());
+}
+
+test "grid encodes rows at their narrowest width" {
+    const testing = std.testing;
+    var page = try TerminalPage.init(.{
+        .cols = 2,
+        .rows = 4,
+        .styles = 8,
+    });
+    defer page.deinit();
+
+    // Width zero: bare Latin-1 text.
+    page.getRowAndCell(0, 0).cell.* = .init('A');
+    page.getRowAndCell(1, 0).cell.* = .init(0xFF);
+
+    // Width one: any BMP codepoint.
+    page.getRowAndCell(0, 1).cell.* = .init(0x0100);
+
+    // Width two: a small style ID and a background color.
+    const style_id = try page.styles.add(page.memory, .{
+        .flags = .{ .bold = true },
+    });
+    try testing.expect(style_id <= 63);
+    const styled = page.getRowAndCell(0, 2);
+    styled.cell.* = .init('s');
+    styled.cell.style_id = style_id;
+    styled.row.styled = true;
+    const bg = page.getRowAndCell(1, 2);
+    bg.cell.content_tag = .bg_color_palette;
+    bg.cell.content = .{ .color_palette = .{ .data = 7 } };
+
+    // Width three: a protected cell.
+    page.getRowAndCell(0, 3).cell.protected = true;
+
+    var encoded: [128]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&encoded);
+    try encode(&page, &writer);
+
+    const bytes = writer.buffered();
+    try testing.expectEqual(
+        @as(usize, (3 + 2 * 1) + (3 + 1 * 2) + (3 + 2 * 4) + (3 + 1 * 8) + 4),
+        bytes.len,
+    );
+
+    // Each row header carries the expected width bits.
+    try testing.expectEqual(@as(u8, 0 << 4), bytes[0] & 0x30);
+    try testing.expectEqual(@as(u8, 1 << 4), bytes[5] & 0x30);
+    try testing.expectEqual(@as(u8, 2 << 4), bytes[10] & 0x30);
+    try testing.expectEqual(@as(u8, 3 << 4), bytes[21] & 0x30);
+
+    var destination = try TerminalPage.init(.{
+        .cols = 2,
+        .rows = 4,
+        .styles = 8,
+    });
+    defer destination.deinit();
+    var style_remap = try StyleRemap.init(testing.allocator);
+    defer style_remap.deinit(testing.allocator);
+    var hyperlink_remap = try HyperlinkRemap.init(testing.allocator);
+    defer hyperlink_remap.deinit(testing.allocator);
+    const native_style = try destination.styles.add(destination.memory, .{
+        .flags = .{ .bold = true },
+    });
+    style_remap.put(style_id, native_style);
+
+    var reader: std.Io.Reader = .fixed(bytes);
+    try decode(&destination, &reader, &style_remap, &hyperlink_remap);
+    try destination.verifyIntegrity(testing.allocator);
+
+    try testing.expectEqual(
+        @as(u21, 'A'),
+        destination.getRowAndCell(0, 0).cell.codepoint(),
+    );
+    try testing.expectEqual(
+        @as(u21, 0xFF),
+        destination.getRowAndCell(1, 0).cell.codepoint(),
+    );
+    try testing.expectEqual(
+        @as(u21, 0x0100),
+        destination.getRowAndCell(0, 1).cell.codepoint(),
+    );
+    const decoded_styled = destination.getRowAndCell(0, 2);
+    try testing.expectEqual(@as(u21, 's'), decoded_styled.cell.codepoint());
+    try testing.expectEqual(native_style, decoded_styled.cell.style_id);
+    try testing.expect(decoded_styled.row.styled);
+    try testing.expectEqual(
+        @as(u8, 7),
+        destination.getRowAndCell(1, 2).cell.content.color_palette.data,
+    );
+    try testing.expect(destination.getRowAndCell(0, 3).cell.protected);
+}
+
+test "grid decodes non-canonical cell widths" {
+    const testing = std.testing;
+    var page = try TerminalPage.init(.{ .cols = 2, .rows = 1 });
+    defer page.deinit();
+    var style_remap = try StyleRemap.init(testing.allocator);
+    defer style_remap.deinit(testing.allocator);
+    var hyperlink_remap = try HyperlinkRemap.init(testing.allocator);
+    defer hyperlink_remap.deinit(testing.allocator);
+
+    // A bare ASCII row encoded at the full width is wasteful but valid.
+    var payload: [64]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&payload);
+    try writer.writeByte(@bitCast(Row{ .cell_width = .eight }));
+    try io.writeInt(&writer, u16, 2);
+    try io.writeInt(&writer, u64, @bitCast(Cell{ .content = 'o' }));
+    try io.writeInt(&writer, u64, @bitCast(Cell{ .content = 'k' }));
+    try io.writeInt(&writer, u32, 0);
+
+    var reader: std.Io.Reader = .fixed(writer.buffered());
+    try decode(&page, &reader, &style_remap, &hyperlink_remap);
+    try page.verifyIntegrity(testing.allocator);
+    try testing.expectEqual(
+        @as(u21, 'o'),
+        page.getRowAndCell(0, 0).cell.codepoint(),
+    );
+    try testing.expectEqual(
+        @as(u21, 'k'),
+        page.getRowAndCell(1, 0).cell.codepoint(),
+    );
+
+    // Re-encoding canonicalizes the row back to the one-byte width.
+    var reencoded: [16]u8 = undefined;
+    var rewriter: std.Io.Writer = .fixed(&reencoded);
+    try encode(&page, &rewriter);
+    try testing.expectEqual(@as(usize, 3 + 2 + 4), rewriter.buffered().len);
+}
+
+test "grid normalizes surrogates in two-byte cells" {
+    const testing = std.testing;
+    var page = try TerminalPage.init(.{ .cols = 2, .rows = 1 });
+    defer page.deinit();
+    var style_remap = try StyleRemap.init(testing.allocator);
+    defer style_remap.deinit(testing.allocator);
+    var hyperlink_remap = try HyperlinkRemap.init(testing.allocator);
+    defer hyperlink_remap.deinit(testing.allocator);
+
+    var payload: [16]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&payload);
+    try writer.writeByte(@bitCast(Row{ .cell_width = .two }));
+    try io.writeInt(&writer, u16, 2);
+    try io.writeInt(&writer, u16, 0xD800);
+    try io.writeInt(&writer, u16, 0x0416);
+    try io.writeInt(&writer, u32, 0);
+
+    var reader: std.Io.Reader = .fixed(writer.buffered());
+    try decode(&page, &reader, &style_remap, &hyperlink_remap);
+    try page.verifyIntegrity(testing.allocator);
+    try testing.expectEqual(
+        @as(u21, 0xFFFD),
+        page.getRowAndCell(0, 0).cell.codepoint(),
+    );
+    try testing.expectEqual(
+        @as(u21, 0x0416),
+        page.getRowAndCell(1, 0).cell.codepoint(),
+    );
+}
+
+test "grid four-byte cells run full normalization" {
+    const testing = std.testing;
+    var page = try TerminalPage.init(.{
+        .cols = 3,
+        .rows = 1,
+        .styles = 8,
+    });
+    defer page.deinit();
+    var style_remap = try StyleRemap.init(testing.allocator);
+    defer style_remap.deinit(testing.allocator);
+    var hyperlink_remap = try HyperlinkRemap.init(testing.allocator);
+    defer hyperlink_remap.deinit(testing.allocator);
+
+    var payload: [32]u8 = undefined;
+    var writer: std.Io.Writer = .fixed(&payload);
+    try writer.writeByte(@bitCast(Row{ .cell_width = .four }));
+    try io.writeInt(&writer, u16, 3);
+
+    // The Kitty placeholder does not fit two-byte cells but fits here
+    // and must still derive the native row hint.
+    try io.writeInt(&writer, u32, @truncate(@as(u64, @bitCast(Cell{
+        .content = kitty.graphics.unicode.placeholder,
+    }))));
+
+    // An unknown small style reference degrades to the default style.
+    try io.writeInt(&writer, u32, @truncate(@as(u64, @bitCast(Cell{
+        .content = 'x',
+        .style_id = 63,
+    }))));
+
+    // Reserved palette content bits are cleared at this width too.
+    try io.writeInt(&writer, u32, @truncate(@as(u64, @bitCast(Cell{
+        .kind = 2,
+        .content = 0xFFFF07,
+    }))));
+    try io.writeInt(&writer, u32, 0);
+
+    var reader: std.Io.Reader = .fixed(writer.buffered());
+    try decode(&page, &reader, &style_remap, &hyperlink_remap);
+    try page.verifyIntegrity(testing.allocator);
+
+    const first = page.getRowAndCell(0, 0);
+    try testing.expectEqual(
+        @as(u21, kitty.graphics.unicode.placeholder),
+        first.cell.codepoint(),
+    );
+    try testing.expect(first.row.kitty_virtual_placeholder);
+
+    const second = page.getRowAndCell(1, 0).cell;
+    try testing.expectEqual(@as(u21, 'x'), second.codepoint());
+    try testing.expectEqual(@as(TerminalStyleId, 0), second.style_id);
+
+    const third = page.getRowAndCell(2, 0).cell;
+    try testing.expectEqual(
+        TerminalCell.ContentTag.bg_color_palette,
+        third.content_tag,
+    );
+    try testing.expectEqual(@as(u8, 7), third.content.color_palette.data);
 }

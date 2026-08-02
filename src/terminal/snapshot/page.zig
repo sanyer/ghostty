@@ -1015,7 +1015,7 @@ test "decode defaults missing sparse cell references" {
     var style_encoded: [Header.len + 3 + 8 + 4]u8 = undefined;
     var style_writer: std.Io.Writer = .fixed(&style_encoded);
     try style_header.encode(&style_writer);
-    try style_writer.writeByte(0); // row flags
+    try style_writer.writeByte(0x30); // row flags, full cell width
     try io.writeInt(&style_writer, u16, 1); // cell count
     try io.writeInt(&style_writer, u64, @bitCast(grid.Cell{
         .style_id = 1,
@@ -1048,7 +1048,7 @@ test "decode defaults missing sparse cell references" {
     var hyperlink_encoded: [Header.len + 3 + 8 + 4]u8 = undefined;
     var hyperlink_writer: std.Io.Writer = .fixed(&hyperlink_encoded);
     try hyperlink_header.encode(&hyperlink_writer);
-    try hyperlink_writer.writeByte(0); // row flags
+    try hyperlink_writer.writeByte(0x30); // row flags, full cell width
     try io.writeInt(&hyperlink_writer, u16, 1); // cell count
     try io.writeInt(&hyperlink_writer, u64, @bitCast(grid.Cell{
         .hyperlink = true,

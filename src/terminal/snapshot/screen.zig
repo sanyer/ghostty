@@ -2262,7 +2262,7 @@ test "SCREEN decode ignores a PAGE with an empty hyperlink URI" {
 
     // One narrow codepoint cell refers to the hyperlink table entry above.
     // Since that entry is ignored, the cell must restore without a hyperlink.
-    try page_payload.writeByte(0); // row flags
+    try page_payload.writeByte(0x30); // row flags, full cell width
     try io.writeInt(page_payload, u16, 1); // cell count
     try io.writeInt(page_payload, u64, @bitCast(grid.Cell{
         .content = 'A',
