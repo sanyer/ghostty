@@ -19,6 +19,10 @@
 //! * `decode` restores one complete snapshot per loop from bytes prepared
 //!   during setup. The restored terminal is destroyed inside the step, so
 //!   this measures the complete restore lifecycle.
+//! * `decode-ready` restores only the renderable prefix per loop using the
+//!   incremental decoder and stops at READY, skipping history. Compared
+//!   against `decode`, this is the time-to-interactive win of applying
+//!   history off the critical path.
 //! * `report` encodes once and prints total and per-record-tag sizes. It
 //!   is for inspecting the wire shape, not timing comparisons.
 //!
@@ -92,6 +96,9 @@ pub const Mode = enum {
     /// Restore one complete snapshot per loop, including its teardown.
     decode,
 
+    /// Restore one renderable READY prefix per loop, including teardown.
+    @"decode-ready",
+
     /// Print encoded sizes by record tag. Not a timing benchmark.
     report,
 };
@@ -122,6 +129,7 @@ pub fn benchmark(self: *TerminalSnapshot) Benchmark {
             .noop => stepNoop,
             .encode => stepEncode,
             .decode => stepDecode,
+            .@"decode-ready" => stepDecodeReady,
             .report => stepReport,
         },
         .setupFn = setup,
@@ -231,6 +239,28 @@ fn stepDecode(ptr: *anyopaque) Benchmark.Error!void {
     }
 }
 
+/// The renderable-prefix half of decode: everything through READY, leaving
+/// all history unread. The gap between this and `stepDecode` is the latency
+/// class the incremental decoder removes from time-to-interactive.
+fn stepDecodeReady(ptr: *anyopaque) Benchmark.Error!void {
+    const self: *TerminalSnapshot = @ptrCast(@alignCast(ptr));
+    const bytes = self.encoded.written();
+    for (0..self.opts.loops) |_| {
+        var reader: std.Io.Reader = .fixed(bytes);
+        var decoder: snapshot.Decoder = .init(&reader);
+        var decoded = decoder.ready(
+            self.alloc,
+            global.io(),
+            .{ .max_continuation_bytes = 1024 * 1024 },
+        ) catch |err| {
+            log.warn("snapshot READY decoding failed err={}", .{err});
+            return error.BenchmarkFailed;
+        };
+        std.mem.doNotOptimizeAway(&decoded);
+        decoded.deinit(self.alloc);
+    }
+}
+
 /// Print the encoded size grouped by record tag. This shares the encoder
 /// with encode mode but deliberately makes no timing claims.
 fn stepReport(ptr: *anyopaque) Benchmark.Error!void {
@@ -297,6 +327,19 @@ test "TerminalSnapshot decode round trip" {
     const testing = std.testing;
     const impl: *TerminalSnapshot = try .create(testing.allocator, .{
         .mode = .decode,
+        .@"terminal-rows" = 4,
+        .@"terminal-cols" = 8,
+    });
+    defer impl.destroy(testing.allocator);
+
+    const bench = impl.benchmark();
+    _ = try bench.run(.once);
+}
+
+test "TerminalSnapshot decode READY prefix" {
+    const testing = std.testing;
+    const impl: *TerminalSnapshot = try .create(testing.allocator, .{
+        .mode = .@"decode-ready",
         .@"terminal-rows" = 4,
         .@"terminal-cols" = 8,
     });
