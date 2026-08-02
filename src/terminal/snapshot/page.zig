@@ -93,6 +93,7 @@
 //! Rows and cells use the grid encoding documented in `grid.zig`.
 
 const std = @import("std");
+const build_options = @import("terminal_options");
 const Allocator = std.mem.Allocator;
 const test_fixture = @import("fixture.zig");
 const grid = @import("grid.zig");
@@ -227,7 +228,15 @@ pub const Decoder = struct {
             self.header,
         );
         try self.record_reader.finish();
-        try destination.verifyIntegrity(alloc);
+
+        // The decoder normalizes every semantic value, so a complete decode
+        // upholds native page invariants by construction. Verifying them
+        // again is a defense against decoder bugs and follows the native
+        // page policy: full integrity verification only when slow runtime
+        // safety is enabled.
+        if (comptime build_options.slow_runtime_safety) {
+            try destination.verifyIntegrity(alloc);
+        }
     }
 };
 
