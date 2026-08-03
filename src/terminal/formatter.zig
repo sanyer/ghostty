@@ -1,5 +1,6 @@
 const std = @import("std");
 const assert = @import("../quirks.zig").inlineAssert;
+const fastprint = @import("../fastprint.zig");
 const lib = @import("lib.zig");
 const Allocator = std.mem.Allocator;
 const color = @import("color.zig");
@@ -776,12 +777,16 @@ pub const PageListFormatter = struct {
             // If we're tracking pins then grab our points and write them
             // to our pin map.
             if (self.pin_map) |*m| {
+                m.map.ensureUnusedCapacity(
+                    m.alloc,
+                    point_map.items.len,
+                ) catch return error.WriteFailed;
                 for (point_map.items) |coord| {
-                    m.map.append(m.alloc, .{
+                    m.map.appendAssumeCapacity(.{
                         .node = chunk.node,
                         .x = coord.x,
                         .y = @intCast(coord.y),
-                    }) catch return error.WriteFailed;
+                    });
                 }
             }
         }
@@ -831,15 +836,18 @@ pub const PageFormatter = struct {
     /// The x/y coordinate will be the coordinates within the page.
     ///
     /// Warning: there is a significant performance hit to track this
-    point_map: ?struct {
-        alloc: Allocator,
-        map: *std.ArrayList(Coordinate),
-    },
+    point_map: ?PointMap,
 
     /// The previous trailing state from the prior page. If you're iterating
     /// over multiple pages this helps ensure that unwrapping and other
     /// accounting works properly.
     trailing_state: ?TrailingState,
+
+    /// See point_map.
+    pub const PointMap = struct {
+        alloc: Allocator,
+        map: *std.ArrayList(Coordinate),
+    };
 
     /// Trailing state. This is used to ensure that rows wrapped across
     /// multiple pages are unwrapped properly, as well as other accounting
@@ -877,6 +885,18 @@ pub const PageFormatter = struct {
     pub fn formatWithState(
         self: PageFormatter,
         writer: *std.Io.Writer,
+    ) std.Io.Writer.Error!TrailingState {
+        // Specialize the hot path on the emitted format so that the
+        // per-cell loop contains no per-cell format dispatch.
+        switch (self.opts.emit) {
+            inline else => |emit| return self.formatWithStateEmit(writer, emit),
+        }
+    }
+
+    fn formatWithStateEmit(
+        self: PageFormatter,
+        writer: *std.Io.Writer,
+        comptime emit: Format,
     ) std.Io.Writer.Error!TrailingState {
         var blank_rows: usize = 0;
         var blank_cells: usize = 0;
@@ -934,7 +954,7 @@ pub const PageFormatter = struct {
         }
 
         // Wrap HTML output in monospace font styling
-        switch (self.opts.emit) {
+        switch (emit) {
             .plain => {},
 
             .html => {
@@ -994,8 +1014,23 @@ pub const PageFormatter = struct {
             },
         }
 
-        // Our style for non-plain formats
+        // Our style for non-plain formats. Alongside the style itself we
+        // track the page-local interned style id it corresponds to (styles
+        // are interned per-page so id equality implies style equality).
+        // The id is only a fast-path hint: it is set to `invalid_style_id`
+        // whenever the current style didn't come from an interned id
+        // (e.g. bg-color-only cells which synthesize styles).
+        const invalid_style_id: u32 = std.math.maxInt(u32);
         var style: Style = .{};
+        var style_id: u32 = 0;
+
+        // Whether the codepoint map has any entries. Hoisted out of the
+        // per-codepoint path so that the common no-map case can use the
+        // fast cell run path below.
+        const cp_map_empty: bool = if (self.opts.codepoint_map) |m|
+            m.len == 0
+        else
+            true;
 
         // Track hyperlink state for HTML output. We need to close </a> tags
         // when the hyperlink changes or ends.
@@ -1050,11 +1085,12 @@ pub const PageFormatter = struct {
                 // Reset style before emitting newlines to prevent background
                 // colors from bleeding into the next line's leading cells.
                 if (!style.default()) {
-                    try self.formatStyleClose(writer);
+                    try self.formatStyleClose(emit, writer);
                     style = .{};
+                    style_id = 0;
                 }
 
-                const sequence: []const u8 = switch (self.opts.emit) {
+                const sequence: []const u8 = switch (emit) {
                     // Plaintext just uses standard newlines because newlines
                     // on their own usually move the cursor back in anywhere
                     // you type plaintext.
@@ -1113,8 +1149,57 @@ pub const PageFormatter = struct {
             if (!row.wrap_continuation or !self.opts.unwrap) blank_cells = 0;
 
             // Go through each cell and print it
-            for (cells_subset, row_start_x..) |*cell, x_usize| {
-                const x: size.CellCountInt = @intCast(x_usize);
+            var cell_i: usize = 0;
+            while (cell_i < cells_subset.len) : (cell_i += 1) {
+                const cell: *const Cell = &cells_subset[cell_i];
+                const x: size.CellCountInt = @intCast(row_start_x + cell_i);
+
+                // Fast path: runs of simple cells (single codepoint, no
+                // style/hyperlink transitions) are encoded in batches,
+                // avoiding all of the per-cell bookkeeping below. This is
+                // only valid when we have no codepoint map and when our
+                // current style/hyperlink state is known-stable.
+                if (cp_map_empty) fast: {
+                    if (comptime formatStyled(emit)) {
+                        if (style_id == invalid_style_id) break :fast;
+                        if (comptime emit == .html) {
+                            if (current_hyperlink_id != null) break :fast;
+                        }
+                    }
+
+                    // Specialized on point tracking so that the common
+                    // non-tracking case has zero per-cell overhead.
+                    const consumed = if (self.point_map == null)
+                        try self.writeCellRun(
+                            emit,
+                            false,
+                            writer,
+                            cells_subset[cell_i..],
+                            x,
+                            y,
+                            style_id,
+                            &blank_cells,
+                        )
+                    else
+                        try self.writeCellRun(
+                            emit,
+                            true,
+                            writer,
+                            cells_subset[cell_i..],
+                            x,
+                            y,
+                            style_id,
+                            &blank_cells,
+                        );
+
+                    // Zero cells consumed means the first cell isn't
+                    // eligible for the fast path; handle it below.
+                    if (consumed == 0) break :fast;
+
+                    // The continue expression adds the final one.
+                    cell_i += consumed - 1;
+                    continue;
+                }
 
                 // Skip spacers. These happen naturally when wide characters
                 // are printed again on the screen (for well-behaved terminals!)
@@ -1130,8 +1215,9 @@ pub const PageFormatter = struct {
                     // If we're emitting styled output (not plaintext) and
                     // the cell has some kind of styling or is not empty
                     // then this isn't blank.
-                    if (formatStyled(self.opts.emit) and
-                        (!cell.isEmpty() or cell.hasStyling())) break :blank;
+                    if (comptime formatStyled(emit)) {
+                        if (!cell.isEmpty() or cell.hasStyling()) break :blank;
+                    }
 
                     // Cells with no text are blank
                     if (!cell.hasText()) {
@@ -1153,32 +1239,12 @@ pub const PageFormatter = struct {
                 if (blank_cells > 0) {
                     try writer.splatByteAll(' ', blank_cells);
 
-                    if (self.point_map) |*map| {
-                        // Map each blank cell to its coordinate. Blank cells can span
-                        // multiple rows if they carry over from wrap continuation.
-                        var remaining_blanks = blank_cells;
-                        var blank_x = x;
-                        var blank_y = y;
-                        while (remaining_blanks > 0) : (remaining_blanks -= 1) {
-                            if (blank_x > 0) {
-                                // We have space in this row
-                                blank_x -= 1;
-                            } else if (blank_y > 0) {
-                                // Wrap to previous row
-                                blank_y -= 1;
-                                blank_x = self.page.size.cols - 1;
-                            } else {
-                                // Can't go back further, just use (0, 0)
-                                blank_x = 0;
-                                blank_y = 0;
-                            }
-
-                            map.map.append(
-                                map.alloc,
-                                .{ .x = blank_x, .y = blank_y },
-                            ) catch return error.WriteFailed;
-                        }
-                    }
+                    if (self.point_map) |*map| try self.appendBlankPoints(
+                        map,
+                        blank_cells,
+                        x,
+                        y,
+                    );
 
                     blank_cells = 0;
                 }
@@ -1186,24 +1252,37 @@ pub const PageFormatter = struct {
                 style: {
                     // If we aren't emitting styled output then we don't
                     // have to worry about styles.
-                    if (!formatStyled(self.opts.emit)) break :style;
+                    if (!comptime formatStyled(emit)) break :style;
+
+                    // Fast path: styles are interned per-page, so if this
+                    // cell's style id matches the id of our current style
+                    // then the style is unchanged.
+                    const cell_style_id: u32 = switch (cell.content_tag) {
+                        .codepoint, .codepoint_grapheme => cell.style_id,
+                        .bg_color_palette, .bg_color_rgb => invalid_style_id,
+                    };
+                    if (cell_style_id == style_id and
+                        cell_style_id != invalid_style_id) break :style;
 
                     // Get our cell style.
                     const cell_style = self.cellStyle(cell);
 
                     // If the style hasn't changed, don't bloat output.
-                    if (cell_style.eql(style)) break :style;
+                    if (cell_style.eql(style)) {
+                        style_id = cell_style_id;
+                        break :style;
+                    }
 
                     // If we had a previous style, we need to close it,
                     // because we've confirmed we have some new style
                     // (which is maybe default).
-                    if (!style.default()) switch (self.opts.emit) {
-                        .html => try self.formatStyleClose(writer),
+                    if (!style.default()) switch (emit) {
+                        .html => try self.formatStyleClose(emit, writer),
 
                         // For VT, we only close if we're switching to a default
                         // style because any non-default style will emit
                         // a \x1b[0m as the start of a VT coloring sequence.
-                        .vt => if (cell_style.default()) try self.formatStyleClose(writer),
+                        .vt => if (cell_style.default()) try self.formatStyleClose(emit, writer),
 
                         // Unreachable because of the styled() check at the
                         // top of this block.
@@ -1212,12 +1291,14 @@ pub const PageFormatter = struct {
 
                     // At this point, we can copy our style over
                     style = cell_style;
+                    style_id = cell_style_id;
 
                     // If we're just the default style now, we're done.
                     if (cell_style.default()) break :style;
 
                     // New style, emit it.
                     try self.formatStyleOpen(
+                        emit,
                         writer,
                         &style,
                     );
@@ -1227,16 +1308,18 @@ pub const PageFormatter = struct {
                     if (self.point_map) |*map| {
                         var discarding: std.Io.Writer.Discarding = .init(&.{});
                         try self.formatStyleOpen(
+                            emit,
                             &discarding.writer,
                             &style,
                         );
-                        for (0..std.math.cast(
-                            usize,
-                            discarding.count,
-                        ) orelse return error.WriteFailed) |_| map.map.append(map.alloc, .{
-                            .x = x,
-                            .y = y,
-                        }) catch return error.WriteFailed;
+                        map.map.appendNTimes(
+                            map.alloc,
+                            .{ .x = x, .y = y },
+                            std.math.cast(
+                                usize,
+                                discarding.count,
+                            ) orelse return error.WriteFailed,
+                        ) catch return error.WriteFailed;
                     }
                 }
 
@@ -1245,7 +1328,7 @@ pub const PageFormatter = struct {
                     // We currently only emit hyperlinks for HTML. In the
                     // future we can support emitting OSC 8 hyperlinks for
                     // VT output as well.
-                    if (self.opts.emit != .html) break :hyperlink;
+                    if (comptime emit != .html) break :hyperlink;
 
                     // Get the hyperlink ID. This ID is our internal ID,
                     // not necessarily the OSC8 ID.
@@ -1261,7 +1344,7 @@ pub const PageFormatter = struct {
                     // If our prior hyperlink ID was non-null, we need to
                     // close it because the ID has changed.
                     if (current_hyperlink_id != null) {
-                        try self.formatHyperlinkClose(writer);
+                        try self.formatHyperlinkClose(emit, writer);
                         current_hyperlink_id = null;
                     }
 
@@ -1278,6 +1361,7 @@ pub const PageFormatter = struct {
                         break :uri link.uri.offset.ptr(self.page.memory)[0..link.uri.len];
                     };
                     try self.formatHyperlinkOpen(
+                        emit,
                         writer,
                         uri,
                     );
@@ -1287,16 +1371,18 @@ pub const PageFormatter = struct {
                     if (self.point_map) |*map| {
                         var discarding: std.Io.Writer.Discarding = .init(&.{});
                         try self.formatHyperlinkOpen(
+                            emit,
                             &discarding.writer,
                             uri,
                         );
-                        for (0..std.math.cast(
-                            usize,
-                            discarding.count,
-                        ) orelse return error.WriteFailed) |_| map.map.append(map.alloc, .{
-                            .x = x,
-                            .y = y,
-                        }) catch return error.WriteFailed;
+                        map.map.appendNTimes(
+                            map.alloc,
+                            .{ .x = x, .y = y },
+                            std.math.cast(
+                                usize,
+                                discarding.count,
+                            ) orelse return error.WriteFailed,
+                        ) catch return error.WriteFailed;
                     }
                 }
 
@@ -1304,20 +1390,21 @@ pub const PageFormatter = struct {
                     // We combine codepoint and graphemes because both have
                     // shared style handling. We use comptime to dup it.
                     inline .codepoint, .codepoint_grapheme => |tag| {
-                        try self.writeCell(tag, writer, cell);
+                        try self.writeCell(tag, emit, writer, cell);
 
                         // If we have a point map, all codepoints map to this
                         // cell.
                         if (self.point_map) |*map| {
                             var discarding: std.Io.Writer.Discarding = .init(&.{});
-                            try self.writeCell(tag, &discarding.writer, cell);
-                            for (0..std.math.cast(
-                                usize,
-                                discarding.count,
-                            ) orelse return error.WriteFailed) |_| map.map.append(map.alloc, .{
-                                .x = x,
-                                .y = y,
-                            }) catch return error.WriteFailed;
+                            try self.writeCell(tag, emit, &discarding.writer, cell);
+                            map.map.appendNTimes(
+                                map.alloc,
+                                .{ .x = x, .y = y },
+                                std.math.cast(
+                                    usize,
+                                    discarding.count,
+                                ) orelse return error.WriteFailed,
+                            ) catch return error.WriteFailed;
                         }
                     },
 
@@ -1335,13 +1422,13 @@ pub const PageFormatter = struct {
         }
 
         // If the style is non-default, we need to close our style tag.
-        if (!style.default()) try self.formatStyleClose(writer);
+        if (!style.default()) try self.formatStyleClose(emit, writer);
 
         // Close any open hyperlink for HTML output
-        if (current_hyperlink_id != null) try self.formatHyperlinkClose(writer);
+        if (current_hyperlink_id != null) try self.formatHyperlinkClose(emit, writer);
 
         // Close the monospace wrapper for HTML output
-        if (self.opts.emit == .html) {
+        if (comptime emit == .html) {
             const closing = "</div>";
             try writer.writeAll(closing);
             if (self.point_map) |*map| {
@@ -1362,9 +1449,294 @@ pub const PageFormatter = struct {
         return .{ .rows = blank_rows, .cells = blank_cells };
     }
 
+    /// Fast path for writing runs of simple cells: single-codepoint cells
+    /// that require no style or hyperlink handling. Output bytes are
+    /// batched into a stack buffer to avoid per-cell writer dispatch.
+    /// Returns the number of cells consumed, which may be zero if the
+    /// first cell isn't eligible for the fast path (in which case the
+    /// caller must handle it via the slow path).
+    ///
+    /// Requirements (asserted by the caller, not here):
+    ///
+    ///   - The codepoint map is empty.
+    ///   - For styled formats, `run_style_id` is the valid interned
+    ///     page-local id of the currently active style.
+    ///   - For HTML, no hyperlink is currently open.
+    ///
+    /// `run_x`/`run_y` are the page coordinates of `cells[0]`, used for
+    /// point map tracking.
+    ///
+    /// Blank cell accounting matches the slow path: accumulated blanks
+    /// are only materialized once a non-blank cell is found, and any
+    /// remainder is written back to `blank_cells`.
+    fn writeCellRun(
+        self: *const PageFormatter,
+        comptime emit: Format,
+        comptime track_points: bool,
+        writer: *std.Io.Writer,
+        cells: []const Cell,
+        run_x: size.CellCountInt,
+        run_y: size.CellCountInt,
+        run_style_id: u32,
+        blank_cells: *usize,
+    ) std.Io.Writer.Error!usize {
+        assert(track_points == (self.point_map != null));
+
+        // The largest single-cell encoding must fit after a flush: the
+        // HTML entity for the maximum codepoint ("&#2097151;") is 10
+        // bytes, escapes are up to 6.
+        const max_encoding_len = 16;
+        var buf: [512]u8 = undefined;
+        var len: usize = 0;
+        var pending: usize = blank_cells.*;
+
+        var i: usize = 0;
+        while (i < cells.len) : (i += 1) {
+            const cell = &cells[i];
+
+            // Spacers produce no output, matching the slow path which
+            // skips them before any blank/style handling.
+            switch (cell.wide) {
+                .narrow, .wide => {},
+                .spacer_head, .spacer_tail => continue,
+            }
+
+            // Only text cells: bg-color cells synthesize styles and take
+            // the slow path.
+            switch (cell.content_tag) {
+                .codepoint, .codepoint_grapheme => {},
+                .bg_color_palette, .bg_color_rgb => break,
+            }
+
+            if (comptime formatStyled(emit)) {
+                // Style transition, take the slow path.
+                if (cell.style_id != run_style_id) break;
+
+                // Hyperlink transition, take the slow path.
+                if (comptime emit == .html) {
+                    if (cell.hyperlink) break;
+                }
+            }
+
+            const cp: u21 = cell.content.codepoint.data;
+
+            // Blank cell accounting, matching the slow path blank block.
+            if (comptime formatStyled(emit)) {
+                // Styled formats only treat unstyled empty cells as
+                // blank; anything else (including spaces) is written
+                // so that styling is preserved.
+                if (cp == 0 and cell.wide == .narrow and run_style_id == 0) {
+                    pending += 1;
+                    continue;
+                }
+            } else {
+                // Cells with no text are blank.
+                if (cp == 0) {
+                    pending += 1;
+                    continue;
+                }
+
+                // Trailing spaces are blank.
+                if (cp == ' ' and self.opts.trim) {
+                    pending += 1;
+                    continue;
+                }
+            }
+
+            // The page coordinate of this cell, for point tracking.
+            const x: size.CellCountInt = @intCast(run_x + i);
+
+            // This cell produces output: materialize accumulated blanks.
+            if (pending > 0) {
+                if (comptime track_points) try self.appendBlankPoints(
+                    &self.point_map.?,
+                    pending,
+                    x,
+                    run_y,
+                );
+
+                while (pending > 0) {
+                    if (len == buf.len) {
+                        try writer.writeAll(buf[0..len]);
+                        len = 0;
+                    }
+                    const n = @min(pending, buf.len - len);
+                    @memset(buf[len..][0..n], ' ');
+                    len += n;
+                    pending -= n;
+                }
+            }
+
+            // Flush if the largest possible encoding may not fit.
+            if (len + max_encoding_len > buf.len) {
+                try writer.writeAll(buf[0..len]);
+                len = 0;
+            }
+
+            var cell_bytes: usize = 0;
+
+            // Empty (but styled or wide) cells emit a space, matching
+            // writeCell.
+            if (cp == 0) {
+                buf[len] = ' ';
+                len += 1;
+                cell_bytes = 1;
+            } else {
+                cell_bytes = encodeCodepoint(emit, &buf, &len, cp);
+
+                // Multi-codepoint graphemes emit their extra codepoints,
+                // matching writeCell. This is out-of-line to keep the
+                // hot loop for the common single-codepoint case small.
+                if (cell.content_tag == .codepoint_grapheme) {
+                    @branchHint(.unlikely);
+                    cell_bytes += try self.writeGraphemeCps(
+                        emit,
+                        writer,
+                        cell,
+                        &buf,
+                        &len,
+                    );
+                }
+            }
+
+            // All of the cell's bytes map to the cell's coordinate.
+            if (comptime track_points) {
+                const map = &self.point_map.?;
+                map.map.appendNTimes(
+                    map.alloc,
+                    .{ .x = x, .y = run_y },
+                    cell_bytes,
+                ) catch return error.WriteFailed;
+            }
+        }
+
+        if (len > 0) try writer.writeAll(buf[0..len]);
+        blank_cells.* = pending;
+        return i;
+    }
+
+    /// Encode the extra codepoints of a multi-codepoint grapheme into
+    /// buf, flushing to the writer as needed. Returns the number of
+    /// bytes written. This is deliberately not inlined so that the
+    /// (rare) grapheme case doesn't bloat the writeCellRun hot loop.
+    noinline fn writeGraphemeCps(
+        self: *const PageFormatter,
+        comptime emit: Format,
+        writer: *std.Io.Writer,
+        cell: *const Cell,
+        buf: *[512]u8,
+        len: *usize,
+    ) std.Io.Writer.Error!usize {
+        const max_encoding_len = 16;
+        var bytes: usize = 0;
+        for (self.page.lookupGrapheme(cell).?) |gcp| {
+            if (len.* + max_encoding_len > buf.len) {
+                try writer.writeAll(buf[0..len.*]);
+                len.* = 0;
+            }
+            bytes += encodeCodepoint(emit, buf, len, gcp);
+        }
+        return bytes;
+    }
+
+    /// Encode a single codepoint into buf at len, advancing len and
+    /// returning the number of bytes written. The caller must guarantee
+    /// enough remaining buffer space for the largest possible encoding.
+    inline fn encodeCodepoint(
+        comptime emit: Format,
+        buf: *[512]u8,
+        len: *usize,
+        cp: u21,
+    ) usize {
+        const start = len.*;
+        switch (emit) {
+            .plain, .vt => if (cp < 0x80) {
+                buf[start] = @intCast(cp);
+                len.* += 1;
+            } else {
+                len.* += std.unicode.utf8Encode(cp, buf[start..][0..4]) catch l: {
+                    // Matches Writer.printUnicodeCodepoint: invalid
+                    // codepoints become the replacement character.
+                    buf[start..][0..3].* = std.unicode.replacement_character_utf8;
+                    break :l 3;
+                };
+            },
+
+            .html => html: {
+                const esc: ?[]const u8 = switch (cp) {
+                    '<' => "&lt;",
+                    '>' => "&gt;",
+                    '&' => "&amp;",
+                    '"' => "&quot;",
+                    '\'' => "&#39;",
+                    else => null,
+                };
+                if (esc) |s| {
+                    @memcpy(buf[start..][0..s.len], s);
+                    len.* += s.len;
+                    break :html;
+                }
+
+                // ASCII is emitted directly, everything else as a
+                // numeric entity. See writeCodepoint.
+                if (cp < 0x80) {
+                    buf[start] = @intCast(cp);
+                    len.* += 1;
+                    break :html;
+                }
+
+                buf[start..][0..2].* = "&#".*;
+                len.* += 2;
+                len.* += fastprint.printDecimal(u21, buf[len.*..], cp);
+                buf[len.*] = ';';
+                len.* += 1;
+            },
+        }
+
+        return len.* - start;
+    }
+
+    /// Append the point map entries for a run of `count` blank cells
+    /// that are materialized as spaces just before the cell at (x, y).
+    /// Blank cells can span multiple rows if they carry over from wrap
+    /// continuation, so this walks backwards from (x, y).
+    fn appendBlankPoints(
+        self: *const PageFormatter,
+        map: *const PointMap,
+        count: usize,
+        x: size.CellCountInt,
+        y: size.CellCountInt,
+    ) std.Io.Writer.Error!void {
+        map.map.ensureUnusedCapacity(
+            map.alloc,
+            count,
+        ) catch return error.WriteFailed;
+
+        var remaining = count;
+        var blank_x = x;
+        var blank_y = y;
+        while (remaining > 0) : (remaining -= 1) {
+            if (blank_x > 0) {
+                // We have space in this row
+                blank_x -= 1;
+            } else if (blank_y > 0) {
+                // Wrap to previous row
+                blank_y -= 1;
+                blank_x = self.page.size.cols - 1;
+            } else {
+                // Can't go back further, just use (0, 0)
+                blank_x = 0;
+                blank_y = 0;
+            }
+
+            map.map.appendAssumeCapacity(.{ .x = blank_x, .y = blank_y });
+        }
+    }
+
     fn writeCell(
         self: PageFormatter,
         comptime tag: Cell.ContentTag,
+        comptime emit: Format,
         writer: *std.Io.Writer,
         cell: *const Cell,
     ) !void {
@@ -1376,16 +1748,17 @@ pub const PageFormatter = struct {
             return;
         }
 
-        try self.writeCodepointWithReplacement(writer, cell.content.codepoint.data);
+        try self.writeCodepointWithReplacement(emit, writer, cell.content.codepoint.data);
         if (comptime tag == .codepoint_grapheme) {
             for (self.page.lookupGrapheme(cell).?) |cp| {
-                try self.writeCodepointWithReplacement(writer, cp);
+                try self.writeCodepointWithReplacement(emit, writer, cp);
             }
         }
     }
 
     fn writeCodepointWithReplacement(
         self: PageFormatter,
+        comptime emit: Format,
         writer: *std.Io.Writer,
         codepoint: u21,
     ) !void {
@@ -1407,12 +1780,14 @@ pub const PageFormatter = struct {
 
         // If no replacement, write it directly.
         const r = r_ orelse return try self.writeCodepoint(
+            emit,
             writer,
             codepoint,
         );
 
         switch (r) {
             .codepoint => |v| try self.writeCodepoint(
+                emit,
                 writer,
                 v,
             ),
@@ -1421,6 +1796,7 @@ pub const PageFormatter = struct {
                 const view = std.unicode.Utf8View.init(s) catch unreachable;
                 var it = view.iterator();
                 while (it.nextCodepoint()) |cp| try self.writeCodepoint(
+                    emit,
                     writer,
                     cp,
                 );
@@ -1430,11 +1806,13 @@ pub const PageFormatter = struct {
 
     fn writeCodepoint(
         self: PageFormatter,
+        comptime emit: Format,
         writer: *std.Io.Writer,
         codepoint: u21,
     ) !void {
-        switch (self.opts.emit) {
-            .plain, .vt => try writer.print("{u}", .{codepoint}),
+        _ = self;
+        switch (emit) {
+            .plain, .vt => try writer.printUnicodeCodepoint(codepoint),
             .html => {
                 switch (codepoint) {
                     '<' => try writer.writeAll("&lt;"),
@@ -1449,9 +1827,14 @@ pub const PageFormatter = struct {
                         // meta tag because we emit partial HTML so this ensures
                         // proper unicode handling.
                         if (codepoint < 0x80) {
-                            try writer.print("{u}", .{codepoint});
+                            try writer.writeByte(@intCast(codepoint));
                         } else {
-                            try writer.print("&#{d};", .{codepoint});
+                            var buf: [16]u8 = undefined;
+                            buf[0..2].* = "&#".*;
+                            var len: usize = 2 + fastprint.printDecimal(u21, buf[2..], codepoint);
+                            buf[len] = ';';
+                            len += 1;
+                            try writer.writeAll(buf[0..len]);
                         }
                     },
                 }
@@ -1496,16 +1879,17 @@ pub const PageFormatter = struct {
     /// and other HTML attribute values.
     fn formatStyleOpen(
         self: PageFormatter,
+        comptime emit: Format,
         writer: *std.Io.Writer,
         style: *const Style,
     ) std.Io.Writer.Error!void {
-        switch (self.opts.emit) {
+        switch (emit) {
             .plain => unreachable,
 
             .vt => {
                 var formatter = style.formatterVt();
                 formatter.palette = self.opts.palette;
-                try writer.print("{f}", .{formatter});
+                try formatter.format(writer);
             },
 
             // We use `display: inline` so that the div doesn't impact
@@ -1513,19 +1897,19 @@ pub const PageFormatter = struct {
             .html => {
                 var formatter = style.formatterHtml();
                 formatter.palette = self.opts.palette;
-                try writer.print(
-                    "<div style=\"display: inline;{f}\">",
-                    .{formatter},
-                );
+                try writer.writeAll("<div style=\"display: inline;");
+                try formatter.format(writer);
+                try writer.writeAll("\">");
             },
         }
     }
 
     fn formatStyleClose(
         self: PageFormatter,
+        comptime emit: Format,
         writer: *std.Io.Writer,
     ) std.Io.Writer.Error!void {
-        const str: []const u8 = switch (self.opts.emit) {
+        const str: []const u8 = switch (emit) {
             .plain => return,
             .vt => "\x1b[0m",
             .html => "</div>",
@@ -1547,16 +1931,18 @@ pub const PageFormatter = struct {
 
     fn formatHyperlinkOpen(
         self: PageFormatter,
+        comptime emit: Format,
         writer: *std.Io.Writer,
         uri: []const u8,
     ) std.Io.Writer.Error!void {
-        switch (self.opts.emit) {
+        switch (emit) {
             .plain, .vt => unreachable,
 
             // layout since we're primarily using it as a CSS wrapper.
             .html => {
                 try writer.writeAll("<a href=\"");
                 for (uri) |byte| try self.writeCodepoint(
+                    emit,
                     writer,
                     byte,
                 );
@@ -1567,9 +1953,10 @@ pub const PageFormatter = struct {
 
     fn formatHyperlinkClose(
         self: PageFormatter,
+        comptime emit: Format,
         writer: *std.Io.Writer,
     ) std.Io.Writer.Error!void {
-        const str: []const u8 = switch (self.opts.emit) {
+        const str: []const u8 = switch (emit) {
             .html => "</a>",
             .plain, .vt => return,
         };

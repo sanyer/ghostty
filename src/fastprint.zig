@@ -23,6 +23,23 @@ pub fn printDecimal(comptime T: type, buf: []u8, v: u8) usize {
             return 1;
         },
 
+        // This can probably be generalized...
+        u21 => {
+            // Maximum u21 is 2097151: at most 7 digits.
+            var tmp: [7]u8 = undefined;
+            var val: u32 = v;
+            var i: usize = tmp.len;
+            while (true) {
+                i -= 1;
+                tmp[i] = '0' + @as(u8, @intCast(val % 10));
+                val /= 10;
+                if (val == 0) break;
+            }
+            const n = tmp.len - i;
+            @memcpy(buf[0..n], tmp[i..]);
+            return n;
+        },
+
         else => comptime unreachable,
     }
 }
