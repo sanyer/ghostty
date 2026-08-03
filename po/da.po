@@ -44,7 +44,7 @@ msgstr "Husk mit valg for denne deling"
 
 #: src/apprt/gtk/ui/1.4/clipboard-confirmation-dialog.blp:93
 msgid "Reload configuration to show this prompt again"
-msgstr "Genindlæs konfigurationen for at se denne prompt igen"
+msgstr "Genindlæs konfigurationen for at se denne dialog igen"
 
 #: src/apprt/gtk/ui/1.2/close-confirmation-dialog.blp:7
 #: src/apprt/gtk/ui/1.5/title-dialog.blp:8
