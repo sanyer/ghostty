@@ -430,6 +430,16 @@ fn decodePayloadBody(
             page.styles.release(page.memory, id);
         }
     }
+
+    // Hyperlink insertion likewise creates one temporary reference for every
+    // accepted wire table entry. Release through the encoded-ID remap rather
+    // than the native set so duplicate values which deduplicated to the same
+    // native ID each surrender their own reference.
+    var hyperlink_it = hyperlink_remap.seen.iterator(.{});
+    while (hyperlink_it.next()) |encoded_id| {
+        const id = hyperlink_remap.entries[encoded_id];
+        if (id != 0) page.hyperlink_set.release(page.memory, id);
+    }
 }
 
 /// The fixed logical dimensions, table counts, and allocation hints at the
@@ -1017,7 +1027,7 @@ test "decode accepts unordered sparse style IDs and ignores zero" {
 
 test "decode accepts unordered sparse hyperlink IDs" {
     const header: Header = .{
-        .columns = 1,
+        .columns = 2,
         .rows = 1,
         .style_count = 0,
         .hyperlink_count = 2,
@@ -1039,7 +1049,7 @@ test "decode accepts unordered sparse hyperlink IDs" {
     var encoded: [
         Header.len +
             2 * 14 +
-            7
+            3 + 2 * 8 + 4
     ]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&encoded);
     try header.encode(&writer);
@@ -1047,8 +1057,18 @@ test "decode accepts unordered sparse hyperlink IDs" {
     try hyperlink.encode(first, &writer);
     try io.writeInt(&writer, TerminalHyperlinkId, 2);
     try hyperlink.encode(second, &writer);
-    try writer.writeByte(0); // row flags
-    try io.writeInt(&writer, u16, 0); // cell count
+    try writer.writeByte(@bitCast(grid.Row{ .cell_width = .eight }));
+    try io.writeInt(&writer, u16, 2); // cell count
+    try io.writeInt(&writer, u64, @bitCast(grid.Cell{
+        .content = 'A',
+        .hyperlink = true,
+        .hyperlink_id = 3,
+    }));
+    try io.writeInt(&writer, u64, @bitCast(grid.Cell{
+        .content = 'B',
+        .hyperlink = true,
+        .hyperlink_id = 2,
+    }));
     try io.writeInt(&writer, u32, 0); // grapheme section
 
     var reader: std.Io.Reader = .fixed(writer.buffered());
@@ -1060,6 +1080,34 @@ test "decode accepts unordered sparse hyperlink IDs" {
     try std.testing.expectEqual(
         @as(usize, 2),
         decoded.hyperlink_set.count(),
+    );
+    const first_id = decoded.lookupHyperlink(
+        decoded.getRowAndCell(0, 0).cell,
+    ).?;
+    const second_id = decoded.lookupHyperlink(
+        decoded.getRowAndCell(1, 0).cell,
+    ).?;
+    try std.testing.expectEqual(
+        @as(u16, 1),
+        decoded.hyperlink_set.refCount(decoded.memory, first_id),
+    );
+    try std.testing.expectEqual(
+        @as(u16, 1),
+        decoded.hyperlink_set.refCount(decoded.memory, second_id),
+    );
+    try std.testing.expectEqualStrings(
+        "one",
+        decoded.hyperlink_set.get(
+            decoded.memory,
+            first_id,
+        ).uri.slice(decoded.memory),
+    );
+    try std.testing.expectEqualStrings(
+        "two",
+        decoded.hyperlink_set.get(
+            decoded.memory,
+            second_id,
+        ).uri.slice(decoded.memory),
     );
 }
 
@@ -1518,10 +1566,20 @@ test "decode reuses duplicate hyperlinks" {
     try std.testing.expect(cell.hyperlink);
     const id = decoded.lookupHyperlink(cell).?;
     const entry = decoded.hyperlink_set.get(decoded.memory, id);
+    try std.testing.expectEqual(
+        @as(u16, 1),
+        decoded.hyperlink_set.refCount(decoded.memory, id),
+    );
     try std.testing.expectEqualStrings(
         "uri",
         entry.uri.slice(decoded.memory),
     );
+
+    // Overwriting the sole linked cell must make the deduplicated entry dead.
+    // Any surviving reference belongs to the decode-time wire table, not the
+    // native page.
+    decoded.clearCells(decoded.getRow(0), 0, 1);
+    try std.testing.expectEqual(@as(usize, 0), decoded.hyperlink_set.count());
 }
 
 test "discard consumes exactly one PAGE record and keeps digest coverage" {
