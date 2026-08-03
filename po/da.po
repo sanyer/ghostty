@@ -83,7 +83,7 @@ msgstr "Genindlæs konfiguration"
 msgid ""
 "⚠️ You're running a debug build of Ghostty! Performance will be degraded."
 msgstr ""
-"⚠️ Du kører et debug build af Ghostty! Dette medfører en sænket ydeevne."
+"⚠️ Du kører et debug build af Ghostty! Dette medfører en nedsat ydeevne."
 
 #: src/apprt/gtk/ui/1.5/inspector-window.blp:5
 msgid "Ghostty: Terminal Inspector"
