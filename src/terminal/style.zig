@@ -1,5 +1,6 @@
 const std = @import("std");
 const assert = @import("../quirks.zig").inlineAssert;
+const fastprint = @import("../fastprint.zig");
 const color = @import("color.zig");
 const sgr = @import("sgr.zig");
 const page = @import("page.zig");
@@ -366,27 +367,56 @@ pub const Style = struct {
             prefix: u8,
             value: Color,
         ) !void {
+            // Style emission is a hot path when formatting styled terminal
+            // contents, so the sequences are assembled in a buffer and
+            // written in one call rather than going through the (slower)
+            // format string machinery.
+            var buf: [24]u8 = undefined;
+            var len: usize = 0;
             switch (value) {
-                .none => {},
+                .none => return,
+
+                // Direct RGB: `\x1b[{prefix};2;{r};{g};{b}m`
                 .palette => |idx| {
                     if (self.palette) |p| {
-                        const rgb = p[idx];
-                        try writer.print(
-                            "\x1b[{d};2;{d};{d};{d}m",
-                            .{ prefix, rgb.r, rgb.g, rgb.b },
-                        );
+                        len = formatColorRgb(&buf, prefix, p[idx]);
                     } else {
-                        try writer.print(
-                            "\x1b[{d};5;{d}m",
-                            .{ prefix, idx },
-                        );
+                        // Palette reference: `\x1b[{prefix};5;{idx}m`
+                        buf[0..2].* = "\x1b[".*;
+                        len = 2;
+                        len += fastprint.printDecimal(u8, buf[len..], prefix);
+                        buf[len..][0..3].* = ";5;".*;
+                        len += 3;
+                        len += fastprint.printDecimal(u8, buf[len..], idx);
+                        buf[len] = 'm';
+                        len += 1;
                     }
                 },
-                .rgb => |rgb| try writer.print(
-                    "\x1b[{d};2;{d};{d};{d}m",
-                    .{ prefix, rgb.r, rgb.g, rgb.b },
-                ),
+
+                .rgb => |rgb| len = formatColorRgb(&buf, prefix, rgb),
             }
+
+            try writer.writeAll(buf[0..len]);
+        }
+
+        /// Writes `\x1b[{prefix};2;{r};{g};{b}m` into buf, returning the
+        /// length written.
+        fn formatColorRgb(buf: *[24]u8, prefix: u8, rgb: color.RGB) usize {
+            buf[0..2].* = "\x1b[".*;
+            var len: usize = 2;
+            len += fastprint.printDecimal(u8, buf[len..], prefix);
+            buf[len..][0..3].* = ";2;".*;
+            len += 3;
+            len += fastprint.printDecimal(u8, buf[len..], rgb.r);
+            buf[len] = ';';
+            len += 1;
+            len += fastprint.printDecimal(u8, buf[len..], rgb.g);
+            buf[len] = ';';
+            len += 1;
+            len += fastprint.printDecimal(u8, buf[len..], rgb.b);
+            buf[len] = 'm';
+            len += 1;
+            return len;
         }
     };
 
@@ -444,18 +474,52 @@ pub const Style = struct {
             property: []const u8,
             c: Color,
         ) !void {
+            // Style emission is a hot path when formatting styled terminal
+            // contents, so the values are assembled in a buffer and written
+            // in one call rather than going through the (slower) format
+            // string machinery.
+            var buf: [32]u8 = undefined;
+            var len: usize = 0;
             switch (c) {
-                .none => {},
+                .none => return,
+
+                // `{property}: rgb({r}, {g}, {b});`
                 .palette => |idx| {
                     if (self.palette) |p| {
-                        const rgb = p[idx];
-                        try writer.print("{s}: rgb({d}, {d}, {d});", .{ property, rgb.r, rgb.g, rgb.b });
+                        len = formatColorRgb(&buf, p[idx]);
                     } else {
-                        try writer.print("{s}: var(--vt-palette-{d});", .{ property, idx });
+                        // `{property}: var(--vt-palette-{idx});`
+                        const prefix = ": var(--vt-palette-";
+                        buf[0..prefix.len].* = prefix.*;
+                        len = prefix.len;
+                        len += fastprint.printDecimal(u8, buf[len..], idx);
+                        buf[len..][0..2].* = ");".*;
+                        len += 2;
                     }
                 },
-                .rgb => |rgb| try writer.print("{s}: rgb({d}, {d}, {d});", .{ property, rgb.r, rgb.g, rgb.b }),
+
+                .rgb => |rgb| len = formatColorRgb(&buf, rgb),
             }
+
+            try writer.writeAll(property);
+            try writer.writeAll(buf[0..len]);
+        }
+
+        /// Writes `: rgb({r}, {g}, {b});` into buf, returning the length
+        /// written.
+        fn formatColorRgb(buf: *[32]u8, rgb: color.RGB) usize {
+            buf[0..6].* = ": rgb(".*;
+            var len: usize = 6;
+            len += fastprint.printDecimal(u8, buf[len..], rgb.r);
+            buf[len..][0..2].* = ", ".*;
+            len += 2;
+            len += fastprint.printDecimal(u8, buf[len..], rgb.g);
+            buf[len..][0..2].* = ", ".*;
+            len += 2;
+            len += fastprint.printDecimal(u8, buf[len..], rgb.b);
+            buf[len..][0..2].* = ");".*;
+            len += 2;
+            return len;
         }
     };
 
