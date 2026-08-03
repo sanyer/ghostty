@@ -233,10 +233,13 @@ const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const test_fixture = @import("fixture.zig");
 const io = @import("io.zig");
-const kitty = @import("../kitty.zig");
 const terminal_hyperlink = @import("../hyperlink.zig");
 const terminal_page = @import("../page.zig");
 const terminal_style = @import("../style.zig");
+
+/// The Kitty virtual-placement placeholder remains wire-relevant even when
+/// runtime Kitty graphics support is compiled out.
+const kitty_virtual_placeholder: u21 = 0x10EEEE;
 
 const TerminalCell = terminal_page.Cell;
 const TerminalHyperlinkId = terminal_hyperlink.Id;
@@ -957,7 +960,7 @@ fn applyCell(
             // version, but the placeholder is still a valid Unicode scalar.
             // Preserve it and derive the native row hint so later row
             // operations remain correct.
-            if (wire.content == kitty.graphics.unicode.placeholder) {
+            if (wire.content == kitty_virtual_placeholder) {
                 row.kitty_virtual_placeholder = true;
             }
         },
@@ -2020,7 +2023,7 @@ test "grid four-byte cells run full normalization" {
     // The Kitty placeholder does not fit two-byte cells but fits here
     // and must still derive the native row hint.
     try io.writeInt(&writer, u32, @truncate(@as(u64, @bitCast(Cell{
-        .content = kitty.graphics.unicode.placeholder,
+        .content = kitty_virtual_placeholder,
     }))));
 
     // An unknown small style reference degrades to the default style.
@@ -2042,7 +2045,7 @@ test "grid four-byte cells run full normalization" {
 
     const first = page.getRowAndCell(0, 0);
     try testing.expectEqual(
-        @as(u21, kitty.graphics.unicode.placeholder),
+        kitty_virtual_placeholder,
         first.cell.codepoint(),
     );
     try testing.expect(first.row.kitty_virtual_placeholder);
