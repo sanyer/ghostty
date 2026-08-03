@@ -872,10 +872,9 @@ fn queueIo(
         switch (msg) {
             .write_small,
             .write_stable,
-            => return,
-
-            .write_alloc => |v| {
-                v.alloc.free(v.data);
+            .write_alloc,
+            => {
+                msg.deinit();
                 return;
             },
 
