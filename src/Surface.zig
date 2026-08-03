@@ -872,8 +872,12 @@ fn queueIo(
         switch (msg) {
             .write_small,
             .write_stable,
-            .write_alloc,
             => return,
+
+            .write_alloc => |v| {
+                v.alloc.free(v.data);
+                return;
+            },
 
             else => {},
         }
@@ -6063,4 +6067,19 @@ fn presentSurface(self: *Surface) !void {
 /// not available on a particular platform.
 pub fn getProcessInfo(self: *Surface, comptime info: ProcessInfo) ?ProcessInfo.Type(info) {
     return self.io.getProcessInfo(info);
+}
+
+test "queueIo frees allocated writes in readonly mode" {
+    const testing = std.testing;
+
+    const surface = try testing.allocator.create(Surface);
+    defer testing.allocator.destroy(surface);
+    surface.readonly = true;
+
+    // queueIo must free allocated writes in read-only mode.
+    const data = try testing.allocator.dupe(u8, "\x1b]lGhostty\x1b\\");
+    surface.queueIo(.{ .write_alloc = .{
+        .alloc = testing.allocator,
+        .data = data,
+    } }, .unlocked);
 }
