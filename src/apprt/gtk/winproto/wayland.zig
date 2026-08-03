@@ -22,6 +22,7 @@ const input = @import("../../../input.zig");
 const ApprtWindow = @import("../class/window.zig").Window;
 const GlobalShortcuts = @import("../class/global_shortcuts.zig").GlobalShortcuts;
 const BlurRegion = @import("BlurRegion.zig");
+const gtk_version = @import("../gtk_version.zig");
 
 const log = std.log.scoped(.winproto_wayland);
 
