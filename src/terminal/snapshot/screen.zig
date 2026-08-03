@@ -411,7 +411,7 @@ pub fn decode(
                 .y = y,
                 .cursor_style = header.cursor_style,
                 .pending_wrap = header.cursor_flags.pending_wrap and
-                    x == options.cols - 1,
+                    x == row_pin.node.cols() - 1,
                 .protected = header.cursor_flags.protected,
                 .style = header.cursor_pen,
                 .hyperlink_implicit_id = header.hyperlink_implicit_id,
@@ -2046,6 +2046,58 @@ test "SCREEN restoration normalizes invalid cursor positions" {
         );
         decoded.screen.assertIntegrity();
     }
+}
+
+test "SCREEN validates pending wrap against a mixed-width cursor page" {
+    var screen = try TerminalScreen.init(
+        std.testing.io,
+        std.testing.allocator,
+        .{ .cols = 8, .rows = 1, .max_scrollback_bytes = 0 },
+    );
+    defer screen.deinit();
+
+    // Model a lazily reflowed active page that is narrower than the terminal.
+    // Column three is its physical final column even though it is not column
+    // seven of the current terminal dimensions.
+    var narrow_page = try terminal_page.Page.init(.{ .cols = 4, .rows = 1 });
+    defer narrow_page.deinit();
+
+    var destination: std.Io.Writer.Allocating = .init(
+        std.testing.allocator,
+    );
+    defer destination.deinit();
+    var stream: record.Writer = .init(
+        std.testing.allocator,
+        &destination.writer,
+    );
+    defer stream.deinit();
+
+    var header = Header.init(&screen, .primary, 1);
+    header.cursor_x = 3;
+    header.cursor_y = 0;
+    header.cursor_flags.pending_wrap = true;
+    header.saved_cursor_present = false;
+
+    const screen_payload = stream.begin(.screen);
+    errdefer stream.cancel();
+    try header.encode(screen_payload);
+    try screen_payload.writeByte(0);
+    try stream.finish();
+    try page.encode(&narrow_page, &stream);
+
+    var source: std.Io.Reader = .fixed(destination.written());
+    var decoded = try decode(
+        &source,
+        std.testing.io,
+        std.testing.allocator,
+        .{ .cols = 8, .rows = 1, .max_scrollback_bytes = 0 },
+    );
+    defer decoded.deinit();
+
+    try std.testing.expectEqual(@as(u16, 4), decoded.screen.cursor.page_pin.node.cols());
+    try std.testing.expectEqual(@as(u16, 3), decoded.screen.cursor.x);
+    try std.testing.expect(decoded.screen.cursor.pending_wrap);
+    decoded.screen.assertIntegrity();
 }
 
 test "SCREEN restoration rejects invalid and incomplete sequences" {
