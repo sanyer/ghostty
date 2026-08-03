@@ -277,6 +277,34 @@ pub const Decoder = struct {
     }
 };
 
+/// Errors possible while discarding one PAGE record without decoding it.
+pub const DiscardError = record.Reader.InitError ||
+    record.Reader.FinishError ||
+    std.Io.Reader.Error ||
+    error{
+        /// The next record is valid but is not a PAGE.
+        UnexpectedRecordTag,
+    };
+
+/// Consume exactly one complete PAGE record, validating its framing and
+/// CRC32C while discarding the payload without structural validation.
+///
+/// The payload bytes still stream through `source`, so an enclosing running
+/// digest (such as the FINISH checkpoint) continues to cover them. This lets
+/// a decoder stay aligned with the record sequence, and keep authenticating
+/// it, while dropping page content it can no longer apply.
+pub fn discard(source: *std.Io.Reader) DiscardError!void {
+    var record_reader: record.Reader = undefined;
+    try record_reader.init(source);
+    if (record_reader.header.tag != .page) {
+        return error.UnexpectedRecordTag;
+    }
+    try record_reader.payloadReader().discardAll(
+        record_reader.header.payload_len,
+    );
+    try record_reader.finish();
+}
+
 /// Encode a PAGE payload directly from a native page.
 fn encodePayload(
     page: *const TerminalPage,
@@ -1419,6 +1447,76 @@ test "decode reuses duplicate hyperlinks" {
         "uri",
         entry.uri.slice(decoded.memory),
     );
+}
+
+test "discard consumes exactly one PAGE record and keeps digest coverage" {
+    const testing = std.testing;
+
+    // Discard validates framing only, so an arbitrary payload keeps this test
+    // focused on record consumption rather than page structure.
+    var encoded: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer encoded.deinit();
+    var stream: record.Writer = .init(testing.allocator, &encoded.writer);
+    defer stream.deinit();
+    {
+        const payload = stream.begin(.page);
+        errdefer stream.cancel();
+        try payload.writeAll("undecodable page payload");
+        try stream.finish();
+    }
+    const record_len = encoded.written().len;
+    try encoded.writer.writeAll("next");
+
+    // Discarded payload bytes must still update an enclosing running digest,
+    // which is what lets a snapshot FINISH checkpoint authenticate records
+    // whose content was dropped.
+    var source: std.Io.Reader = .fixed(encoded.written());
+    var hashed: record.StreamReader = .init(&source);
+    try discard(hashed.reader());
+    var expected_digest: record.PrefixDigest = undefined;
+    std.crypto.hash.Blake3.hash(
+        encoded.written()[0..record_len],
+        &expected_digest,
+        .{},
+    );
+    try testing.expectEqual(expected_digest, hashed.prefixDigest());
+    try testing.expectEqualStrings("next", try source.take(4));
+
+    // Only PAGE records may be discarded; the tag remains strict.
+    var wrong_tag: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer wrong_tag.deinit();
+    var wrong_tag_stream: record.Writer = .init(
+        testing.allocator,
+        &wrong_tag.writer,
+    );
+    defer wrong_tag_stream.deinit();
+    {
+        const payload = wrong_tag_stream.begin(.history);
+        errdefer wrong_tag_stream.cancel();
+        try payload.writeAll("payload");
+        try wrong_tag_stream.finish();
+    }
+    var wrong_tag_source: std.Io.Reader = .fixed(wrong_tag.written());
+    try testing.expectError(
+        error.UnexpectedRecordTag,
+        discard(&wrong_tag_source),
+    );
+
+    // Discarded bytes are still covered by the record CRC.
+    const corrupted = try testing.allocator.dupe(
+        u8,
+        encoded.written()[0..record_len],
+    );
+    defer testing.allocator.free(corrupted);
+    corrupted[corrupted.len - 1] ^= 1;
+    var corrupted_source: std.Io.Reader = .fixed(corrupted);
+    try testing.expectError(error.InvalidChecksum, discard(&corrupted_source));
+
+    // A truncated payload is detected before `finish`.
+    var truncated_source: std.Io.Reader = .fixed(
+        encoded.written()[0 .. record_len - 1],
+    );
+    try testing.expectError(error.EndOfStream, discard(&truncated_source));
 }
 
 test "decode ignores empty hyperlink strings" {

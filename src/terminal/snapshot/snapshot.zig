@@ -2,14 +2,17 @@
 
 const std = @import("std");
 const build_options = @import("terminal_options");
+const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const checkpoint = @import("checkpoint.zig");
 const continuation = @import("continuation.zig");
 const envelope = @import("envelope.zig");
 const test_fixture = @import("fixture.zig");
 const history = @import("history.zig");
+const page = @import("page.zig");
 const record = @import("record.zig");
 const screen = @import("screen.zig");
+const size = @import("../size.zig");
 const terminal = @import("terminal.zig");
 const Terminal = @import("../Terminal.zig");
 const TerminalStream = @import("../stream_terminal.zig").Stream;
@@ -91,25 +94,7 @@ pub fn encode(
 }
 
 /// Errors possible while restoring one complete terminal snapshot.
-pub const DecodeError = envelope.DecodeError ||
-    terminal.DecodeError ||
-    screen.DecodeError ||
-    history.DecodeError ||
-    checkpoint.DecodeError ||
-    continuation.DecodeError ||
-    error{
-        /// A SCREEN names a key not declared by TERMINAL.
-        UnexpectedScreenKey,
-
-        /// More than one SCREEN names the same key.
-        DuplicateScreen,
-
-        /// A HISTORY names a key not declared by TERMINAL.
-        UnexpectedHistoryKey,
-
-        /// More than one HISTORY names the same key.
-        DuplicateHistory,
-    };
+pub const DecodeError = Decoder.ReadyError || Decoder.NextError;
 
 pub const DecodeOptions = struct {
     /// Largest non-ground continuation the decoder may allocate and return.
@@ -117,7 +102,11 @@ pub const DecodeOptions = struct {
     max_continuation_bytes: usize,
 };
 
-/// One complete decoded Terminal and the bytes needed to resume its Stream.
+/// One decoded Terminal and the bytes needed to resume its Stream.
+///
+/// `decode` returns this with all history present; `Decoder.ready` returns
+/// it at READY, when the terminal is complete for interactive use but its
+/// scrollback is still arriving through `Decoder.next`.
 ///
 /// A successful decode owns both values. Keep this result alive until the
 /// Terminal's Stream has been restored, and always finish by calling `deinit`.
@@ -146,6 +135,13 @@ pub const Decoded = struct {
     /// exactly once after the Terminal has reached its final address.
     continuation: Continuation,
 
+    /// Advisory complete logical history extent declared by each restored
+    /// screen, including the resident overlap already carried by that
+    /// screen's own pages. A client may size scrollback UI from this at
+    /// READY, before HISTORY pages arrive; native row totals always remain
+    /// derived from the pages actually applied.
+    history_rows: std.EnumMap(TerminalScreenKey, u64),
+
     /// Destroy an untransferred Terminal and always free continuation bytes.
     /// After `toOwned`, this leaves the caller-owned Terminal untouched.
     pub fn deinit(self: *Decoded, alloc: Allocator) void {
@@ -169,141 +165,440 @@ pub const Decoded = struct {
     }
 };
 
+/// Incrementally restore one snapshot: renderable state first, then history.
+///
+/// The snapshot record order makes a terminal renderable at the READY
+/// checkpoint, after only a small prefix of the stream. `Decoder` exposes
+/// that boundary: `ready` returns a complete, authenticated `Decoded` while
+/// scrollback is still in flight, and each `next` call then applies one
+/// history PAGE record off the critical path. `snapshot.decode` is the
+/// one-shot form and is implemented over this type.
+///
+/// ```zig
+/// var decoder: snapshot.Decoder = .init(&reader);
+/// var decoded = try decoder.ready(alloc, io, .{
+///     .max_continuation_bytes = 1024 * 1024,
+/// });
+/// defer decoded.deinit(alloc);
+///
+/// var terminal = decoded.toOwned();
+/// defer terminal.deinit(alloc);
+/// // The terminal is usable now: restore its Stream from the decoded
+/// // continuation and size scrollback UI from `decoded.history_rows`.
+///
+/// while (try decoder.next(alloc, &terminal)) |progress| {
+///     _ = progress; // Scrollback grew; e.g. refresh the scrollbar.
+/// }
+/// // FINISH validated: the complete snapshot is authenticated.
+/// ```
+///
+/// The terminal is live between `next` calls: the caller may render it and
+/// even feed it PTY bytes that arrived after the snapshot cut. `next`
+/// re-validates its destination on every call and degrades to discarding,
+/// consuming and authenticating wire bytes without applying them, when live
+/// changes have made a page inapplicable. See `next` for the drop rules.
+///
+/// The decoder owns no allocations and needs no deinit. It retains the
+/// source pointer given to `init`; the source must stay valid, and must not
+/// be read elsewhere, until decoding ends. The decoder itself is movable
+/// between calls. After any returned error both the decoder and the stream
+/// position are invalid: abandon the decoder, and destroy an already
+/// transferred Terminal or keep it with partial history, but do not resume.
+pub const Decoder = struct {
+    /// Hashes every consumed byte so READY and FINISH can be validated
+    /// without buffering or rehashing the stream.
+    stream: record.StreamReader,
+    state: State,
+
+    const State = union(enum) {
+        /// `ready` has not been called.
+        start,
+
+        /// READY validated; HISTORY sequences remain before FINISH.
+        history: History,
+
+        /// FINISH validated. `next` returns null.
+        finished,
+
+        /// A call returned an error; the stream position is unknown.
+        failed,
+    };
+
+    const History = struct {
+        /// The generation observed at READY for every screen the snapshot
+        /// declared. Presence is the declaration check for HISTORY routing;
+        /// the value detects screens removed or replaced by live terminal
+        /// use between calls.
+        generations: std.EnumMap(TerminalScreenKey, usize),
+
+        /// Keys whose HISTORY sequence was already consumed.
+        routed: std.EnumSet(TerminalScreenKey),
+
+        /// HISTORY sequences that have not begun streaming yet.
+        pending: usize,
+
+        /// The sequence currently streaming PAGE records.
+        current: ?Sequence,
+
+        /// Terminal width at READY. Encoded pages assume this width and are
+        /// dropped rather than mixed into a screen reflowed to another.
+        cols: size.CellCountInt,
+    };
+
+    const Sequence = struct {
+        key: TerminalScreenKey,
+
+        /// PAGE records not yet consumed from this sequence.
+        remaining: u32,
+
+        /// False once any page in this sequence was dropped. Later pages
+        /// are older, and applying one above a gap would corrupt scrollback
+        /// order, so a single drop discards the remainder of the sequence.
+        apply: bool,
+    };
+
+    /// The decoder begins reading only when `ready` is called.
+    pub fn init(source: *std.Io.Reader) Decoder {
+        // StreamReader owns a zero-buffer hashing adapter, making checkpoint
+        // boundaries part of its API rather than a caller-held invariant.
+        return .{
+            .stream = .init(source),
+            .state = .start,
+        };
+    }
+
+    /// Errors possible while decoding the renderable prefix through READY.
+    pub const ReadyError = envelope.DecodeError ||
+        terminal.DecodeError ||
+        screen.DecodeError ||
+        continuation.DecodeError ||
+        checkpoint.DecodeError ||
+        error{
+            /// A SCREEN names a key not declared by TERMINAL.
+            UnexpectedScreenKey,
+
+            /// More than one SCREEN names the same key.
+            DuplicateScreen,
+        };
+
+    /// Decode through the READY checkpoint and return the renderable state.
+    ///
+    /// The result is transactional and complete for interactive use: the
+    /// Terminal, its continuation, and the advisory history extents are all
+    /// authenticated by READY. Scrollback history is not present yet and
+    /// arrives through `next`. Asserts this is the first call.
+    pub fn ready(
+        self: *Decoder,
+        alloc: Allocator,
+        io_: std.Io,
+        options: DecodeOptions,
+    ) ReadyError!Decoded {
+        assert(self.state == .start);
+        errdefer self.state = .failed;
+        const reader = self.stream.reader();
+
+        // Read the envelope, which is currently just a verification step.
+        try envelope.decode(reader);
+
+        // TERMINAL establishes terminal-wide state and allocates empty
+        // screen slots with their final routing. SCREEN values replace those
+        // slots in place so ScreenSet pointers, including the active
+        // pointer, stay valid.
+        var result = try terminal.decode(reader, io_, alloc);
+        errdefer result.deinit(alloc);
+
+        // TERMINAL initializes exactly the number of screen slots it
+        // declared. Decode that many SCREEN sequences and route each one by
+        // its encoded key.
+        const screen_count = result.screens.all.count();
+        const screen_options: TerminalScreen.Options = options: {
+            const primary = result.screens.get(.primary).?;
+            const explicit_bytes = primary.pages.limits.bytes.explicit;
+            const explicit_lines = primary.pages.limits.lines.explicit;
+            break :options .{
+                .cols = result.cols,
+                .rows = result.rows,
+                .max_scrollback_bytes = if (explicit_bytes == std.math.maxInt(usize))
+                    null
+                else
+                    explicit_bytes,
+                .max_scrollback_lines = if (explicit_lines == std.math.maxInt(usize))
+                    null
+                else
+                    explicit_lines,
+            };
+        };
+
+        var routed: std.EnumSet(TerminalScreenKey) = .initEmpty();
+        var history_rows: std.EnumMap(TerminalScreenKey, u64) = .init(.{});
+        for (0..screen_count) |_| {
+            var decoded = try screen.decode(
+                reader,
+                io_,
+                alloc,
+                screen_options,
+            );
+            errdefer decoded.deinit();
+
+            const slot = result.screens.get(decoded.key) orelse
+                return error.UnexpectedScreenKey;
+            if (routed.contains(decoded.key)) return error.DuplicateScreen;
+            routed.insert(decoded.key);
+            history_rows.put(decoded.key, decoded.history_rows);
+
+            slot.deinit();
+            slot.* = decoded.screen;
+            decoded.screen = undefined;
+        }
+
+        // CONTINUATION is required after every active screen. Nonempty bytes
+        // are owned locally until the READY prefix validates.
+        const decoded_continuation = try continuation.decode(
+            alloc,
+            reader,
+            options.max_continuation_bytes,
+        );
+        errdefer switch (decoded_continuation) {
+            .ground => {},
+            .bytes => |bytes| alloc.free(bytes),
+        };
+
+        // READY covers the exact envelope-through-CONTINUATION prefix.
+        // Finalizing does not consume the hasher, so the same stream
+        // continues toward FINISH.
+        try checkpoint.decode(.ready, &self.stream);
+
+        // Record where history may be applied. The declared keys route the
+        // HISTORY sequences, and the generations detect declared screens
+        // that live terminal use destroys or replaces before their history
+        // arrives.
+        var generations: std.EnumMap(TerminalScreenKey, usize) = .init(.{});
+        var it = result.screens.all.iterator();
+        while (it.next()) |entry| generations.put(
+            entry.key,
+            result.screens.generation(entry.key),
+        );
+
+        self.state = .{ .history = .{
+            .generations = generations,
+            .routed = .initEmpty(),
+            .pending = screen_count,
+            .current = null,
+            .cols = result.cols,
+        } };
+        return .{
+            .terminal = result,
+            .continuation = decoded_continuation,
+            .history_rows = history_rows,
+        };
+    }
+
+    /// One history PAGE record consumed by `next`.
+    pub const Progress = struct {
+        /// The screen whose HISTORY sequence contained the decoded page.
+        key: TerminalScreenKey,
+
+        /// Rows prepended above that screen's existing content, or zero
+        /// when the page was consumed and authenticated but dropped.
+        rows: usize,
+
+        /// PAGE records still pending in the same HISTORY sequence.
+        remaining: u32,
+    };
+
+    /// Errors possible while decoding history records through FINISH.
+    pub const NextError = checkpoint.DecodeError ||
+        history.Decoder.InitError ||
+        page.DiscardError ||
+        page.DecodeError ||
+        Allocator.Error ||
+        error{
+            /// A HISTORY names a key not declared by TERMINAL.
+            UnexpectedHistoryKey,
+
+            /// More than one HISTORY names the same key.
+            DuplicateHistory,
+
+            /// A history PAGE cannot join a native PageList.
+            InvalidPageDimensions,
+            RowCountOverflow,
+            PageSizeOverflow,
+        };
+
+    /// Decode one history PAGE record and prepend it to its screen in `t`.
+    ///
+    /// `t` must be the Terminal restored by this decoder's `ready` call,
+    /// wherever the caller now stores it. Returns null once FINISH has
+    /// validated, which authenticates the complete snapshot; the source is
+    /// left positioned exactly after it. Further calls return null.
+    ///
+    /// Wire validation stays strict: framing, CRCs, record order, routing,
+    /// and both checkpoint digests are always enforced. Application is
+    /// forgiving, because the terminal is live and may have changed since
+    /// READY. A page is consumed but dropped, reported as zero rows, when:
+    ///
+    ///   * its screen was removed, or removed and recreated, since READY
+    ///     (detected through ScreenSet generations);
+    ///   * the terminal was resized since READY, since encoded pages assume
+    ///     the encoded width;
+    ///   * prepending it would exceed the screen's scrollback limits, e.g.
+    ///     because post-cut output already consumed that budget, making
+    ///     immediate eviction the only alternative.
+    ///
+    /// Once a page in a sequence is dropped, the rest of that sequence is
+    /// discarded too: later pages are older, and applying one above a gap
+    /// would corrupt scrollback ordering. History for other screens is
+    /// unaffected.
+    pub fn next(
+        self: *Decoder,
+        alloc: Allocator,
+        t: *Terminal,
+    ) NextError!?Progress {
+        switch (self.state) {
+            // `ready` must succeed before history exists to decode, and a
+            // failed decoder no longer knows its stream position.
+            .start, .failed => unreachable,
+            .finished => return null,
+            .history => {},
+        }
+        errdefer self.state = .failed;
+        const state = &self.state.history;
+
+        while (true) {
+            // Stream the current sequence's next PAGE if one remains.
+            if (state.current) |*sequence| {
+                if (sequence.remaining > 0) {
+                    return try self.nextPage(alloc, t, sequence);
+                }
+                state.current = null;
+            }
+
+            // All sequences are consumed: FINISH authenticates READY plus
+            // all history and ends the snapshot, leaving trailing transport
+            // bytes unread.
+            if (state.pending == 0) {
+                try checkpoint.decode(.finish, &self.stream);
+                if (comptime build_options.slow_runtime_safety) {
+                    var it = state.generations.iterator();
+                    while (it.next()) |entry| {
+                        const restored = t.screens.get(entry.key) orelse
+                            continue;
+                        restored.pages.assertIntegrity();
+                        restored.assertIntegrity();
+                    }
+                }
+                self.state = .finished;
+                return null;
+            }
+
+            // Begin the next HISTORY sequence. Keys route the sequences
+            // order-independently, but each must name a declared screen and
+            // may not repeat.
+            state.pending -= 1;
+            var manifest: history.Decoder = undefined;
+            try manifest.init(self.stream.reader());
+            const key = manifest.header.key;
+            if (state.generations.get(key) == null) {
+                return error.UnexpectedHistoryKey;
+            }
+            if (state.routed.contains(key)) return error.DuplicateHistory;
+            state.routed.insert(key);
+            state.current = .{
+                .key = key,
+                .remaining = manifest.header.page_count,
+                .apply = true,
+            };
+        }
+    }
+
+    /// Consume one PAGE record from the current sequence, applying it to
+    /// the live terminal when it is still applicable and discarding it
+    /// otherwise.
+    fn nextPage(
+        self: *Decoder,
+        alloc: Allocator,
+        t: *Terminal,
+        sequence: *Sequence,
+    ) NextError!Progress {
+        const state = &self.state.history;
+
+        // Application is re-decided on every page so live terminal changes
+        // between calls degrade to discarding instead of failing decoding.
+        const destination: ?*TerminalScreen = destination: {
+            if (!sequence.apply) break :destination null;
+            if (t.cols != state.cols) break :destination null;
+            const restored = t.screens.get(sequence.key) orelse
+                break :destination null;
+            if (t.screens.generation(sequence.key) !=
+                state.generations.get(sequence.key).?)
+            {
+                break :destination null;
+            }
+            break :destination restored;
+        };
+
+        sequence.remaining -= 1;
+        const rows: usize = rows: {
+            const restored = destination orelse {
+                // The record must still be consumed and hashed so FINISH
+                // can authenticate the complete snapshot.
+                sequence.apply = false;
+                try page.discard(self.stream.reader());
+                break :rows 0;
+            };
+            break :rows history.decodePage(
+                self.stream.reader(),
+                alloc,
+                restored,
+            ) catch |err| switch (err) {
+                // The page no longer fits the screen's scrollback limits,
+                // e.g. because post-cut output consumed the budget, so it
+                // would be evicted immediately anyway. Its record was fully
+                // consumed, leaving the stream aligned on the next record.
+                error.MaxSizeExceeded,
+                error.MaxLinesExceeded,
+                => drop: {
+                    sequence.apply = false;
+                    break :drop 0;
+                },
+                else => |other| return other,
+            };
+        };
+
+        return .{
+            .key = sequence.key,
+            .rows = rows,
+            .remaining = sequence.remaining,
+        };
+    }
+};
+
 /// Restore one complete snapshot into a native Terminal and continuation.
 ///
-/// This consumes one snapshot through FINISH and leaves any following bytes in
-/// the reader for the containing transport. Restoration is transactional: the
-/// returned result is either complete and ready or not (error return).
-/// Individual record codecs normalize optional semantic state, while framing,
-/// checkpoints, declared sequence counts, and unique cross-record screen
-/// routing remain strict.
+/// This consumes one snapshot through FINISH and leaves any following bytes
+/// in the reader for the containing transport. Restoration is transactional:
+/// the returned result is either complete and ready or not (error return).
+/// Individual record codecs normalize optional semantic state, and history
+/// beyond the declared scrollback limits is dropped rather than rejected,
+/// while framing, checkpoints, declared sequence counts, and unique
+/// cross-record screen routing remain strict.
+///
+/// This is the one-shot form of `Decoder`, which can additionally hand the
+/// renderable terminal to the caller at READY, before history arrives.
 pub fn decode(
     alloc: Allocator,
     io_: std.Io,
     source: *std.Io.Reader,
     options: DecodeOptions,
 ) DecodeError!Decoded {
-    // StreamReader owns a zero-buffer hashing adapter, making checkpoint
-    // boundaries part of its API rather than a caller-maintained invariant.
-    var stream: record.StreamReader = .init(source);
-    const reader = stream.reader();
-
-    // Read the envelope, which is currently just a verification step.
-    try envelope.decode(reader);
-
-    // TERMINAL establishes terminal-wide state and allocates empty screen
-    // slots with their final routing. SCREEN values replace those slots in
-    // place so ScreenSet pointers, including the active pointer, stay valid.
-    var result = try terminal.decode(reader, io_, alloc);
+    var decoder: Decoder = .init(source);
+    var result = try decoder.ready(alloc, io_, options);
     errdefer result.deinit(alloc);
 
-    // TERMINAL initializes exactly the number of screen slots it declared.
-    // Decode that many SCREEN sequences and route each one by its encoded key.
-    const screen_count = result.screens.all.count();
-    const screen_options: TerminalScreen.Options = options: {
-        const primary = result.screens.get(.primary).?;
-        const explicit_bytes = primary.pages.limits.bytes.explicit;
-        const explicit_lines = primary.pages.limits.lines.explicit;
-        break :options .{
-            .cols = result.cols,
-            .rows = result.rows,
-            .max_scrollback_bytes = if (explicit_bytes == std.math.maxInt(usize))
-                null
-            else
-                explicit_bytes,
-            .max_scrollback_lines = if (explicit_lines == std.math.maxInt(usize))
-                null
-            else
-                explicit_lines,
-        };
-    };
-
-    for (0..screen_count) |_| {
-        var decoded = try screen.decode(
-            reader,
-            io_,
-            alloc,
-            screen_options,
-        );
-        errdefer decoded.deinit();
-
-        const slot = result.screens.get(decoded.key) orelse
-            return error.UnexpectedScreenKey;
-
-        // The fresh ScreenSet starts every declared slot at generation zero.
-        // Replacing a slot advances its generation, so a nonzero value means
-        // an earlier SCREEN in this snapshot already supplied the same key.
-        if (result.screens.generation(decoded.key) != 0) return error.DuplicateScreen;
-
-        slot.deinit();
-        slot.* = decoded.screen;
-        decoded.screen = undefined;
-
-        // We put an artificial generation in just so we can detect duplicates.
-        result.screens.generations.put(
-            decoded.key,
-            result.screens.generation(decoded.key) +% 1,
-        );
-    }
-
-    // CONTINUATION is required after every active screen. Nonempty bytes are
-    // owned locally until the complete snapshot validates.
-    const decoded_continuation = try continuation.decode(
-        alloc,
-        reader,
-        options.max_continuation_bytes,
-    );
-    errdefer switch (decoded_continuation) {
-        .ground => {},
-        .bytes => |bytes| alloc.free(bytes),
-    };
-
-    // READY covers the exact envelope-through-CONTINUATION prefix. Finalizing
-    // does not consume the hasher, so the stream continues toward FINISH.
-    try checkpoint.decode(.ready, &stream);
-
-    // HISTORY keys make this sequence order-independent just like SCREEN.
-    // Although a decoder may publish recent pages as they validate, any later
-    // full-snapshot failure deinitializes the whole result.
-    for (0..screen_count) |_| {
-        var decoder: history.Decoder = undefined;
-        try decoder.init(reader);
-
-        const key = decoder.header.key;
-        const restored = result.screens.get(key) orelse
-            return error.UnexpectedHistoryKey;
-
-        // SCREEN routing advanced every decoded slot from generation zero to
-        // one. A value other than one means this key already received HISTORY.
-        if (result.screens.generation(key) != 1) {
-            return error.DuplicateHistory;
-        }
-
-        try decoder.decode(alloc, restored);
-        result.screens.generations.put(key, 2);
-    }
-
-    // FINISH authenticates READY and all history. Decode it directly from the
-    // underlying reader so the digest does not include FINISH itself.
-    try checkpoint.decode(.finish, &stream);
-
-    const keys = [_]TerminalScreenKey{ .primary, .alternate };
-    if (comptime build_options.slow_runtime_safety) {
-        for (keys) |key| {
-            const restored = result.screens.get(key) orelse continue;
-            restored.pages.assertIntegrity();
-            restored.assertIntegrity();
-        }
-    }
-
-    // Generations are only scratch state while routing the two keyed sequence
-    // groups. The completed terminal has not escaped yet, so reset them to the
-    // same initial state as any newly constructed ScreenSet.
-    for (keys) |key| result.screens.generations.put(key, 0);
-    return .{
-        .terminal = result,
-        .continuation = decoded_continuation,
-    };
+    // The Terminal has not been transferred, so history applies in place.
+    const t = &result.terminal.?;
+    while (try decoder.next(alloc, t)) |_| {}
+    return result;
 }
 
 /// Errors possible while restoring a snapshot that must end at end-of-file.
@@ -335,6 +630,74 @@ pub fn decodeExact(
 const test_encode_options: EncodeOptions = .{ .continuation = .ground };
 const test_decode_options: DecodeOptions = .{ .max_continuation_bytes = 1024 };
 const test_complete_fixture = test_fixture.parse(@embedFile("testdata/complete-v1.hex"));
+
+/// Build a 2x3 test terminal whose primary screen carries `history_pages`
+/// complete two-row pages above a three-row active page. The top-left cell
+/// of each page is marked 'A', 'B', ... from oldest history to active.
+fn testHistoryTerminal(history_pages: u8) !Terminal {
+    const testing = std.testing;
+    var t = try Terminal.init(testing.io, testing.allocator, .{
+        .cols = 2,
+        .rows = 3,
+        .max_scrollback_bytes = null,
+        .max_scrollback_lines = null,
+    });
+    errdefer t.deinit(testing.allocator);
+
+    const primary = t.screens.get(.primary).?;
+    var replacement: TerminalScreen = replacement: {
+        var builder = try TerminalPageList.Builder.init(
+            testing.allocator,
+            .{
+                .cols = t.cols,
+                .rows = t.rows,
+                .max_size = null,
+                .max_lines = null,
+            },
+        );
+        defer builder.deinit();
+
+        for (0..history_pages) |index| {
+            const built = try builder.allocatePage(.{ .cols = 2, .rows = 2 });
+            built.size.rows = 2;
+            built.getRowAndCell(0, 0).cell.* = .init(
+                @intCast('A' + index),
+            );
+        }
+        const active = try builder.allocatePage(.{ .cols = 2, .rows = 3 });
+        active.size.rows = 3;
+        active.getRowAndCell(0, 0).cell.* = .init(
+            @intCast('A' + @as(usize, history_pages)),
+        );
+
+        var pages = try builder.finish();
+        errdefer pages.deinit();
+        const cursor_pin = try pages.trackPin(
+            pages.pin(.{ .active = .{} }).?,
+        );
+        const cursor_rac = cursor_pin.rowAndCell();
+        break :replacement .{
+            .io = testing.io,
+            .alloc = testing.allocator,
+            .pages = pages,
+            .cursor = .{
+                .page_pin = cursor_pin,
+                .page_row = cursor_rac.row,
+                .page_cell = cursor_rac.cell,
+            },
+        };
+    };
+    primary.deinit();
+    primary.* = replacement;
+    replacement = undefined;
+    return t;
+}
+
+/// The top-left screen cell, which lands in the oldest applied history page.
+fn testTopLeftCodepoint(terminal_screen: *const TerminalScreen) u21 {
+    return terminal_screen.pages.getTopLeft(.screen).node
+        .page().getRowAndCell(0, 0).cell.codepoint();
+}
 
 test "complete snapshot round trip with history and alternate screen" {
     const testing = std.testing;
@@ -1328,4 +1691,387 @@ test "complete snapshot decode allocation failures are transactional" {
         .continuation = .{ .bytes = "\x1b[31" },
     });
     try S.exercise(encoded.written());
+}
+
+test "incremental decode restores a renderable terminal at READY" {
+    const testing = std.testing;
+
+    // Trailing transport bytes must remain unread after FINISH.
+    var transport: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer transport.deinit();
+    try transport.writer.writeAll(&test_complete_fixture);
+    try transport.writer.writeAll("pty");
+
+    var source: std.Io.Reader = .fixed(transport.written());
+    var decoder: Decoder = .init(&source);
+    var decoded = try decoder.ready(
+        testing.allocator,
+        testing.io,
+        test_decode_options,
+    );
+    defer decoded.deinit(testing.allocator);
+
+    // READY restored the complete interactive state, so the Terminal can
+    // move to its final address before any history has been decoded.
+    var restored = decoded.toOwned();
+    defer restored.deinit(testing.allocator);
+    try testing.expectEqual(
+        TerminalScreenKey.alternate,
+        restored.screens.active_key,
+    );
+    try testing.expectEqualStrings(
+        "complete snapshot",
+        restored.getTitle().?,
+    );
+
+    // The advisory extents size scrollback UI immediately even though only
+    // the resident SCREEN pages exist. The alternate screen's extent is
+    // entirely resident overlap, so it must match its live row count.
+    const primary = restored.screens.get(.primary).?;
+    const alternate = restored.screens.get(.alternate).?;
+    try testing.expectEqual(3, primary.pages.scrollbar().total);
+    try testing.expectEqual(4, decoded.history_rows.get(.primary).?);
+    try testing.expectEqual(
+        alternate.pages.scrollbar().total - restored.rows,
+        decoded.history_rows.get(.alternate).?,
+    );
+
+    // Each call prepends exactly one history page, newest first.
+    const first = (try decoder.next(testing.allocator, &restored)).?;
+    try testing.expectEqualDeep(Decoder.Progress{
+        .key = .primary,
+        .rows = 2,
+        .remaining = 1,
+    }, first);
+    try testing.expectEqual(5, primary.pages.scrollbar().total);
+    try testing.expectEqual(@as(u21, 'B'), testTopLeftCodepoint(primary));
+
+    const second = (try decoder.next(testing.allocator, &restored)).?;
+    try testing.expectEqualDeep(Decoder.Progress{
+        .key = .primary,
+        .rows = 2,
+        .remaining = 0,
+    }, second);
+    try testing.expectEqual(7, primary.pages.scrollbar().total);
+    try testing.expectEqual(@as(u21, 'A'), testTopLeftCodepoint(primary));
+
+    // The alternate screen's empty sequence produces no event: the next
+    // call validates FINISH, and further calls remain null.
+    try testing.expect(try decoder.next(testing.allocator, &restored) == null);
+    try testing.expect(try decoder.next(testing.allocator, &restored) == null);
+    try testing.expectEqualStrings("pty", try source.take(3));
+
+    // The incremental path restores the same complete terminal as the
+    // one-shot decoder, byte for byte.
+    var reencoded: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer reencoded.deinit();
+    try encode(
+        testing.allocator,
+        &reencoded.writer,
+        &restored,
+        test_encode_options,
+    );
+    try testing.expectEqualStrings(&test_complete_fixture, reencoded.written());
+}
+
+test "incremental decode applies history below live PTY output" {
+    const testing = std.testing;
+
+    var t = try testHistoryTerminal(2);
+    defer t.deinit(testing.allocator);
+    var encoded: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer encoded.deinit();
+    try encode(testing.allocator, &encoded.writer, &t, test_encode_options);
+
+    var source: std.Io.Reader = .fixed(encoded.written());
+    var decoder: Decoder = .init(&source);
+    var decoded = try decoder.ready(
+        testing.allocator,
+        testing.io,
+        test_decode_options,
+    );
+    defer decoded.deinit(testing.allocator);
+    var restored = decoded.toOwned();
+    defer restored.deinit(testing.allocator);
+
+    // The terminal is interactive at READY: post-cut PTY bytes append to
+    // the bottom while snapshot history is still pending.
+    var live = restored.vtStream();
+    defer live.deinit();
+    live.nextSlice("1\r\n2\r\n3\r\n4\r\n5\r\n");
+    const primary = restored.screens.get(.primary).?;
+    const live_total = primary.pages.scrollbar().total;
+    try testing.expect(live_total > 3);
+
+    // History still lands above both the snapshot content and the live
+    // output, preserving complete scrollback ordering.
+    while (try decoder.next(testing.allocator, &restored)) |progress| {
+        try testing.expectEqual(TerminalScreenKey.primary, progress.key);
+        try testing.expectEqual(2, progress.rows);
+    }
+    try testing.expectEqual(live_total + 4, primary.pages.scrollbar().total);
+    try testing.expectEqual(@as(u21, 'A'), testTopLeftCodepoint(primary));
+    const newest_history = primary.pages.getTopLeft(.screen).node.next.?;
+    try testing.expectEqual(
+        @as(u21, 'B'),
+        newest_history.page().getRowAndCell(0, 0).cell.codepoint(),
+    );
+
+    // The page below the applied history is the snapshot's active page,
+    // whose top-left cell the live output already overwrote.
+    try testing.expectEqual(
+        @as(u21, '1'),
+        newest_history.next.?.page().getRowAndCell(0, 0).cell.codepoint(),
+    );
+}
+
+test "incremental decode discards history for screens changed since READY" {
+    const testing = std.testing;
+
+    var t = try Terminal.init(testing.io, testing.allocator, .{
+        .cols = 2,
+        .rows = 3,
+    });
+    defer t.deinit(testing.allocator);
+    _ = try t.switchScreen(.alternate);
+    try t.printString("alt");
+    _ = try t.switchScreen(.primary);
+
+    // The encoder never produces alternate-screen history, but the format
+    // permits it, so the decoder must stay stream-aligned even when the
+    // pages can no longer be applied. Order independence lets the discarded
+    // sequence come first.
+    var crafted: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer crafted.deinit();
+    var stream: record.Writer = .init(testing.allocator, &crafted.writer);
+    defer stream.deinit();
+    try envelope.encode(stream.writer());
+    try terminal.encode(&t, &stream);
+    try screen.encode(t.screens.get(.primary).?, .primary, &stream);
+    try screen.encode(t.screens.get(.alternate).?, .alternate, &stream);
+    try continuation.encode(.ground, &stream);
+    try checkpoint.encode(.ready, &stream);
+    {
+        const payload = stream.begin(.history);
+        errdefer stream.cancel();
+        try (history.Header{ .key = .alternate, .page_count = 1 }).encode(
+            payload,
+        );
+        try stream.finish();
+    }
+    try page.encode(
+        t.screens.get(.alternate).?.pages
+            .getTopLeft(.screen).node.pageAssumeResident(),
+        &stream,
+    );
+    try history.encode(t.screens.get(.primary).?, .primary, &stream);
+    try checkpoint.encode(.finish, &stream);
+
+    // An unchanged declared screen accepts crafted history, establishing
+    // the baseline that the following runs degrade from.
+    {
+        var source: std.Io.Reader = .fixed(crafted.written());
+        var decoder: Decoder = .init(&source);
+        var decoded = try decoder.ready(
+            testing.allocator,
+            testing.io,
+            test_decode_options,
+        );
+        defer decoded.deinit(testing.allocator);
+        const restored = &decoded.terminal.?;
+
+        const progress = (try decoder.next(testing.allocator, restored)).?;
+        try testing.expectEqual(TerminalScreenKey.alternate, progress.key);
+        try testing.expect(progress.rows > 0);
+        try testing.expect(try decoder.next(testing.allocator, restored) == null);
+        try testing.expectEqual(
+            @as(usize, 2),
+            restored.screens.get(.alternate).?.pages.totalPages(),
+        );
+    }
+
+    // A screen removed since READY discards its history. FINISH still
+    // validates, proving discarded bytes remain digest-covered.
+    {
+        var source: std.Io.Reader = .fixed(crafted.written());
+        var decoder: Decoder = .init(&source);
+        var decoded = try decoder.ready(
+            testing.allocator,
+            testing.io,
+            test_decode_options,
+        );
+        defer decoded.deinit(testing.allocator);
+        const restored = &decoded.terminal.?;
+        restored.screens.remove(testing.allocator, .alternate);
+
+        const progress = (try decoder.next(testing.allocator, restored)).?;
+        try testing.expectEqualDeep(Decoder.Progress{
+            .key = .alternate,
+            .rows = 0,
+            .remaining = 0,
+        }, progress);
+        try testing.expect(try decoder.next(testing.allocator, restored) == null);
+    }
+
+    // A screen removed and recreated since READY has a new generation, so
+    // stale history never mixes into its replacement's content.
+    {
+        var source: std.Io.Reader = .fixed(crafted.written());
+        var decoder: Decoder = .init(&source);
+        var decoded = try decoder.ready(
+            testing.allocator,
+            testing.io,
+            test_decode_options,
+        );
+        defer decoded.deinit(testing.allocator);
+        const restored = &decoded.terminal.?;
+        restored.screens.remove(testing.allocator, .alternate);
+        _ = try restored.switchScreen(.alternate);
+
+        const progress = (try decoder.next(testing.allocator, restored)).?;
+        try testing.expectEqual(TerminalScreenKey.alternate, progress.key);
+        try testing.expectEqual(0, progress.rows);
+        try testing.expect(try decoder.next(testing.allocator, restored) == null);
+        try testing.expectEqual(
+            @as(usize, 1),
+            restored.screens.get(.alternate).?.pages.totalPages(),
+        );
+    }
+}
+
+test "incremental decode discards history after a resize" {
+    const testing = std.testing;
+
+    var t = try testHistoryTerminal(2);
+    defer t.deinit(testing.allocator);
+    var encoded: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer encoded.deinit();
+    try encode(testing.allocator, &encoded.writer, &t, test_encode_options);
+
+    var source: std.Io.Reader = .fixed(encoded.written());
+    var decoder: Decoder = .init(&source);
+    var decoded = try decoder.ready(
+        testing.allocator,
+        testing.io,
+        test_decode_options,
+    );
+    defer decoded.deinit(testing.allocator);
+    var restored = decoded.toOwned();
+    defer restored.deinit(testing.allocator);
+
+    // Encoded pages assume the READY width. After a live resize reflows the
+    // restored screen, pending history is consumed but never applied.
+    try restored.resize(testing.allocator, .{ .cols = 3, .rows = 3 });
+    const primary = restored.screens.get(.primary).?;
+    const resized_total = primary.pages.scrollbar().total;
+
+    var pages: usize = 0;
+    while (try decoder.next(testing.allocator, &restored)) |progress| {
+        try testing.expectEqual(TerminalScreenKey.primary, progress.key);
+        try testing.expectEqual(0, progress.rows);
+        pages += 1;
+    }
+    try testing.expectEqual(2, pages);
+    try testing.expectEqual(resized_total, primary.pages.scrollbar().total);
+}
+
+test "decode drops history beyond the declared scrollback limits" {
+    const testing = std.testing;
+
+    // Declare a byte limit the complete history cannot satisfy. The limit
+    // is validated at page granularity on decode, so the snapshot itself
+    // remains well formed and fully authenticated.
+    var t = try testHistoryTerminal(3);
+    defer t.deinit(testing.allocator);
+    t.screens.get(.primary).?.pages.limits.set(.bytes, 1);
+    var encoded: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer encoded.deinit();
+    try encode(testing.allocator, &encoded.writer, &t, test_encode_options);
+
+    // Incremental: the newest page fits the effective floor, the next page
+    // exceeds it, and one drop discards the remainder of the sequence so no
+    // ordering gap can form.
+    {
+        var source: std.Io.Reader = .fixed(encoded.written());
+        var decoder: Decoder = .init(&source);
+        var decoded = try decoder.ready(
+            testing.allocator,
+            testing.io,
+            test_decode_options,
+        );
+        defer decoded.deinit(testing.allocator);
+        const restored = &decoded.terminal.?;
+
+        var rows: [3]usize = undefined;
+        var pages: usize = 0;
+        while (try decoder.next(testing.allocator, restored)) |progress| {
+            rows[pages] = progress.rows;
+            pages += 1;
+        }
+        try testing.expectEqual(3, pages);
+        try testing.expectEqualSlices(usize, &.{ 2, 0, 0 }, &rows);
+
+        const primary = restored.screens.get(.primary).?;
+        try testing.expectEqual(@as(usize, 2), primary.pages.totalPages());
+        try testing.expectEqual(@as(u21, 'C'), testTopLeftCodepoint(primary));
+    }
+
+    // The one-shot decoder degrades identically instead of rejecting the
+    // snapshot.
+    {
+        var source: std.Io.Reader = .fixed(encoded.written());
+        var decoded = try decode(
+            testing.allocator,
+            testing.io,
+            &source,
+            test_decode_options,
+        );
+        defer decoded.deinit(testing.allocator);
+        const primary = decoded.terminal.?.screens.get(.primary).?;
+        try testing.expectEqual(@as(usize, 2), primary.pages.totalPages());
+        try testing.expectEqual(@as(u21, 'C'), testTopLeftCodepoint(primary));
+    }
+}
+
+test "incremental decode failure leaves applied history usable" {
+    const testing = std.testing;
+
+    var t = try testHistoryTerminal(2);
+    defer t.deinit(testing.allocator);
+    var encoded: std.Io.Writer.Allocating = .init(testing.allocator);
+    defer encoded.deinit();
+    try encode(testing.allocator, &encoded.writer, &t, test_encode_options);
+
+    // Truncate FINISH. READY and both history pages decode, then the
+    // failure surfaces on the call that would have completed the snapshot.
+    var source: std.Io.Reader = .fixed(
+        encoded.written()[0 .. encoded.written().len - 1],
+    );
+    var decoder: Decoder = .init(&source);
+    var decoded = try decoder.ready(
+        testing.allocator,
+        testing.io,
+        test_decode_options,
+    );
+    defer decoded.deinit(testing.allocator);
+    var restored = decoded.toOwned();
+    defer restored.deinit(testing.allocator);
+
+    for (0..2) |_| {
+        const progress = (try decoder.next(testing.allocator, &restored)).?;
+        try testing.expectEqual(2, progress.rows);
+    }
+    try testing.expectError(
+        error.EndOfStream,
+        decoder.next(testing.allocator, &restored),
+    );
+
+    // The transferred terminal was never owned by the decoder: it remains
+    // valid with the contiguous history prefix that did apply, and only
+    // the FINISH authentication of the whole snapshot is lost.
+    const primary = restored.screens.get(.primary).?;
+    try testing.expectEqual(@as(usize, 3), primary.pages.totalPages());
+    try testing.expectEqual(@as(u21, 'A'), testTopLeftCodepoint(primary));
+    primary.pages.assertIntegrity();
+    primary.assertIntegrity();
 }
