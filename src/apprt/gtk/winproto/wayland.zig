@@ -174,6 +174,12 @@ pub const Window = struct {
         };
 
         const bg_effect: ?*ext.BackgroundEffectSurfaceV1 = bg: {
+            if (gtk_version.runtimeAtLeast(4, 23, 3)) {
+                // GTK 4.23.3 added an official way to do background blur,
+                // so we don't need to do anything on our own.
+                break :bg null;
+            }
+
             const mgr = app.globals.get(.ext_background_effect) orelse
                 break :bg null;
 
