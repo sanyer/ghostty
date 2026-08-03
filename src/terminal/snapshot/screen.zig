@@ -847,7 +847,7 @@ pub const SavedCursor = struct {
         return .{
             .x = try io.readInt(reader, u16),
             .y = try io.readInt(reader, u16),
-            .pen = style.decodeOrDiscard(reader) catch .{},
+            .pen = (try style.decodeOrNull(reader)) orelse .{},
             .flags = try Flags.decode(reader),
             .charset = decodeCharsetState(
                 try io.readInt(reader, u16),
@@ -1008,7 +1008,8 @@ pub const Header = struct {
             try reader.takeByte(),
         ) orelse .block;
         const cursor_flags = try CursorFlags.decode(reader);
-        const cursor_pen: TerminalStyle = style.decodeOrDiscard(reader) catch .{};
+        const cursor_pen: TerminalStyle =
+            (try style.decodeOrNull(reader)) orelse .{};
         const hyperlink_implicit_id = try io.readInt(reader, u32);
 
         // Charset and selective-erase state.

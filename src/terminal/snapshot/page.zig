@@ -370,7 +370,7 @@ fn decodePayloadBody(
     // Styles
     for (0..header.style_count) |_| {
         const native_id = try io.readInt(reader, TerminalStyleId);
-        const value: ?TerminalStyle = style.decodeOrDiscard(reader) catch null;
+        const value = try style.decodeOrNull(reader);
 
         // Zero is reserved for the implicit default. For a duplicate encoded
         // ID, the first entry wins and this complete entry is simply ignored.
@@ -1307,6 +1307,82 @@ test "decode validates dimensions" {
             decodePayload(&reader, std.testing.allocator),
         );
     }
+}
+
+test "decode propagates a style table read failure" {
+    const FailOnceReader = struct {
+        source: std.Io.Reader,
+        interface: std.Io.Reader,
+        bytes_before_failure: usize,
+        failed: bool = false,
+
+        fn init(bytes: []const u8, bytes_before_failure: usize) @This() {
+            return .{
+                .source = .fixed(bytes),
+                .interface = .{
+                    .vtable = &.{ .stream = stream },
+                    .buffer = &.{},
+                    .seek = 0,
+                    .end = 0,
+                },
+                .bytes_before_failure = bytes_before_failure,
+            };
+        }
+
+        fn stream(
+            reader: *std.Io.Reader,
+            writer: *std.Io.Writer,
+            limit: std.Io.Limit,
+        ) std.Io.Reader.StreamError!usize {
+            const self: *@This() = @fieldParentPtr("interface", reader);
+            if (self.bytes_before_failure == 0 and !self.failed) {
+                self.failed = true;
+                return error.ReadFailed;
+            }
+
+            const read_limit = if (self.failed)
+                limit
+            else
+                limit.min(.limited(self.bytes_before_failure));
+            const n = try self.source.stream(writer, read_limit);
+            if (!self.failed) self.bytes_before_failure -= n;
+            return n;
+        }
+    };
+
+    const header: Header = .{
+        .columns = 1,
+        .rows = 1,
+        .style_count = 1,
+        .hyperlink_count = 0,
+        .style_capacity = 8,
+        .hyperlink_capacity_bytes = 0,
+        .grapheme_capacity_bytes = 0,
+        .string_capacity_bytes = 0,
+    };
+
+    // If the style read error is swallowed, its sixteen zero bytes are then
+    // misread as a valid empty grid and the unframed payload appears to decode.
+    var encoded: [Header.len + @sizeOf(TerminalStyleId) + style.len]u8 =
+        @splat(0);
+    var writer: std.Io.Writer = .fixed(&encoded);
+    try header.encode(&writer);
+    try io.writeInt(&writer, TerminalStyleId, 1);
+    try writer.splatByteAll(0, style.len);
+
+    var source = FailOnceReader.init(
+        writer.buffered(),
+        Header.len + @sizeOf(TerminalStyleId),
+    );
+    var decoded = decodePayload(
+        &source.interface,
+        std.testing.allocator,
+    ) catch |err| {
+        try std.testing.expectEqual(error.ReadFailed, err);
+        return;
+    };
+    defer decoded.deinit();
+    try std.testing.expect(false);
 }
 
 test "decode normalizes duplicate default and invalid style entries" {
