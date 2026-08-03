@@ -418,6 +418,18 @@ fn decodePayloadBody(
         &style_remap,
         &hyperlink_remap,
     );
+
+    // A newly inserted table value starts with one reference so grid decoding
+    // can safely attach it to any number of cells. Unlike organically built
+    // pages, that initial reference does not itself represent a cell. Release
+    // it once per distinct live style after every cell reference is installed;
+    // unused entries then become dead and disappear from canonical re-encoding.
+    for (1..@as(usize, page.styles.next_id)) |raw_id| {
+        const id: TerminalStyleId = @intCast(raw_id);
+        if (page.styles.refCount(page.memory, id) > 0) {
+            page.styles.release(page.memory, id);
+        }
+    }
 }
 
 /// The fixed logical dimensions, table counts, and allocation hints at the
@@ -751,6 +763,14 @@ test "framed PAGE encode and decode a sparse native page" {
         .bg_color = .{ .palette = 42 },
     }).eql(decoded_style_b.value_ptr.*));
     try std.testing.expectEqual(null, style_it.next());
+    try std.testing.expectEqual(
+        @as(u16, 2),
+        decoded.styles.refCount(decoded.memory, decoded_style_a.id),
+    );
+    try std.testing.expectEqual(
+        @as(u16, 1),
+        decoded.styles.refCount(decoded.memory, decoded_style_b.id),
+    );
 
     var hyperlink_it = decoded.hyperlink_set.iterator(decoded.memory);
     const decoded_link_a = hyperlink_it.next().?;
@@ -914,7 +934,7 @@ test "decode sparse page rejects every truncation" {
 
 test "decode accepts unordered sparse style IDs and ignores zero" {
     const header: Header = .{
-        .columns = 1,
+        .columns = 2,
         .rows = 1,
         .style_count = 2,
         .hyperlink_count = 0,
@@ -927,7 +947,7 @@ test "decode accepts unordered sparse style IDs and ignores zero" {
     var descending: [
         Header.len +
             2 * (2 + style.len) +
-            7
+            3 + 2 * 8 + 4
     ]u8 = undefined;
     var descending_writer: std.Io.Writer = .fixed(&descending);
     try header.encode(&descending_writer);
@@ -935,8 +955,16 @@ test "decode accepts unordered sparse style IDs and ignores zero" {
     try style.encode(.{ .flags = .{ .bold = true } }, &descending_writer);
     try io.writeInt(&descending_writer, TerminalStyleId, 2);
     try style.encode(.{ .flags = .{ .italic = true } }, &descending_writer);
-    try descending_writer.writeByte(0); // row flags
-    try io.writeInt(&descending_writer, u16, 0); // cell count
+    try descending_writer.writeByte(@bitCast(grid.Row{ .cell_width = .eight }));
+    try io.writeInt(&descending_writer, u16, 2); // cell count
+    try io.writeInt(&descending_writer, u64, @bitCast(grid.Cell{
+        .content = 'A',
+        .style_id = 3,
+    }));
+    try io.writeInt(&descending_writer, u64, @bitCast(grid.Cell{
+        .content = 'B',
+        .style_id = 2,
+    }));
     try io.writeInt(&descending_writer, u32, 0); // grapheme section
 
     var descending_reader: std.Io.Reader = .fixed(
@@ -948,6 +976,14 @@ test "decode accepts unordered sparse style IDs and ignores zero" {
     );
     defer decoded_descending.deinit();
     try std.testing.expectEqual(@as(usize, 2), decoded_descending.styles.count());
+    try std.testing.expectEqual(
+        @as(TerminalStyleId, 1),
+        decoded_descending.getRowAndCell(0, 0).cell.style_id,
+    );
+    try std.testing.expectEqual(
+        @as(TerminalStyleId, 2),
+        decoded_descending.getRowAndCell(1, 0).cell.style_id,
+    );
 
     const one_header: Header = .{
         .columns = 1,
@@ -1360,6 +1396,45 @@ test "decode normalizes duplicate default and invalid style entries" {
         @as(TerminalStyleId, 0),
         invalid_decoded.getRowAndCell(0, 0).cell.style_id,
     );
+}
+
+test "decode releases unused style table references" {
+    const header: Header = .{
+        .columns = 1,
+        .rows = 1,
+        .style_count = 1,
+        .hyperlink_count = 0,
+        .style_capacity = 8,
+        .hyperlink_capacity_bytes = 0,
+        .grapheme_capacity_bytes = 0,
+        .string_capacity_bytes = 0,
+    };
+
+    var empty_page = try TerminalPage.init(.{ .cols = 1, .rows = 1 });
+    defer empty_page.deinit();
+    var grid_bytes: [32]u8 = undefined;
+    var grid_writer: std.Io.Writer = .fixed(&grid_bytes);
+    try grid.encode(&empty_page, &grid_writer);
+
+    var encoded: std.Io.Writer.Allocating = .init(std.testing.allocator);
+    defer encoded.deinit();
+    try header.encode(&encoded.writer);
+    try io.writeInt(&encoded.writer, TerminalStyleId, 7);
+    try style.encode(.{ .flags = .{ .bold = true } }, &encoded.writer);
+    try encoded.writer.writeAll(grid_writer.buffered());
+
+    var reader: std.Io.Reader = .fixed(encoded.written());
+    var decoded = try decodePayload(&reader, std.testing.allocator);
+    defer decoded.deinit();
+    try std.testing.expectEqual(@as(usize, 0), decoded.styles.count());
+
+    // The dead table-only entry is absent from the very first re-encode.
+    var canonical: [64]u8 = undefined;
+    var canonical_writer: std.Io.Writer = .fixed(&canonical);
+    try encodePayload(&decoded, &canonical_writer);
+    var canonical_reader: std.Io.Reader = .fixed(canonical_writer.buffered());
+    const canonical_header = try Header.decode(&canonical_reader);
+    try std.testing.expectEqual(@as(u16, 0), canonical_header.style_count);
 }
 
 test "decode reuses duplicate hyperlinks" {
