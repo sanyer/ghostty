@@ -426,6 +426,8 @@ pub const Decoder = struct {
             DuplicateHistory,
 
             /// A history PAGE cannot join a native PageList.
+            /// These propagate from `nextPage`'s non-limit finalize errors;
+            /// only limit failures are deliberately converted into drops.
             InvalidPageDimensions,
             RowCountOverflow,
             PageSizeOverflow,
@@ -553,6 +555,12 @@ pub const Decoder = struct {
                 try page.discard(self.stream.reader());
                 break :rows 0;
             };
+            // The one-shot history decoder rejects a Screen which already has
+            // complete history. This incremental path intentionally bypasses
+            // that guard: the terminal has been live since READY and may have
+            // accumulated new history. Generation and width checks above keep
+            // the destination compatible, while per-page finalization enforces
+            // its current scrollback limits.
             break :rows history.decodePage(
                 self.stream.reader(),
                 alloc,

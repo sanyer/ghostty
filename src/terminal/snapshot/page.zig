@@ -370,7 +370,7 @@ fn decodePayloadBody(
     // Styles
     for (0..header.style_count) |_| {
         const native_id = try io.readInt(reader, TerminalStyleId);
-        const value: ?TerminalStyle = style.decodeOrDiscard(reader) catch null;
+        const value = try style.decodeOrNull(reader);
 
         // Zero is reserved for the implicit default. For a duplicate encoded
         // ID, the first entry wins and this complete entry is simply ignored.
@@ -429,6 +429,16 @@ fn decodePayloadBody(
         if (page.styles.refCount(page.memory, id) > 0) {
             page.styles.release(page.memory, id);
         }
+    }
+
+    // Hyperlink insertion likewise creates one temporary reference for every
+    // accepted wire table entry. Release through the encoded-ID remap rather
+    // than the native set so duplicate values which deduplicated to the same
+    // native ID each surrender their own reference.
+    var hyperlink_it = hyperlink_remap.seen.iterator(.{});
+    while (hyperlink_it.next()) |encoded_id| {
+        const id = hyperlink_remap.entries[encoded_id];
+        if (id != 0) page.hyperlink_set.release(page.memory, id);
     }
 }
 
@@ -1017,7 +1027,7 @@ test "decode accepts unordered sparse style IDs and ignores zero" {
 
 test "decode accepts unordered sparse hyperlink IDs" {
     const header: Header = .{
-        .columns = 1,
+        .columns = 2,
         .rows = 1,
         .style_count = 0,
         .hyperlink_count = 2,
@@ -1039,7 +1049,7 @@ test "decode accepts unordered sparse hyperlink IDs" {
     var encoded: [
         Header.len +
             2 * 14 +
-            7
+            3 + 2 * 8 + 4
     ]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&encoded);
     try header.encode(&writer);
@@ -1047,8 +1057,18 @@ test "decode accepts unordered sparse hyperlink IDs" {
     try hyperlink.encode(first, &writer);
     try io.writeInt(&writer, TerminalHyperlinkId, 2);
     try hyperlink.encode(second, &writer);
-    try writer.writeByte(0); // row flags
-    try io.writeInt(&writer, u16, 0); // cell count
+    try writer.writeByte(@bitCast(grid.Row{ .cell_width = .eight }));
+    try io.writeInt(&writer, u16, 2); // cell count
+    try io.writeInt(&writer, u64, @bitCast(grid.Cell{
+        .content = 'A',
+        .hyperlink = true,
+        .hyperlink_id = 3,
+    }));
+    try io.writeInt(&writer, u64, @bitCast(grid.Cell{
+        .content = 'B',
+        .hyperlink = true,
+        .hyperlink_id = 2,
+    }));
     try io.writeInt(&writer, u32, 0); // grapheme section
 
     var reader: std.Io.Reader = .fixed(writer.buffered());
@@ -1060,6 +1080,34 @@ test "decode accepts unordered sparse hyperlink IDs" {
     try std.testing.expectEqual(
         @as(usize, 2),
         decoded.hyperlink_set.count(),
+    );
+    const first_id = decoded.lookupHyperlink(
+        decoded.getRowAndCell(0, 0).cell,
+    ).?;
+    const second_id = decoded.lookupHyperlink(
+        decoded.getRowAndCell(1, 0).cell,
+    ).?;
+    try std.testing.expectEqual(
+        @as(u16, 1),
+        decoded.hyperlink_set.refCount(decoded.memory, first_id),
+    );
+    try std.testing.expectEqual(
+        @as(u16, 1),
+        decoded.hyperlink_set.refCount(decoded.memory, second_id),
+    );
+    try std.testing.expectEqualStrings(
+        "one",
+        decoded.hyperlink_set.get(
+            decoded.memory,
+            first_id,
+        ).uri.slice(decoded.memory),
+    );
+    try std.testing.expectEqualStrings(
+        "two",
+        decoded.hyperlink_set.get(
+            decoded.memory,
+            second_id,
+        ).uri.slice(decoded.memory),
     );
 }
 
@@ -1259,6 +1307,82 @@ test "decode validates dimensions" {
             decodePayload(&reader, std.testing.allocator),
         );
     }
+}
+
+test "decode propagates a style table read failure" {
+    const FailOnceReader = struct {
+        source: std.Io.Reader,
+        interface: std.Io.Reader,
+        bytes_before_failure: usize,
+        failed: bool = false,
+
+        fn init(bytes: []const u8, bytes_before_failure: usize) @This() {
+            return .{
+                .source = .fixed(bytes),
+                .interface = .{
+                    .vtable = &.{ .stream = stream },
+                    .buffer = &.{},
+                    .seek = 0,
+                    .end = 0,
+                },
+                .bytes_before_failure = bytes_before_failure,
+            };
+        }
+
+        fn stream(
+            reader: *std.Io.Reader,
+            writer: *std.Io.Writer,
+            limit: std.Io.Limit,
+        ) std.Io.Reader.StreamError!usize {
+            const self: *@This() = @fieldParentPtr("interface", reader);
+            if (self.bytes_before_failure == 0 and !self.failed) {
+                self.failed = true;
+                return error.ReadFailed;
+            }
+
+            const read_limit = if (self.failed)
+                limit
+            else
+                limit.min(.limited(self.bytes_before_failure));
+            const n = try self.source.stream(writer, read_limit);
+            if (!self.failed) self.bytes_before_failure -= n;
+            return n;
+        }
+    };
+
+    const header: Header = .{
+        .columns = 1,
+        .rows = 1,
+        .style_count = 1,
+        .hyperlink_count = 0,
+        .style_capacity = 8,
+        .hyperlink_capacity_bytes = 0,
+        .grapheme_capacity_bytes = 0,
+        .string_capacity_bytes = 0,
+    };
+
+    // If the style read error is swallowed, its sixteen zero bytes are then
+    // misread as a valid empty grid and the unframed payload appears to decode.
+    var encoded: [Header.len + @sizeOf(TerminalStyleId) + style.len]u8 =
+        @splat(0);
+    var writer: std.Io.Writer = .fixed(&encoded);
+    try header.encode(&writer);
+    try io.writeInt(&writer, TerminalStyleId, 1);
+    try writer.splatByteAll(0, style.len);
+
+    var source = FailOnceReader.init(
+        writer.buffered(),
+        Header.len + @sizeOf(TerminalStyleId),
+    );
+    var decoded = decodePayload(
+        &source.interface,
+        std.testing.allocator,
+    ) catch |err| {
+        try std.testing.expectEqual(error.ReadFailed, err);
+        return;
+    };
+    defer decoded.deinit();
+    try std.testing.expect(false);
 }
 
 test "decode normalizes duplicate default and invalid style entries" {
@@ -1518,10 +1642,20 @@ test "decode reuses duplicate hyperlinks" {
     try std.testing.expect(cell.hyperlink);
     const id = decoded.lookupHyperlink(cell).?;
     const entry = decoded.hyperlink_set.get(decoded.memory, id);
+    try std.testing.expectEqual(
+        @as(u16, 1),
+        decoded.hyperlink_set.refCount(decoded.memory, id),
+    );
     try std.testing.expectEqualStrings(
         "uri",
         entry.uri.slice(decoded.memory),
     );
+
+    // Overwriting the sole linked cell must make the deduplicated entry dead.
+    // Any surviving reference belongs to the decode-time wire table, not the
+    // native page.
+    decoded.clearCells(decoded.getRow(0), 0, 1);
+    try std.testing.expectEqual(@as(usize, 0), decoded.hyperlink_set.count());
 }
 
 test "discard consumes exactly one PAGE record and keeps digest coverage" {

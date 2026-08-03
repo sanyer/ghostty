@@ -435,7 +435,7 @@ pub fn decode(
                 options.max_scrollback_bytes == 0,
             .cursor = cursor,
             .saved_cursor = if (saved_cursor) |value|
-                value.terminal()
+                value.terminal(options.cols, options.rows)
             else
                 null,
             .charset = header.charset,
@@ -813,13 +813,18 @@ pub const SavedCursor = struct {
         };
     }
 
-    fn terminal(self: SavedCursor) TerminalScreen.SavedCursor {
+    fn terminal(
+        self: SavedCursor,
+        cols: u16,
+        rows: u16,
+    ) TerminalScreen.SavedCursor {
+        const x = @min(self.x, cols - 1);
         return .{
-            .x = self.x,
-            .y = self.y,
+            .x = x,
+            .y = @min(self.y, rows - 1),
             .style = self.pen,
             .protected = self.flags.protected,
-            .pending_wrap = self.flags.pending_wrap,
+            .pending_wrap = self.flags.pending_wrap and x == cols - 1,
             .origin = self.flags.origin,
             .charset = self.charset,
         };
@@ -847,7 +852,7 @@ pub const SavedCursor = struct {
         return .{
             .x = try io.readInt(reader, u16),
             .y = try io.readInt(reader, u16),
-            .pen = style.decodeOrDiscard(reader) catch .{},
+            .pen = (try style.decodeOrNull(reader)) orelse .{},
             .flags = try Flags.decode(reader),
             .charset = decodeCharsetState(
                 try io.readInt(reader, u16),
@@ -1008,7 +1013,8 @@ pub const Header = struct {
             try reader.takeByte(),
         ) orelse .block;
         const cursor_flags = try CursorFlags.decode(reader);
-        const cursor_pen: TerminalStyle = style.decodeOrDiscard(reader) catch .{};
+        const cursor_pen: TerminalStyle =
+            (try style.decodeOrNull(reader)) orelse .{};
         const hyperlink_implicit_id = try io.readInt(reader, u32);
 
         // Charset and selective-erase state.
@@ -1783,8 +1789,8 @@ test "framed native SCREEN and PAGE sequence" {
     }
 
     const restored_saved = restored.saved_cursor.?;
-    try std.testing.expectEqual(@as(u16, 0x0102), restored_saved.x);
-    try std.testing.expectEqual(@as(u16, 0x0304), restored_saved.y);
+    try std.testing.expectEqual(@as(u16, 7), restored_saved.x);
+    try std.testing.expectEqual(@as(u16, 7), restored_saved.y);
     try std.testing.expect(restored_saved.protected);
     try std.testing.expect(restored_saved.pending_wrap);
     try std.testing.expect(restored_saved.origin);
@@ -2155,6 +2161,57 @@ test "SCREEN validates pending wrap against a mixed-width cursor page" {
     try std.testing.expectEqual(@as(u16, 3), decoded.screen.cursor.x);
     try std.testing.expect(decoded.screen.cursor.pending_wrap);
     decoded.screen.assertIntegrity();
+}
+
+test "SCREEN clamps a decoded saved cursor to terminal dimensions" {
+    var screen = try TerminalScreen.init(
+        std.testing.io,
+        std.testing.allocator,
+        .{ .cols = 2, .rows = 2, .max_scrollback_bytes = 0 },
+    );
+    defer screen.deinit();
+
+    var destination: std.Io.Writer.Allocating = .init(
+        std.testing.allocator,
+    );
+    defer destination.deinit();
+    var stream: record.Writer = .init(
+        std.testing.allocator,
+        &destination.writer,
+    );
+    defer stream.deinit();
+
+    var header = Header.init(&screen, .primary, 1);
+    header.saved_cursor_present = true;
+    const screen_payload = stream.begin(.screen);
+    try header.encode(screen_payload);
+    try (SavedCursor{
+        .x = std.math.maxInt(u16),
+        .y = std.math.maxInt(u16),
+        .pen = .{},
+        .flags = .{ .pending_wrap = true },
+        .charset = .{},
+    }).encode(screen_payload);
+    try screen_payload.writeByte(0);
+    try stream.finish();
+    try page.encode(
+        screen.pages.getTopLeft(.active).node.pageAssumeResident(),
+        &stream,
+    );
+
+    var source: std.Io.Reader = .fixed(destination.written());
+    var decoded = try decode(
+        &source,
+        std.testing.io,
+        std.testing.allocator,
+        .{ .cols = 2, .rows = 2, .max_scrollback_bytes = 0 },
+    );
+    defer decoded.deinit();
+
+    const saved = decoded.screen.saved_cursor.?;
+    try std.testing.expectEqual(@as(u16, 1), saved.x);
+    try std.testing.expectEqual(@as(u16, 1), saved.y);
+    try std.testing.expect(saved.pending_wrap);
 }
 
 test "SCREEN restoration rejects invalid and incomplete sequences" {
