@@ -4611,12 +4611,14 @@ test "action: format" {
     const testing = std.testing;
     const alloc = testing.allocator;
 
-    const a: Action = .{ .text = "👻" };
+    const a: Action = .{ .text = "👻Ghostty'\"" };
 
     var buf: std.Io.Writer.Allocating = .init(alloc);
     defer buf.deinit();
     try a.format(&buf.writer);
-    try testing.expectEqualStrings("text:\\xf0\\x9f\\x91\\xbb", buf.written());
+
+    const b = try Binding.Action.parse(buf.written());
+    try testing.expect(a.equal(b));
 }
 
 test "action: format set title" {
