@@ -120,9 +120,117 @@ pub const Options = struct {
 ///
 /// Used by formatters that operate on PageLists to track the source position
 /// of each byte written. The caller is responsible for freeing the map.
+///
+/// The mapping is stored in two parts: a per-byte x/y coordinate (8
+/// bytes per output byte, half the size of a Pin) and a tiny table of
+/// page nodes covering byte ranges (there are only ever a handful of
+/// pages). This also lets page formatters write coordinates directly
+/// into the map without a separate coordinate-to-pin conversion pass.
 pub const PinMap = struct {
     alloc: Allocator,
-    map: *std.ArrayList(Pin),
+    map: *Map,
+
+    /// The type of the page node referenced by pins.
+    pub const Node = @FieldType(Pin, "node");
+
+    /// A page node covering output bytes starting at `offset`
+    /// (inclusive) until the next entry's offset (or the end of the
+    /// output).
+    pub const NodeRun = struct {
+        offset: usize,
+        node: Node,
+    };
+
+    pub const Map = struct {
+        /// The x/y coordinate within its page for every output byte.
+        points: std.ArrayList(Coordinate) = .empty,
+
+        /// The page node for ranges of output bytes, ordered by offset.
+        nodes: std.ArrayList(NodeRun) = .empty,
+
+        pub const empty: Map = .{};
+
+        pub fn deinit(self: *Map, alloc: Allocator) void {
+            self.points.deinit(alloc);
+            self.nodes.deinit(alloc);
+        }
+
+        pub fn clearRetainingCapacity(self: *Map) void {
+            self.points.clearRetainingCapacity();
+            self.nodes.clearRetainingCapacity();
+        }
+
+        /// The total number of bytes mapped.
+        pub fn count(self: *const Map) usize {
+            return self.points.items.len;
+        }
+
+        /// Set the page node for all bytes appended from here on,
+        /// until the next call. No-op if the node is unchanged.
+        pub fn setNode(
+            self: *Map,
+            alloc: Allocator,
+            node: Node,
+        ) Allocator.Error!void {
+            if (self.nodes.getLastOrNull()) |last| {
+                if (last.node == node) return;
+            }
+
+            try self.nodes.append(alloc, .{
+                .offset = self.points.items.len,
+                .node = node,
+            });
+        }
+
+        /// Append `n` bytes that map to `pin`.
+        pub fn append(
+            self: *Map,
+            alloc: Allocator,
+            pin: Pin,
+            n: usize,
+        ) Allocator.Error!void {
+            if (n == 0) return;
+            try self.setNode(alloc, pin.node);
+            try self.points.appendNTimes(
+                alloc,
+                .{ .x = pin.x, .y = pin.y },
+                n,
+            );
+        }
+
+        /// Returns the pin that the byte at the given offset maps to,
+        /// or null if the offset is out of range.
+        pub fn get(self: *const Map, offset: usize) ?Pin {
+            if (offset >= self.points.items.len) return null;
+            const coord = self.points.items[offset];
+            return .{
+                .node = findNode(self.nodes.items, offset) orelse return null,
+                .x = coord.x,
+                .y = @intCast(coord.y),
+            };
+        }
+
+        /// Returns the last pin in the map, if any.
+        pub fn getLastOrNull(self: *const Map) ?Pin {
+            const len = self.points.items.len;
+            if (len == 0) return null;
+            return self.get(len - 1);
+        }
+    };
+
+    /// Binary search for the node covering `offset` in a slice of node
+    /// runs sorted by offset. Returns null only if the slice is empty
+    /// or the offset precedes the first run.
+    pub fn findNode(runs: []const NodeRun, offset: usize) ?Node {
+        if (runs.len == 0 or offset < runs[0].offset) return null;
+        var lo: usize = 0;
+        var hi: usize = runs.len;
+        while (lo + 1 < hi) {
+            const mid = lo + (hi - lo) / 2;
+            if (runs[mid].offset <= offset) lo = mid else hi = mid;
+        }
+        return runs[lo].node;
+    }
 };
 
 /// Terminal formatter formats the active terminal screen.
@@ -289,7 +397,7 @@ pub const TerminalFormatter = struct {
 
                 // Map all those bytes to the same pin. Use the top left to ensure
                 // the node pointer is always properly initialized.
-                m.map.appendNTimes(
+                m.map.append(
                     m.alloc,
                     self.terminal.screens.active.pages.getTopLeft(.screen),
                     std.math.cast(usize, discarding.count) orelse return error.WriteFailed,
@@ -327,7 +435,7 @@ pub const TerminalFormatter = struct {
 
                 // Map all those bytes to the same pin. Use the top left to ensure
                 // the node pointer is always properly initialized.
-                m.map.appendNTimes(
+                m.map.append(
                     m.alloc,
                     self.terminal.screens.active.pages.getTopLeft(.screen),
                     std.math.cast(usize, discarding.count) orelse return error.WriteFailed,
@@ -404,16 +512,10 @@ pub const TerminalFormatter = struct {
                 extra_formatter.extra.pwd = self.extra.pwd;
                 try extra_formatter.format(&discarding.writer);
 
-                m.map.appendNTimes(
+                m.map.append(
                     m.alloc,
-                    if (m.map.items.len > 0) pin: {
-                        const last = m.map.items[m.map.items.len - 1];
-                        break :pin .{
-                            .node = last.node,
-                            .x = last.x,
-                            .y = last.y,
-                        };
-                    } else self.terminal.screens.active.pages.getTopLeft(.screen),
+                    m.map.getLastOrNull() orelse
+                        self.terminal.screens.active.pages.getTopLeft(.screen),
                     std.math.cast(usize, discarding.count) orelse return error.WriteFailed,
                 ) catch return error.WriteFailed;
             }
@@ -672,21 +774,10 @@ pub const ScreenFormatter = struct {
 
             // Map all those bytes to the same pin. Use the first page node
             // to ensure the node pointer is always properly initialized.
-            m.map.appendNTimes(
+            m.map.append(
                 m.alloc,
-                if (m.map.items.len > 0) pin: {
-                    // There is a weird Zig miscompilation here on 0.15.2.
-                    // If I return the m.map.items value directly then we
-                    // get undefined memory (even though we're copying a
-                    // Pin struct). If we duplicate here like this we do
-                    // not.
-                    const last = m.map.items[m.map.items.len - 1];
-                    break :pin .{
-                        .node = last.node,
-                        .x = last.x,
-                        .y = last.y,
-                    };
-                } else self.screen.pages.getTopLeft(.screen),
+                m.map.getLastOrNull() orelse
+                    self.screen.pages.getTopLeft(.screen),
                 std.math.cast(usize, discarding.count) orelse return error.WriteFailed,
             ) catch return error.WriteFailed;
         }
@@ -738,10 +829,6 @@ pub const PageListFormatter = struct {
         const tl: PageList.Pin = self.top_left orelse self.list.getTopLeft(.screen);
         const br: PageList.Pin = self.bottom_right orelse self.list.getBottomRight(.screen).?;
 
-        // If we keep track of pins, we'll need this.
-        var point_map: std.ArrayList(Coordinate) = .empty;
-        defer if (self.pin_map) |*m| point_map.deinit(m.alloc);
-
         var page_state: ?PageFormatter.TrailingState = null;
         var iter = tl.pageIterator(.right_down, br);
         while (iter.next()) |chunk| {
@@ -764,31 +851,19 @@ pub const PageListFormatter = struct {
                 if (chunk.node == br.node) formatter.end_x = br.x;
             }
 
-            // If we're tracking pins, then we setup a point map for the
-            // page formatter (cause it can't track pins). And then we convert
-            // this to pins later.
+            // If we're tracking pins, the page formatter writes its
+            // per-byte coordinates directly into our map's point list
+            // and we record which page node covers those bytes.
             if (self.pin_map) |*m| {
-                point_map.clearRetainingCapacity();
-                formatter.point_map = .{ .alloc = m.alloc, .map = &point_map };
+                m.map.setNode(m.alloc, chunk.node) catch return error.WriteFailed;
+                formatter.point_map = .{
+                    .alloc = m.alloc,
+                    .map = &m.map.points,
+                    .base = m.map.points.items.len,
+                };
             }
 
             page_state = try formatter.formatWithState(writer);
-
-            // If we're tracking pins then grab our points and write them
-            // to our pin map.
-            if (self.pin_map) |*m| {
-                m.map.ensureUnusedCapacity(
-                    m.alloc,
-                    point_map.items.len,
-                ) catch return error.WriteFailed;
-                for (point_map.items) |coord| {
-                    m.map.appendAssumeCapacity(.{
-                        .node = chunk.node,
-                        .x = coord.x,
-                        .y = @intCast(coord.y),
-                    });
-                }
-            }
         }
     }
 };
@@ -847,6 +922,12 @@ pub const PageFormatter = struct {
     pub const PointMap = struct {
         alloc: Allocator,
         map: *std.ArrayList(Coordinate),
+
+        /// The index in `map` at which this formatter's output begins.
+        /// Entries before this index belong to a caller (e.g. previous
+        /// pages of a PageListFormatter) and aren't inspected. This
+        /// exists so that callers can share one list across pages.
+        base: usize = 0,
     };
 
     /// Trailing state. This is used to ensure that rows wrapped across
@@ -1113,7 +1194,7 @@ pub const PageFormatter = struct {
                 // in a prior page, so we just map to the first row of this
                 // page.
                 if (self.point_map) |*map| {
-                    const start: Coordinate = if (map.map.items.len > 0)
+                    const start: Coordinate = if (map.map.items.len > map.base)
                         map.map.items[map.map.items.len - 1]
                     else
                         .{ .x = 0, .y = 0 };
@@ -1162,9 +1243,6 @@ pub const PageFormatter = struct {
                 if (cp_map_empty) fast: {
                     if (comptime formatStyled(emit)) {
                         if (style_id == invalid_style_id) break :fast;
-                        if (comptime emit == .html) {
-                            if (current_hyperlink_id != null) break :fast;
-                        }
                     }
 
                     // Specialized on point tracking so that the common
@@ -1178,6 +1256,7 @@ pub const PageFormatter = struct {
                             x,
                             y,
                             style_id,
+                            current_hyperlink_id,
                             &blank_cells,
                         )
                     else
@@ -1189,6 +1268,7 @@ pub const PageFormatter = struct {
                             x,
                             y,
                             style_id,
+                            current_hyperlink_id,
                             &blank_cells,
                         );
 
@@ -1268,9 +1348,16 @@ pub const PageFormatter = struct {
                     const cell_style = self.cellStyle(cell);
 
                     // If the style hasn't changed, don't bloat output.
-                    if (cell_style.eql(style)) {
-                        style_id = cell_style_id;
-                        break :style;
+                    // When both ids are interned (and thus different, since
+                    // equal ids broke out above), interning guarantees the
+                    // styles differ so we can skip the comparison entirely.
+                    if (cell_style_id == invalid_style_id or
+                        style_id == invalid_style_id)
+                    {
+                        if (cell_style.eql(style)) {
+                            style_id = cell_style_id;
+                            break :style;
+                        }
                     }
 
                     // If we had a previous style, we need to close it,
@@ -1478,6 +1565,7 @@ pub const PageFormatter = struct {
         run_x: size.CellCountInt,
         run_y: size.CellCountInt,
         run_style_id: u32,
+        run_hyperlink_id: ?hyperlink.Id,
         blank_cells: *usize,
     ) std.Io.Writer.Error!usize {
         assert(track_points == (self.point_map != null));
@@ -1511,11 +1599,6 @@ pub const PageFormatter = struct {
             if (comptime formatStyled(emit)) {
                 // Style transition, take the slow path.
                 if (cell.style_id != run_style_id) break;
-
-                // Hyperlink transition, take the slow path.
-                if (comptime emit == .html) {
-                    if (cell.hyperlink) break;
-                }
             }
 
             const cp: u21 = cell.content.codepoint.data;
@@ -1541,6 +1624,18 @@ pub const PageFormatter = struct {
                     pending += 1;
                     continue;
                 }
+            }
+
+            // Hyperlink state must be stable within a run: any non-blank
+            // cell must belong to the currently open hyperlink (or none).
+            // Transitions take the slow path. This is checked after blank
+            // accounting because blank cells never touch hyperlink state.
+            if (comptime emit == .html) {
+                if (cell.hyperlink) {
+                    const run_id = run_hyperlink_id orelse break;
+                    const cell_id = self.page.lookupHyperlink(cell) orelse break;
+                    if (cell_id != run_id) break;
+                } else if (run_hyperlink_id != null) break;
             }
 
             // The page coordinate of this cell, for point tracking.
@@ -4018,7 +4113,7 @@ test "PageList plain single line" {
 
     s.nextSlice("hello, world");
 
-    var pin_map: std.ArrayList(Pin) = .empty;
+    var pin_map: PinMap.Map = .empty;
     defer pin_map.deinit(alloc);
 
     var formatter: PageListFormatter = .init(&t.screens.active.pages, .plain);
@@ -4028,11 +4123,11 @@ test "PageList plain single line" {
     try testing.expectEqualStrings("hello, world", output);
 
     // Verify pin map
-    try testing.expectEqual(output.len, pin_map.items.len);
+    try testing.expectEqual(output.len, pin_map.count());
     const node = t.screens.active.pages.pages.first.?;
     for (0..output.len) |i| try testing.expectEqual(
         Pin{ .node = node, .x = @intCast(i), .y = 0 },
-        pin_map.items[i],
+        pin_map.get(i).?,
     );
 }
 
@@ -4071,7 +4166,7 @@ test "PageList plain spanning two pages" {
     s.nextSlice("page two");
 
     // Format the entire PageList
-    var pin_map: std.ArrayList(Pin) = .empty;
+    var pin_map: PinMap.Map = .empty;
     defer pin_map.deinit(alloc);
 
     var formatter: PageListFormatter = .init(pages, .plain);
@@ -4082,31 +4177,31 @@ test "PageList plain spanning two pages" {
     try testing.expectEqualStrings("page one\npage two", output);
 
     // Verify pin map
-    try testing.expectEqual(full_output.len, pin_map.items.len);
+    try testing.expectEqual(full_output.len, pin_map.count());
     const first_node = pages.pages.first.?;
     const last_node = pages.pages.last.?;
     const trimmed_count = full_output.len - output.len;
 
     // First part (trimmed blank lines) maps to first node
     for (0..trimmed_count) |i| {
-        try testing.expectEqual(first_node, pin_map.items[i].node);
+        try testing.expectEqual(first_node, pin_map.get(i).?.node);
     }
 
     // "page one" (8 chars) maps to first node
     for (0..8) |i| {
         const idx = trimmed_count + i;
-        try testing.expectEqual(first_node, pin_map.items[idx].node);
-        try testing.expectEqual(@as(size.CellCountInt, @intCast(i)), pin_map.items[idx].x);
+        try testing.expectEqual(first_node, pin_map.get(idx).?.node);
+        try testing.expectEqual(@as(size.CellCountInt, @intCast(i)), pin_map.get(idx).?.x);
     }
 
     // \n - maps to last node as it represents the transition to new page
-    try testing.expectEqual(last_node, pin_map.items[trimmed_count + 8].node);
+    try testing.expectEqual(last_node, pin_map.get(trimmed_count + 8).?.node);
 
     // "page two" (8 chars) maps to last node
     for (0..8) |i| {
         const idx = trimmed_count + 9 + i;
-        try testing.expectEqual(last_node, pin_map.items[idx].node);
-        try testing.expectEqual(@as(size.CellCountInt, @intCast(i)), pin_map.items[idx].x);
+        try testing.expectEqual(last_node, pin_map.get(idx).?.node);
+        try testing.expectEqual(@as(size.CellCountInt, @intCast(i)), pin_map.get(idx).?.x);
     }
 }
 
@@ -4138,7 +4233,7 @@ test "PageList soft-wrapped line spanning two pages without unwrap" {
     try testing.expect(pages.pages.first != pages.pages.last);
 
     // Format without unwrap - should show line breaks
-    var pin_map: std.ArrayList(Pin) = .empty;
+    var pin_map: PinMap.Map = .empty;
     defer pin_map.deinit(alloc);
 
     var formatter: PageListFormatter = .init(pages, .plain);
@@ -4149,29 +4244,29 @@ test "PageList soft-wrapped line spanning two pages without unwrap" {
     try testing.expectEqualStrings("hello worl\nd test", output);
 
     // Verify pin map
-    try testing.expectEqual(full_output.len, pin_map.items.len);
+    try testing.expectEqual(full_output.len, pin_map.count());
     const first_node = pages.pages.first.?;
     const last_node = pages.pages.last.?;
     const trimmed_count = full_output.len - output.len;
 
     // First part (trimmed blank lines) maps to first node
     for (0..trimmed_count) |i| {
-        try testing.expectEqual(first_node, pin_map.items[i].node);
+        try testing.expectEqual(first_node, pin_map.get(i).?.node);
     }
 
     // First line maps to first node
     for (0..10) |i| {
         const idx = trimmed_count + i;
-        try testing.expectEqual(first_node, pin_map.items[idx].node);
+        try testing.expectEqual(first_node, pin_map.get(idx).?.node);
     }
 
     // \n - maps to last node as it represents the transition to new page
-    try testing.expectEqual(last_node, pin_map.items[trimmed_count + 10].node);
+    try testing.expectEqual(last_node, pin_map.get(trimmed_count + 10).?.node);
 
     // "d test" (6 chars) maps to last node
     for (0..6) |i| {
         const idx = trimmed_count + 11 + i;
-        try testing.expectEqual(last_node, pin_map.items[idx].node);
+        try testing.expectEqual(last_node, pin_map.get(idx).?.node);
     }
 }
 
@@ -4203,7 +4298,7 @@ test "PageList soft-wrapped line spanning two pages with unwrap" {
     try testing.expect(pages.pages.first != pages.pages.last);
 
     // Format with unwrap - should join the wrapped lines
-    var pin_map: std.ArrayList(Pin) = .empty;
+    var pin_map: PinMap.Map = .empty;
     defer pin_map.deinit(alloc);
 
     var formatter: PageListFormatter = .init(pages, .{ .emit = .plain, .unwrap = true });
@@ -4214,26 +4309,26 @@ test "PageList soft-wrapped line spanning two pages with unwrap" {
     try testing.expectEqualStrings("hello world test", output);
 
     // Verify pin map
-    try testing.expectEqual(full_output.len, pin_map.items.len);
+    try testing.expectEqual(full_output.len, pin_map.count());
     const first_node = pages.pages.first.?;
     const last_node = pages.pages.last.?;
     const trimmed_count = full_output.len - output.len;
 
     // First part (trimmed blank lines) maps to first node
     for (0..trimmed_count) |i| {
-        try testing.expectEqual(first_node, pin_map.items[i].node);
+        try testing.expectEqual(first_node, pin_map.get(i).?.node);
     }
 
     // First line from first page
     for (0..10) |i| {
         const idx = trimmed_count + i;
-        try testing.expectEqual(first_node, pin_map.items[idx].node);
+        try testing.expectEqual(first_node, pin_map.get(idx).?.node);
     }
 
     // "d test" (6 chars) from last page
     for (0..6) |i| {
         const idx = trimmed_count + 10 + i;
-        try testing.expectEqual(last_node, pin_map.items[idx].node);
+        try testing.expectEqual(last_node, pin_map.get(idx).?.node);
     }
 }
 
@@ -4272,7 +4367,7 @@ test "PageList VT spanning two pages" {
     s.nextSlice("page two");
 
     // Format the entire PageList with VT
-    var pin_map: std.ArrayList(Pin) = .empty;
+    var pin_map: PinMap.Map = .empty;
     defer pin_map.deinit(alloc);
 
     var formatter: PageListFormatter = .init(pages, .vt);
@@ -4283,14 +4378,15 @@ test "PageList VT spanning two pages" {
     try testing.expectEqualStrings("\x1b[0m\x1b[1mpage one\x1b[0m\r\n\x1b[0m\x1b[1mpage two\x1b[0m", output);
 
     // Verify pin map
-    try testing.expectEqual(full_output.len, pin_map.items.len);
+    try testing.expectEqual(full_output.len, pin_map.count());
     const first_node = pages.pages.first.?;
     const last_node = pages.pages.last.?;
 
     // Just verify we have entries for both pages in the pin map
     var first_count: usize = 0;
     var last_count: usize = 0;
-    for (pin_map.items) |pin| {
+    for (0..pin_map.count()) |byte_i| {
+        const pin = pin_map.get(byte_i).?;
         if (pin.node == first_node) first_count += 1;
         if (pin.node == last_node) last_count += 1;
     }
@@ -4320,7 +4416,7 @@ test "PageList plain with x offset on single page" {
     const pages = &t.screens.active.pages;
     const node = pages.pages.first.?;
 
-    var pin_map: std.ArrayList(Pin) = .empty;
+    var pin_map: PinMap.Map = .empty;
     defer pin_map.deinit(alloc);
 
     var formatter: PageListFormatter = .init(pages, .plain);
@@ -4333,15 +4429,16 @@ test "PageList plain with x offset on single page" {
     try testing.expectEqualStrings("world\ntest case\nfoo", output);
 
     // Verify pin map
-    try testing.expectEqual(output.len, pin_map.items.len);
-    for (pin_map.items) |pin| {
+    try testing.expectEqual(output.len, pin_map.count());
+    for (0..pin_map.count()) |byte_i| {
+        const pin = pin_map.get(byte_i).?;
         try testing.expectEqual(node, pin.node);
     }
 
     // "world" starts at x=6, y=0
     for (0..5) |i| {
-        try testing.expectEqual(@as(size.CellCountInt, @intCast(6 + i)), pin_map.items[i].x);
-        try testing.expectEqual(@as(size.CellCountInt, 0), pin_map.items[i].y);
+        try testing.expectEqual(@as(size.CellCountInt, @intCast(6 + i)), pin_map.get(i).?.x);
+        try testing.expectEqual(@as(size.CellCountInt, 0), pin_map.get(i).?.y);
     }
 }
 
@@ -4381,7 +4478,7 @@ test "PageList plain with x offset spanning two pages" {
     const first_node = pages.pages.first.?;
     const last_node = pages.pages.last.?;
 
-    var pin_map: std.ArrayList(Pin) = .empty;
+    var pin_map: PinMap.Map = .empty;
     defer pin_map.deinit(alloc);
 
     var formatter: PageListFormatter = .init(pages, .plain);
@@ -4395,24 +4492,24 @@ test "PageList plain with x offset spanning two pages" {
     try testing.expectEqualStrings("world\nfoo", output);
 
     // Verify pin map
-    try testing.expectEqual(full_output.len, pin_map.items.len);
+    try testing.expectEqual(full_output.len, pin_map.count());
     const trimmed_count = full_output.len - output.len;
 
     // "world" (5 chars) from first page
     for (0..5) |i| {
         const idx = trimmed_count + i;
-        try testing.expectEqual(first_node, pin_map.items[idx].node);
-        try testing.expectEqual(@as(size.CellCountInt, @intCast(6 + i)), pin_map.items[idx].x);
+        try testing.expectEqual(first_node, pin_map.get(idx).?.node);
+        try testing.expectEqual(@as(size.CellCountInt, @intCast(6 + i)), pin_map.get(idx).?.x);
     }
 
     // \n - maps to last node as it represents the transition to new page
-    try testing.expectEqual(last_node, pin_map.items[trimmed_count + 5].node);
+    try testing.expectEqual(last_node, pin_map.get(trimmed_count + 5).?.node);
 
     // "foo" (3 chars) from last page
     for (0..3) |i| {
         const idx = trimmed_count + 6 + i;
-        try testing.expectEqual(last_node, pin_map.items[idx].node);
-        try testing.expectEqual(@as(size.CellCountInt, @intCast(i)), pin_map.items[idx].x);
+        try testing.expectEqual(last_node, pin_map.get(idx).?.node);
+        try testing.expectEqual(@as(size.CellCountInt, @intCast(i)), pin_map.get(idx).?.x);
     }
 }
 
@@ -4438,7 +4535,7 @@ test "PageList plain with start_x only" {
     const pages = &t.screens.active.pages;
     const node = pages.pages.first.?;
 
-    var pin_map: std.ArrayList(Pin) = .empty;
+    var pin_map: PinMap.Map = .empty;
     defer pin_map.deinit(alloc);
 
     var formatter: PageListFormatter = .init(pages, .plain);
@@ -4450,11 +4547,11 @@ test "PageList plain with start_x only" {
     try testing.expectEqualStrings("world", output);
 
     // Verify pin map
-    try testing.expectEqual(output.len, pin_map.items.len);
+    try testing.expectEqual(output.len, pin_map.count());
     for (0..5) |i| {
-        try testing.expectEqual(node, pin_map.items[i].node);
-        try testing.expectEqual(@as(size.CellCountInt, @intCast(6 + i)), pin_map.items[i].x);
-        try testing.expectEqual(@as(size.CellCountInt, 0), pin_map.items[i].y);
+        try testing.expectEqual(node, pin_map.get(i).?.node);
+        try testing.expectEqual(@as(size.CellCountInt, @intCast(6 + i)), pin_map.get(i).?.x);
+        try testing.expectEqual(@as(size.CellCountInt, 0), pin_map.get(i).?.y);
     }
 }
 
@@ -4480,7 +4577,7 @@ test "PageList plain with end_x only" {
     const pages = &t.screens.active.pages;
     const node = pages.pages.first.?;
 
-    var pin_map: std.ArrayList(Pin) = .empty;
+    var pin_map: PinMap.Map = .empty;
     defer pin_map.deinit(alloc);
 
     var formatter: PageListFormatter = .init(pages, .plain);
@@ -4492,23 +4589,23 @@ test "PageList plain with end_x only" {
     try testing.expectEqualStrings("hello world\ntes", output);
 
     // Verify pin map
-    try testing.expectEqual(output.len, pin_map.items.len);
+    try testing.expectEqual(output.len, pin_map.count());
 
     // "hello world" (11 chars) on y=0
     for (0..11) |i| {
-        try testing.expectEqual(node, pin_map.items[i].node);
-        try testing.expectEqual(@as(size.CellCountInt, @intCast(i)), pin_map.items[i].x);
-        try testing.expectEqual(@as(size.CellCountInt, 0), pin_map.items[i].y);
+        try testing.expectEqual(node, pin_map.get(i).?.node);
+        try testing.expectEqual(@as(size.CellCountInt, @intCast(i)), pin_map.get(i).?.x);
+        try testing.expectEqual(@as(size.CellCountInt, 0), pin_map.get(i).?.y);
     }
 
     // \n
-    try testing.expectEqual(node, pin_map.items[11].node);
+    try testing.expectEqual(node, pin_map.get(11).?.node);
 
     // "tes" (3 chars) on y=1
     for (0..3) |i| {
-        try testing.expectEqual(node, pin_map.items[12 + i].node);
-        try testing.expectEqual(@as(size.CellCountInt, @intCast(i)), pin_map.items[12 + i].x);
-        try testing.expectEqual(@as(size.CellCountInt, 1), pin_map.items[12 + i].y);
+        try testing.expectEqual(node, pin_map.get(12 + i).?.node);
+        try testing.expectEqual(@as(size.CellCountInt, @intCast(i)), pin_map.get(12 + i).?.x);
+        try testing.expectEqual(@as(size.CellCountInt, 1), pin_map.get(12 + i).?.y);
     }
 }
 
@@ -4763,7 +4860,7 @@ test "TerminalFormatter plain with pin_map" {
 
     s.nextSlice("hello, world");
 
-    var pin_map: std.ArrayList(Pin) = .empty;
+    var pin_map: PinMap.Map = .empty;
     defer pin_map.deinit(alloc);
 
     var formatter: TerminalFormatter = .init(&t, .plain);
@@ -4774,11 +4871,11 @@ test "TerminalFormatter plain with pin_map" {
     try testing.expectEqualStrings("hello, world", output);
 
     // Verify pin map
-    try testing.expectEqual(output.len, pin_map.items.len);
+    try testing.expectEqual(output.len, pin_map.count());
     const node = t.screens.active.pages.pages.first.?;
     for (0..output.len) |i| try testing.expectEqual(
         Pin{ .node = node, .x = @intCast(i), .y = 0 },
-        pin_map.items[i],
+        pin_map.get(i).?,
     );
 }
 
@@ -4801,7 +4898,7 @@ test "TerminalFormatter plain multiline with pin_map" {
 
     s.nextSlice("hello\r\nworld");
 
-    var pin_map: std.ArrayList(Pin) = .empty;
+    var pin_map: PinMap.Map = .empty;
     defer pin_map.deinit(alloc);
 
     var formatter: TerminalFormatter = .init(&t, .plain);
@@ -4812,22 +4909,22 @@ test "TerminalFormatter plain multiline with pin_map" {
     try testing.expectEqualStrings("hello\nworld", output);
 
     // Verify pin map
-    try testing.expectEqual(output.len, pin_map.items.len);
+    try testing.expectEqual(output.len, pin_map.count());
     const node = t.screens.active.pages.pages.first.?;
     // "hello" (5 chars)
     for (0..5) |i| {
-        try testing.expectEqual(node, pin_map.items[i].node);
-        try testing.expectEqual(@as(size.CellCountInt, @intCast(i)), pin_map.items[i].x);
-        try testing.expectEqual(@as(size.CellCountInt, 0), pin_map.items[i].y);
+        try testing.expectEqual(node, pin_map.get(i).?.node);
+        try testing.expectEqual(@as(size.CellCountInt, @intCast(i)), pin_map.get(i).?.x);
+        try testing.expectEqual(@as(size.CellCountInt, 0), pin_map.get(i).?.y);
     }
     // "\n" maps to end of first line
-    try testing.expectEqual(node, pin_map.items[5].node);
+    try testing.expectEqual(node, pin_map.get(5).?.node);
     // "world" (5 chars)
     for (0..5) |i| {
         const idx = 6 + i;
-        try testing.expectEqual(node, pin_map.items[idx].node);
-        try testing.expectEqual(@as(size.CellCountInt, @intCast(i)), pin_map.items[idx].x);
-        try testing.expectEqual(@as(size.CellCountInt, 1), pin_map.items[idx].y);
+        try testing.expectEqual(node, pin_map.get(idx).?.node);
+        try testing.expectEqual(@as(size.CellCountInt, @intCast(i)), pin_map.get(idx).?.x);
+        try testing.expectEqual(@as(size.CellCountInt, 1), pin_map.get(idx).?.y);
     }
 }
 
@@ -4852,7 +4949,7 @@ test "TerminalFormatter vt with palette and pin_map" {
     s.nextSlice("\x1b]4;0;rgb:12/34/56\x1b\\");
     s.nextSlice("test");
 
-    var pin_map: std.ArrayList(Pin) = .empty;
+    var pin_map: PinMap.Map = .empty;
     defer pin_map.deinit(alloc);
 
     var formatter: TerminalFormatter = .init(&t, .vt);
@@ -4862,10 +4959,10 @@ test "TerminalFormatter vt with palette and pin_map" {
     const output = builder.writer.buffered();
 
     // Verify pin map - palette bytes should be mapped to top left
-    try testing.expectEqual(output.len, pin_map.items.len);
+    try testing.expectEqual(output.len, pin_map.count());
     const node = t.screens.active.pages.pages.first.?;
     for (0..output.len) |i| {
-        try testing.expectEqual(node, pin_map.items[i].node);
+        try testing.expectEqual(node, pin_map.get(i).?.node);
     }
 }
 
@@ -4888,7 +4985,7 @@ test "TerminalFormatter with selection and pin_map" {
 
     s.nextSlice("line1\r\nline2\r\nline3");
 
-    var pin_map: std.ArrayList(Pin) = .empty;
+    var pin_map: PinMap.Map = .empty;
     defer pin_map.deinit(alloc);
 
     var formatter: TerminalFormatter = .init(&t, .plain);
@@ -4904,13 +5001,13 @@ test "TerminalFormatter with selection and pin_map" {
     try testing.expectEqualStrings("line2", output);
 
     // Verify pin map
-    try testing.expectEqual(output.len, pin_map.items.len);
+    try testing.expectEqual(output.len, pin_map.count());
     const node = t.screens.active.pages.pages.first.?;
     // "line2" (5 chars) from row 1
     for (0..5) |i| {
-        try testing.expectEqual(node, pin_map.items[i].node);
-        try testing.expectEqual(@as(size.CellCountInt, @intCast(i)), pin_map.items[i].x);
-        try testing.expectEqual(@as(size.CellCountInt, 1), pin_map.items[i].y);
+        try testing.expectEqual(node, pin_map.get(i).?.node);
+        try testing.expectEqual(@as(size.CellCountInt, @intCast(i)), pin_map.get(i).?.x);
+        try testing.expectEqual(@as(size.CellCountInt, 1), pin_map.get(i).?.y);
     }
 }
 
@@ -4933,7 +5030,7 @@ test "Screen plain single line" {
 
     s.nextSlice("hello, world");
 
-    var pin_map: std.ArrayList(Pin) = .empty;
+    var pin_map: PinMap.Map = .empty;
     defer pin_map.deinit(alloc);
 
     var formatter: ScreenFormatter = .init(t.screens.active, .plain);
@@ -4944,11 +5041,11 @@ test "Screen plain single line" {
     try testing.expectEqualStrings("hello, world", output);
 
     // Verify pin map
-    try testing.expectEqual(output.len, pin_map.items.len);
+    try testing.expectEqual(output.len, pin_map.count());
     const node = t.screens.active.pages.pages.first.?;
     for (0..output.len) |i| try testing.expectEqual(
         Pin{ .node = node, .x = @intCast(i), .y = 0 },
-        pin_map.items[i],
+        pin_map.get(i).?,
     );
 }
 
@@ -4971,7 +5068,7 @@ test "Screen plain multiline" {
 
     s.nextSlice("hello\r\nworld");
 
-    var pin_map: std.ArrayList(Pin) = .empty;
+    var pin_map: PinMap.Map = .empty;
     defer pin_map.deinit(alloc);
 
     var formatter: ScreenFormatter = .init(t.screens.active, .plain);
@@ -4982,22 +5079,22 @@ test "Screen plain multiline" {
     try testing.expectEqualStrings("hello\nworld", output);
 
     // Verify pin map
-    try testing.expectEqual(output.len, pin_map.items.len);
+    try testing.expectEqual(output.len, pin_map.count());
     const node = t.screens.active.pages.pages.first.?;
     // "hello" (5 chars)
     for (0..5) |i| {
-        try testing.expectEqual(node, pin_map.items[i].node);
-        try testing.expectEqual(@as(size.CellCountInt, @intCast(i)), pin_map.items[i].x);
-        try testing.expectEqual(@as(size.CellCountInt, 0), pin_map.items[i].y);
+        try testing.expectEqual(node, pin_map.get(i).?.node);
+        try testing.expectEqual(@as(size.CellCountInt, @intCast(i)), pin_map.get(i).?.x);
+        try testing.expectEqual(@as(size.CellCountInt, 0), pin_map.get(i).?.y);
     }
     // "\n" maps to end of first line
-    try testing.expectEqual(node, pin_map.items[5].node);
+    try testing.expectEqual(node, pin_map.get(5).?.node);
     // "world" (5 chars)
     for (0..5) |i| {
         const idx = 6 + i;
-        try testing.expectEqual(node, pin_map.items[idx].node);
-        try testing.expectEqual(@as(size.CellCountInt, @intCast(i)), pin_map.items[idx].x);
-        try testing.expectEqual(@as(size.CellCountInt, 1), pin_map.items[idx].y);
+        try testing.expectEqual(node, pin_map.get(idx).?.node);
+        try testing.expectEqual(@as(size.CellCountInt, @intCast(i)), pin_map.get(idx).?.x);
+        try testing.expectEqual(@as(size.CellCountInt, 1), pin_map.get(idx).?.y);
     }
 }
 
@@ -5020,7 +5117,7 @@ test "Screen plain with selection" {
 
     s.nextSlice("line1\r\nline2\r\nline3");
 
-    var pin_map: std.ArrayList(Pin) = .empty;
+    var pin_map: PinMap.Map = .empty;
     defer pin_map.deinit(alloc);
 
     var formatter: ScreenFormatter = .init(t.screens.active, .plain);
@@ -5036,13 +5133,13 @@ test "Screen plain with selection" {
     try testing.expectEqualStrings("line2", output);
 
     // Verify pin map
-    try testing.expectEqual(output.len, pin_map.items.len);
+    try testing.expectEqual(output.len, pin_map.count());
     const node = t.screens.active.pages.pages.first.?;
     // "line2" (5 chars) from row 1
     for (0..5) |i| {
-        try testing.expectEqual(node, pin_map.items[i].node);
-        try testing.expectEqual(@as(size.CellCountInt, @intCast(i)), pin_map.items[i].x);
-        try testing.expectEqual(@as(size.CellCountInt, 1), pin_map.items[i].y);
+        try testing.expectEqual(node, pin_map.get(i).?.node);
+        try testing.expectEqual(@as(size.CellCountInt, @intCast(i)), pin_map.get(i).?.x);
+        try testing.expectEqual(@as(size.CellCountInt, 1), pin_map.get(i).?.y);
     }
 }
 
@@ -5066,7 +5163,7 @@ test "Screen vt with cursor position" {
     // Position cursor at a specific location
     s.nextSlice("hello\r\nworld");
 
-    var pin_map: std.ArrayList(Pin) = .empty;
+    var pin_map: PinMap.Map = .empty;
     defer pin_map.deinit(alloc);
 
     var formatter: ScreenFormatter = .init(t.screens.active, .vt);
@@ -5093,16 +5190,16 @@ test "Screen vt with cursor position" {
     try testing.expectEqual(t.screens.active.cursor.y, t2.screens.active.cursor.y);
 
     // Verify pin map - the extras should be mapped to the last pin
-    try testing.expectEqual(output.len, pin_map.items.len);
+    try testing.expectEqual(output.len, pin_map.count());
     const node = t.screens.active.pages.pages.first.?;
     const content_len = "hello\r\nworld".len;
     // Content bytes map to their positions
     for (0..content_len) |i| {
-        try testing.expectEqual(node, pin_map.items[i].node);
+        try testing.expectEqual(node, pin_map.get(i).?.node);
     }
     // Extra bytes (cursor position) map to last content pin
     for (content_len..output.len) |i| {
-        try testing.expectEqual(node, pin_map.items[i].node);
+        try testing.expectEqual(node, pin_map.get(i).?.node);
     }
 }
 
@@ -5126,7 +5223,7 @@ test "Screen vt with style" {
     // Set some style attributes
     s.nextSlice("\x1b[1;31mhello");
 
-    var pin_map: std.ArrayList(Pin) = .empty;
+    var pin_map: PinMap.Map = .empty;
     defer pin_map.deinit(alloc);
 
     var formatter: ScreenFormatter = .init(t.screens.active, .vt);
@@ -5152,10 +5249,10 @@ test "Screen vt with style" {
     try testing.expect(t.screens.active.cursor.style.eql(t2.screens.active.cursor.style));
 
     // Verify pin map
-    try testing.expectEqual(output.len, pin_map.items.len);
+    try testing.expectEqual(output.len, pin_map.count());
     const node = t.screens.active.pages.pages.first.?;
     for (0..output.len) |i| {
-        try testing.expectEqual(node, pin_map.items[i].node);
+        try testing.expectEqual(node, pin_map.get(i).?.node);
     }
 }
 
@@ -5179,7 +5276,7 @@ test "Screen vt with hyperlink" {
     // Set a hyperlink
     s.nextSlice("\x1b]8;;http://example.com\x1b\\hello");
 
-    var pin_map: std.ArrayList(Pin) = .empty;
+    var pin_map: PinMap.Map = .empty;
     defer pin_map.deinit(alloc);
 
     var formatter: ScreenFormatter = .init(t.screens.active, .vt);
@@ -5213,10 +5310,10 @@ test "Screen vt with hyperlink" {
     }
 
     // Verify pin map
-    try testing.expectEqual(output.len, pin_map.items.len);
+    try testing.expectEqual(output.len, pin_map.count());
     const node = t.screens.active.pages.pages.first.?;
     for (0..output.len) |i| {
-        try testing.expectEqual(node, pin_map.items[i].node);
+        try testing.expectEqual(node, pin_map.get(i).?.node);
     }
 }
 
@@ -5240,7 +5337,7 @@ test "Screen vt with protection" {
     // Enable protection mode
     s.nextSlice("\x1b[1\"qhello");
 
-    var pin_map: std.ArrayList(Pin) = .empty;
+    var pin_map: PinMap.Map = .empty;
     defer pin_map.deinit(alloc);
 
     var formatter: ScreenFormatter = .init(t.screens.active, .vt);
@@ -5266,10 +5363,10 @@ test "Screen vt with protection" {
     try testing.expectEqual(t.screens.active.cursor.protected, t2.screens.active.cursor.protected);
 
     // Verify pin map
-    try testing.expectEqual(output.len, pin_map.items.len);
+    try testing.expectEqual(output.len, pin_map.count());
     const node = t.screens.active.pages.pages.first.?;
     for (0..output.len) |i| {
-        try testing.expectEqual(node, pin_map.items[i].node);
+        try testing.expectEqual(node, pin_map.get(i).?.node);
     }
 }
 
@@ -5293,7 +5390,7 @@ test "Screen vt with kitty keyboard" {
     // Set kitty keyboard flags (disambiguate + report_events = 3)
     s.nextSlice("\x1b[=3;1uhello");
 
-    var pin_map: std.ArrayList(Pin) = .empty;
+    var pin_map: PinMap.Map = .empty;
     defer pin_map.deinit(alloc);
 
     var formatter: ScreenFormatter = .init(t.screens.active, .vt);
@@ -5321,10 +5418,10 @@ test "Screen vt with kitty keyboard" {
     try testing.expectEqual(flags1, flags2);
 
     // Verify pin map
-    try testing.expectEqual(output.len, pin_map.items.len);
+    try testing.expectEqual(output.len, pin_map.count());
     const node = t.screens.active.pages.pages.first.?;
     for (0..output.len) |i| {
-        try testing.expectEqual(node, pin_map.items[i].node);
+        try testing.expectEqual(node, pin_map.get(i).?.node);
     }
 }
 
@@ -5348,7 +5445,7 @@ test "Screen vt with charsets" {
     // Set G0 to DEC special and shift to G1
     s.nextSlice("\x1b(0\x0ehello");
 
-    var pin_map: std.ArrayList(Pin) = .empty;
+    var pin_map: PinMap.Map = .empty;
     defer pin_map.deinit(alloc);
 
     var formatter: ScreenFormatter = .init(t.screens.active, .vt);
@@ -5379,10 +5476,10 @@ test "Screen vt with charsets" {
     );
 
     // Verify pin map
-    try testing.expectEqual(output.len, pin_map.items.len);
+    try testing.expectEqual(output.len, pin_map.count());
     const node = t.screens.active.pages.pages.first.?;
     for (0..output.len) |i| {
-        try testing.expectEqual(node, pin_map.items[i].node);
+        try testing.expectEqual(node, pin_map.get(i).?.node);
     }
 }
 

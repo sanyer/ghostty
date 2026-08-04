@@ -47,7 +47,6 @@ const Benchmark = @import("Benchmark.zig");
 const options = @import("options.zig");
 const Terminal = terminalpkg.Terminal;
 const Selection = terminalpkg.Selection;
-const Pin = terminalpkg.PageList.Pin;
 const global = @import("../global.zig");
 
 const log = std.log.scoped(.@"terminal-formatter-bench");
@@ -60,7 +59,7 @@ terminal: ?Terminal = null,
 output: std.Io.Writer.Allocating,
 
 /// Reused pin map storage for `--pin-map=true`.
-pins: std.ArrayList(Pin) = .empty,
+pins: formatterpkg.PinMap.Map = .empty,
 
 pub const Options = struct {
     /// Set by the shared CLI parser for string option ownership.
@@ -112,6 +111,14 @@ pub const Mode = enum {
 
     /// Print content and output sizes. Not a timing benchmark.
     report,
+
+    /// Semantic verification, not a timing benchmark: format the
+    /// terminal (must be `--emit=vt`), feed the output into a fresh
+    /// terminal of the same dimensions, format that, and verify the
+    /// two outputs converge to identical bytes. This proves the VT
+    /// output faithfully reconstructs the terminal content even when
+    /// the exact byte encoding changes.
+    roundtrip,
 };
 
 pub const Emit = enum {
@@ -166,6 +173,7 @@ pub fn benchmark(self: *TerminalFormatter) Benchmark {
             .noop => stepNoop,
             .format => stepFormat,
             .report => stepReport,
+            .roundtrip => stepRoundtrip,
         },
         .setupFn = setup,
         .teardownFn = teardown,
@@ -312,9 +320,11 @@ fn stepReport(ptr: *anyopaque) Benchmark.Error!void {
     // checked for identical output.
     const out_hash = std.hash.Wyhash.hash(0, self.output.written());
     var pin_hasher = std.hash.Wyhash.init(0);
-    for (self.pins.items) |pin| {
-        pin_hasher.update(std.mem.asBytes(&pin.x));
-        pin_hasher.update(std.mem.asBytes(&pin.y));
+    for (self.pins.points.items) |coord| {
+        const x: u16 = coord.x;
+        const y: u16 = @intCast(coord.y);
+        pin_hasher.update(std.mem.asBytes(&x));
+        pin_hasher.update(std.mem.asBytes(&y));
     }
 
     std.debug.print(
@@ -329,16 +339,108 @@ fn stepReport(ptr: *anyopaque) Benchmark.Error!void {
             self.opts.@"terminal-cols",
             rows * self.opts.@"terminal-cols",
             self.output.written().len,
-            self.pins.items.len,
+            self.pins.count(),
             out_hash,
             pin_hasher.final(),
         },
     );
+
+    // Pin map storage details on a separate line so the main report
+    // line remains comparable across implementations.
+    if (self.opts.@"pin-map") {
+        std.debug.print(
+            "terminal-formatter-pins points={d} nodes={d}\n",
+            .{ self.pins.points.items.len, self.pins.nodes.items.len },
+        );
+    }
+}
+
+fn stepRoundtrip(ptr: *anyopaque) Benchmark.Error!void {
+    const self: *TerminalFormatter = @ptrCast(@alignCast(ptr));
+    self.stepRoundtripImpl() catch |err| {
+        log.warn("roundtrip failed err={}", .{err});
+        return error.BenchmarkFailed;
+    };
+}
+
+/// Format the terminal, replay the output into a fresh terminal of the
+/// same dimensions, format that, and require both outputs to be
+/// identical. This verifies that the emitted VT sequences faithfully
+/// reconstruct the terminal contents (text, styles, wrapping) without
+/// requiring any specific byte encoding of the first output.
+fn stepRoundtripImpl(self: *TerminalFormatter) !void {
+    // Format the original terminal.
+    self.output.shrinkRetainingCapacity(0);
+    if (self.formatter()) |f_init| {
+        var f = f_init;
+        try f.format(&self.output.writer);
+    }
+    const first = self.output.written();
+
+    // Replay into a fresh terminal.
+    var t2 = try Terminal.init(global.io(), self.alloc, .{
+        .cols = self.opts.@"terminal-cols",
+        .rows = self.opts.@"terminal-rows",
+        .max_scrollback_bytes = null,
+        .max_scrollback_lines = null,
+    });
+    defer t2.deinit(self.alloc);
+    {
+        var stream = t2.vtStream();
+        defer stream.deinit();
+        stream.nextSlice(first);
+    }
+
+    // Format the replayed terminal identically.
+    var out2: std.Io.Writer.Allocating = .init(self.alloc);
+    defer out2.deinit();
+    var f2: formatterpkg.ScreenFormatter = .init(t2.screens.active, .{
+        .emit = self.opts.emit.format(),
+        .unwrap = self.opts.unwrap,
+    });
+    try f2.format(&out2.writer);
+    const second = out2.written();
+
+    const equal = std.mem.eql(u8, first, second);
+    std.debug.print(
+        "terminal-formatter roundtrip emit={s} bytes={d} replay_bytes={d} equal={}\n",
+        .{ @tagName(self.opts.emit), first.len, second.len, equal },
+    );
+
+    if (!equal) {
+        // Find the first differing offset to ease debugging.
+        const n = @min(first.len, second.len);
+        var i: usize = 0;
+        while (i < n and first[i] == second[i]) i += 1;
+        std.debug.print(
+            "terminal-formatter roundtrip mismatch offset={d} " ++
+                "first={f} second={f}\n",
+            .{
+                i,
+                std.zig.fmtString(first[i -| 32..@min(first.len, i + 32)]),
+                std.zig.fmtString(second[i -| 32..@min(second.len, i + 32)]),
+            },
+        );
+        return error.RoundtripMismatch;
+    }
 }
 
 test TerminalFormatter {
     const testing = std.testing;
     const impl: *TerminalFormatter = try .create(testing.allocator, .{});
+    defer impl.destroy(testing.allocator);
+
+    const bench = impl.benchmark();
+    _ = try bench.run(.once);
+}
+
+test "TerminalFormatter roundtrip" {
+    const testing = std.testing;
+    const impl: *TerminalFormatter = try .create(testing.allocator, .{
+        .mode = .roundtrip,
+        .@"terminal-rows" = 4,
+        .@"terminal-cols" = 8,
+    });
     defer impl.destroy(testing.allocator);
 
     const bench = impl.benchmark();
