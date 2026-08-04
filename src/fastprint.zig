@@ -6,7 +6,7 @@ const std = @import("std");
 /// Print a decimal type T. The buffer is expected to be large enough so if
 /// necessary use comptime with a buffer-too-large to determine your
 /// max size needed. Returns the length written.
-pub fn printDecimal(comptime T: type, buf: []u8, v: u8) usize {
+pub fn printDecimal(comptime T: type, buf: []u8, v: T) usize {
     // Note this only supports types as we need them.
     switch (T) {
         u8 => {
@@ -41,5 +41,28 @@ pub fn printDecimal(comptime T: type, buf: []u8, v: u8) usize {
         },
 
         else => comptime unreachable,
+    }
+}
+
+test printDecimal {
+    const testing = std.testing;
+    var buf: [16]u8 = undefined;
+
+    // u8: exercise 1, 2, and 3 digit values including boundaries.
+    const u8_cases = [_]u8{ 0, 1, 9, 10, 99, 100, 255 };
+    for (u8_cases) |v| {
+        var expected_buf: [3]u8 = undefined;
+        const expected = std.fmt.bufPrint(&expected_buf, "{d}", .{v}) catch unreachable;
+        const len = printDecimal(u8, &buf, v);
+        try testing.expectEqualStrings(expected, buf[0..len]);
+    }
+
+    // u21: exercise digit count boundaries up to the maximum.
+    const u21_cases = [_]u21{ 0, 9, 10, 128, 65535, 1114111, std.math.maxInt(u21) };
+    for (u21_cases) |v| {
+        var expected_buf: [8]u8 = undefined;
+        const expected = std.fmt.bufPrint(&expected_buf, "{d}", .{v}) catch unreachable;
+        const len = printDecimal(u21, &buf, v);
+        try testing.expectEqualStrings(expected, buf[0..len]);
     }
 }
