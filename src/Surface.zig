@@ -3683,8 +3683,8 @@ fn isMouseReporting(self: *const Surface) bool {
 }
 
 pub fn mouseReportingActive(self: *Surface) bool {
-    self.renderer_state.mutex.lock();
-    defer self.renderer_state.mutex.unlock();
+    self.renderer_state.mutex.lockUncancelable(global.io());
+    defer self.renderer_state.mutex.unlock(global.io());
     return self.isMouseReporting();
 }
 
