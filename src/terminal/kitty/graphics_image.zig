@@ -99,7 +99,7 @@ pub const LoadingImage = struct {
                 .height = t.height,
                 .compression = t.compression,
                 .format = t.format,
-                .usage = t.usage,
+                .metadata = .{ .transient = t.usage.transient },
             },
 
             .display = cmd.display(),
@@ -600,7 +600,18 @@ pub const Image = struct {
     format: command.Transmission.Format = .rgb,
     compression: command.Transmission.Compression = .none,
     data: Data = .{ .complete = "" },
-    usage: command.Transmission.Usage = .default,
+    metadata: packed struct(u32) {
+        /// The image's transient usage hint, used to prioritize eviction.
+        transient: bool = false,
+
+        /// Set this if the image was loaded without an ID or number. Such
+        /// images must not receive responses even though they currently get
+        /// IDs in the public range (which is bad!).
+        implicit_id: bool = false,
+
+        /// Number of placements referencing this image.
+        placement_count: u30 = 0,
+    } = .{},
 
     /// Unique, monotonically increasing stamp assigned each time an
     /// image is added to (or replaced in) an ImageStorage. A changed
@@ -609,12 +620,6 @@ pub const Image = struct {
     /// same (e.g. a retransmission of the same ID). Stamps order by
     /// transmission time. Zero means "never stored".
     generation: u64 = 0,
-
-    /// Set this to true if this image was loaded by a command that
-    /// doesn't specify an ID or number, since such commands should
-    /// not be responded to, even though we do currently give them
-    /// IDs in the public range (which is bad!).
-    implicit_id: bool = false,
 
     pub const Error = error{
         InvalidData,

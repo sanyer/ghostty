@@ -3555,12 +3555,12 @@ pub fn setKittyGraphicsSizeLimit(
     self: *Terminal,
     alloc: Allocator,
     limit: usize,
-) !void {
+) void {
     if (comptime !build_options.kitty_graphics) return;
     var it = self.screens.all.iterator();
     while (it.next()) |entry| {
         const screen: *Screen = entry.value.*;
-        try screen.kitty_images.setLimit(self.io(), alloc, screen, limit);
+        screen.kitty_images.setLimit(self.io(), alloc, screen, limit);
     }
 }
 
