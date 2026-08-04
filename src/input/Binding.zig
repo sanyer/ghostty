@@ -1524,7 +1524,7 @@ pub const Action = union(enum) {
         const value_info = @typeInfo(Value);
         switch (Value) {
             void => {},
-            []const u8 => try std.zig.stringEscape(value, writer),
+            []const u8 => try writer.print("{s}", .{value}),
             else => switch (value_info) {
                 .@"enum" => try writer.print("{t}", .{value}),
                 .float => try writer.print("{d}", .{value}),
