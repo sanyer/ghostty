@@ -1558,7 +1558,7 @@ fn printCell(
 
                 // So integrity checks pass. We fix this up later so we don't
                 // need to do this without safety checks.
-                if (comptime std.debug.runtime_safety) {
+                if (comptime build_options.slow_runtime_safety) {
                     cell.wide = .narrow;
                 }
 
