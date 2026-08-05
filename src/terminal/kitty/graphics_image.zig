@@ -357,9 +357,9 @@ pub const LoadingImage = struct {
     /// Returns true if path appears to be in a temporary directory.
     /// Copies logic from Kitty.
     fn isPathInTempDir(io: std.Io, dir: []const u8, path: []const u8) bool {
-        if (std.mem.startsWith(u8, path, "/tmp")) return true;
-        if (std.mem.startsWith(u8, path, "/dev/shm")) return true;
-        if (std.mem.startsWith(u8, path, dir)) return true;
+        if (isPathInDir("/tmp", path)) return true;
+        if (isPathInDir("/dev/shm", path)) return true;
+        if (isPathInDir(dir, path)) return true;
 
         // The temporary dir is sometimes a symlink. On macOS for
         // example /tmp is /private/var/...
@@ -369,7 +369,7 @@ pub const LoadingImage = struct {
             dir,
             &buf,
         ) catch return false];
-        if (std.mem.startsWith(u8, path, real_dir)) return true;
+        if (isPathInDir(real_dir, path)) return true;
 
         return false;
     }
@@ -626,6 +626,27 @@ pub const Rect = struct {
     bottom_right: PageList.Pin,
 };
 
+/// Returns true if `path` is `dir` or is contained within it, requiring a
+/// path-separator boundary so similarly prefixed directories do not match.
+fn isPathInDir(dir: []const u8, path: []const u8) bool {
+    if (dir.len == 0 or !std.mem.startsWith(u8, path, dir)) return false;
+    if (path.len == dir.len or std.fs.path.isSep(dir[dir.len - 1])) return true;
+    return std.fs.path.isSep(path[dir.len]);
+}
+
+test "temporary file path must be inside directory" {
+    const testing = std.testing;
+
+    try testing.expect(isPathInDir("/tmp", "/tmp/tty-graphics-protocol-image.data"));
+    try testing.expect(isPathInDir("/tmp/", "/tmp/tty-graphics-protocol-image.data"));
+    try testing.expect(isPathInDir("/tmp", "/tmp"));
+
+    try testing.expect(!isPathInDir("", "/tmp/tty-graphics-protocol-image.data"));
+    try testing.expect(!isPathInDir("/tmp", "/tmpX/tty-graphics-protocol-image.data"));
+    try testing.expect(!isPathInDir("/dev/shm", "/dev/shm-evil/tty-graphics-protocol-image.data"));
+    try testing.expect(!isPathInDir("/custom/tmp", "/custom/tmp-suffix/tty-graphics-protocol-image.data"));
+}
+
 // This specifically tests we ALLOW invalid RGB data because Kitty
 // documents that this should work.
 test "image load with invalid RGB data" {
@@ -859,6 +880,54 @@ test "image load: temporary file without correct path" {
 
     // Temporary file should still be there
     try tmp_dir.dir.access(testing.io, path, .{});
+}
+
+test "image load: temporary file outside directory prefix is rejected" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const io = testing.io;
+
+    var tmp_dir = testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+    try tmp_dir.dir.createDir(io, "temp", .default_dir);
+    try tmp_dir.dir.createDir(io, "temp-suffix", .default_dir);
+
+    var trusted_dir = try tmp_dir.dir.openDir(io, "temp", .{});
+    defer trusted_dir.close(io);
+    var outside_dir = try tmp_dir.dir.openDir(io, "temp-suffix", .{});
+    defer outside_dir.close(io);
+
+    const filename = "tty-graphics-protocol-image.data";
+    const data = @embedFile("testdata/image-rgb-none-20x15-2147483647-raw.data");
+    try outside_dir.writeFile(io, .{
+        .sub_path = filename,
+        .data = data,
+    });
+
+    var trusted_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const trusted_path = trusted_path_buf[0..try trusted_dir.realPath(io, &trusted_path_buf)];
+    var outside_path_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const outside_path = outside_path_buf[0..try outside_dir.realPathFile(io, filename, &outside_path_buf)];
+
+    var cmd: command.Command = .{
+        .control = .{ .transmit = .{
+            .format = .rgb,
+            .medium = .temporary_file,
+            .compression = .none,
+            .width = 20,
+            .height = 15,
+            .image_id = 31,
+        } },
+        .data = try alloc.dupe(u8, outside_path),
+    };
+    defer cmd.deinit(alloc);
+    try testing.expectError(
+        error.TemporaryFileNotInTempDir,
+        LoadingImage.init(io, alloc, &cmd, .allWithTempDir(trusted_path)),
+    );
+
+    // Rejection must happen before temporary-file cleanup is armed.
+    try outside_dir.access(io, filename, .{});
 }
 
 test "image load: rgb, not compressed, temporary file" {
