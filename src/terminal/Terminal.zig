@@ -490,9 +490,19 @@ pub fn printString(self: *Terminal, str: []const u8) !void {
 
 /// Print the previous printed character a repeated amount of times.
 pub fn printRepeat(self: *Terminal, count_req: usize) !void {
-    if (self.previous_char) |c| {
-        const count = @max(count_req, 1);
-        for (0..count) |_| try self.print(c);
+    const c = self.previous_char orelse return;
+    var remaining = @max(count_req, 1);
+
+    // Print the repeated codepoint in slices so that eligible runs
+    // take the batched printSlice fast path. printSlice is semantically
+    // identical to calling print per codepoint: ineligible characters
+    // or terminal states (insert mode, grapheme clustering, hyperlinks,
+    // etc.) fall back to the per-codepoint print() path internally.
+    var buf: [4096]u32 = @splat(c);
+    while (remaining > 0) {
+        const n = @min(remaining, buf.len);
+        try self.printSlice(buf[0..n]);
+        remaining -= n;
     }
 }
 
