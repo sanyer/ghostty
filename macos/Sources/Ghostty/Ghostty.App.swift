@@ -2164,7 +2164,7 @@ extension Ghostty {
                 DispatchQueue.main.async {
                     if let searchState = surfaceView.searchState {
                         if let needle = startSearch.needle, !needle.isEmpty {
-                            searchState.needle = needle
+                            searchState.setNeedle(needle)
                         }
                     } else {
                         surfaceView.searchState = Ghostty.SurfaceView.SearchState(from: startSearch)
