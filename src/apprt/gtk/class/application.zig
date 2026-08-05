@@ -717,6 +717,7 @@ pub const Application = extern struct {
             .mouse_visibility => Action.mouseVisibility(target, value),
 
             .move_tab => return Action.moveTab(target, value),
+            .move_tab_to_new_window => return Action.moveTabToNewWindow(target),
 
             .new_split => return Action.newSplit(target, value),
 
@@ -799,7 +800,6 @@ pub const Application = extern struct {
             .check_for_updates,
             .undo,
             .redo,
-            .move_tab_to_new_window,
             => {
                 log.warn("unimplemented action={}", .{action});
                 return false;
@@ -2355,6 +2355,26 @@ const Action = struct {
                     surface,
                     @intCast(value.amount),
                 );
+            },
+        }
+    }
+
+    pub fn moveTabToNewWindow(
+        target: apprt.Target,
+    ) bool {
+        switch (target) {
+            .app => return false,
+            .surface => |core| {
+                const surface = core.rt_surface.surface;
+                const window = ext.getAncestor(
+                    Window,
+                    surface.as(gtk.Widget),
+                ) orelse {
+                    log.warn("surface is not in a window, ignoring new_tab_to_new_window", .{});
+                    return false;
+                };
+
+                return window.moveTabToNewWindow(surface);
             },
         }
     }
