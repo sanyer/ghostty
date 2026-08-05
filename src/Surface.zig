@@ -860,7 +860,7 @@ inline fn surfaceMailbox(self: *Surface) Mailbox {
     };
 }
 
-/// Queue a message for the IO thread.
+/// Queue a message for the IO thread, taking ownership of `msg`.
 ///
 /// We centralize all our logic into this spot so we can intercept
 /// messages for example in readonly mode.
@@ -2826,11 +2826,11 @@ pub fn keyCallback(
         // an encoded value, we close the surface. We want to eventually
         // move this behavior to the apprt probably.
         if (self.child_exited) {
+            write_req.deinit();
             self.close();
             return .closed;
         }
 
-        errdefer write_req.deinit();
         self.queueIo(switch (write_req) {
             .small => |v| .{ .write_small = v },
             .stable => |v| .{ .write_stable = v },
@@ -2948,15 +2948,18 @@ fn maybeHandleBinding(
     // Determine if this entry has an action or if its a leader key.
     const leaf: input.Binding.Set.GenericLeaf = switch (entry.value_ptr.*) {
         .leader => |set| {
-            // Setup the next set we'll look at.
-            self.keyboard.sequence_set = set;
-
             // Store this event so that we can drain and encode on invalid.
             // We don't need to cap this because it is naturally capped by
             // the config validation.
             if (try self.encodeKey(event, insp_ev)) |req| {
-                try self.keyboard.sequence_queued.append(self.alloc, req);
+                self.keyboard.sequence_queued.append(self.alloc, req) catch |err| {
+                    req.deinit();
+                    return err;
+                };
             }
+
+            // Setup the next set we'll look at only after all fallible work.
+            self.keyboard.sequence_set = set;
 
             // Start or continue our key sequence
             _ = self.rt_app.performAction(
