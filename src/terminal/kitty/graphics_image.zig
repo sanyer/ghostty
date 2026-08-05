@@ -204,30 +204,13 @@ pub const LoadingImage = struct {
                 return error.InvalidData;
             };
             if (stat.size <= 0) return error.InvalidData;
-            break :stat @intCast(stat.size);
+            break :stat std.math.cast(usize, stat.size) orelse
+                return error.InvalidData;
         };
 
-        const expected_size: usize = switch (self.image.format) {
-            // Png we decode the full data size because later decoding will
-            // get the proper dimensions and assert validity.
-            .png => stat_size,
-
-            // For these formats we have a size we must have.
-            .gray, .gray_alpha, .rgb, .rgba => size: {
-                const bpp = command.Transmission.formatBpp(self.image.format);
-                break :size self.image.width * self.image.height * bpp;
-            },
-        };
-
-        // Our stat size must be at least the expected size otherwise
-        // the shared memory data is invalid.
-        if (stat_size < expected_size) {
-            log.warn(
-                "shared memory size too small expected={} actual={}",
-                .{ expected_size, stat_size },
-            );
-            return error.InvalidData;
-        }
+        // Get the memory range we'll read. Validate it to make sure
+        // it doesn't overflow.
+        const range = try self.sharedMemoryRange(t, stat_size);
 
         const map = std.posix.mmap(
             null,
@@ -242,16 +225,63 @@ pub const LoadingImage = struct {
         };
         defer std.posix.munmap(map);
 
-        // Our end size always uses the expected size so we cut off the
-        // padding for mmap alignment.
-        const start: usize = @intCast(t.offset);
-        const end: usize = if (t.size > 0) @min(
-            @as(usize, @intCast(t.offset)) + @as(usize, @intCast(t.size)),
-            expected_size,
-        ) else expected_size;
-
         assert(self.data.items.len == 0);
-        try self.data.appendSlice(alloc, map[start..end]);
+        try self.data.appendSlice(alloc, map[range.start..range.end]);
+    }
+
+    const SharedMemoryRange = struct {
+        start: usize,
+        end: usize,
+    };
+
+    /// Returns the byte range to copy from a shared memory object.
+    fn sharedMemoryRange(
+        self: *const LoadingImage,
+        t: command.Transmission,
+        stat_size: usize,
+    ) error{
+        InvalidData,
+        DimensionsTooLarge,
+    }!SharedMemoryRange {
+        const expected_size: ?usize = switch (self.image.format) {
+            // PNG dimensions come from the decoded data.
+            .png => null,
+
+            // Validate before multiplying because protocol dimensions are
+            // u32 values and may otherwise overflow in safe builds.
+            .gray, .gray_alpha, .rgb, .rgba => size: {
+                if (self.image.width > max_dimension or
+                    self.image.height > max_dimension)
+                {
+                    return error.DimensionsTooLarge;
+                }
+
+                const bpp: usize = command.Transmission.formatBpp(self.image.format);
+                break :size @as(usize, self.image.width) *
+                    @as(usize, self.image.height) * bpp;
+            },
+        };
+
+        // Get our start offset and validate its within the range of
+        // the statted data.
+        const start = std.math.cast(usize, t.offset) orelse
+            return error.InvalidData;
+        if (start > stat_size) return error.InvalidData;
+
+        // Validate that our length is within the stat range too.
+        const available = stat_size - start;
+        const data_size: usize = if (t.size > 0)
+            std.math.cast(usize, t.size) orelse return error.InvalidData
+        else if (self.image.compression == .none and expected_size != null)
+            expected_size.?
+        else
+            available;
+        if (data_size > max_size or data_size > available) {
+            return error.InvalidData;
+        }
+
+        // data_size <= available guarantees this addition cannot overflow.
+        return .{ .start = start, .end = start + data_size };
     }
 
     /// Reads the data from a temporary file and returns it. This allocates
@@ -666,6 +696,67 @@ test "temporary file path must be inside directory" {
     try testing.expect(!isPathInDir("/tmp", "/tmpX/tty-graphics-protocol-image.data"));
     try testing.expect(!isPathInDir("/dev/shm", "/dev/shm-evil/tty-graphics-protocol-image.data"));
     try testing.expect(!isPathInDir("/custom/tmp", "/custom/tmp-suffix/tty-graphics-protocol-image.data"));
+}
+
+test "shared memory range with offset and size" {
+    const testing = std.testing;
+
+    const loading: LoadingImage = .{
+        .image = .{
+            .width = 1,
+            .height = 1,
+            .format = .rgb,
+        },
+        .quiet = .no,
+        .temporary_directory = null,
+    };
+
+    const explicit = try loading.sharedMemoryRange(.{
+        .offset = 2,
+        .size = 3,
+    }, 5);
+    try testing.expectEqual(@as(usize, 2), explicit.start);
+    try testing.expectEqual(@as(usize, 5), explicit.end);
+
+    const implicit = try loading.sharedMemoryRange(.{
+        .offset = 2,
+    }, 5);
+    try testing.expectEqual(@as(usize, 2), implicit.start);
+    try testing.expectEqual(@as(usize, 5), implicit.end);
+}
+
+test "shared memory range rejects out of bounds offset" {
+    const loading: LoadingImage = .{
+        .image = .{
+            .width = 1,
+            .height = 1,
+            .format = .rgb,
+        },
+        .quiet = .no,
+        .temporary_directory = null,
+    };
+
+    try std.testing.expectError(
+        error.InvalidData,
+        loading.sharedMemoryRange(.{ .offset = 4 }, 3),
+    );
+}
+
+test "shared memory range validates dimensions before multiplication" {
+    const loading: LoadingImage = .{
+        .image = .{
+            .width = std.math.maxInt(u32),
+            .height = std.math.maxInt(u32),
+            .format = .rgba,
+        },
+        .quiet = .no,
+        .temporary_directory = null,
+    };
+
+    try std.testing.expectError(
+        error.DimensionsTooLarge,
+        loading.sharedMemoryRange(.{}, 1),
+    );
 }
 
 // This specifically tests we ALLOW invalid RGB data because Kitty
