@@ -5694,7 +5694,8 @@ fn writeScreenFile(
 ) !void {
     // Create a temporary directory to store our scrollback.
     var tmp_dir = try internal_os.TempDir.init();
-    errdefer tmp_dir.deinit();
+    var retain_tmp_dir = false;
+    defer if (retain_tmp_dir) tmp_dir.close(.retain) else tmp_dir.deinit();
 
     var filename_buf: [std.fs.max_path_bytes]u8 = undefined;
     const filename = try std.fmt.bufPrint(
@@ -5764,7 +5765,6 @@ fn writeScreenFile(
 
         const sel = sel_ orelse {
             // If we have no selection we have no data so we do nothing.
-            tmp_dir.deinit();
             return;
         };
 
@@ -5818,6 +5818,9 @@ fn writeScreenFile(
             path,
         ), .unlocked),
     }
+
+    // The action accepted the path, so retain the file for its consumer.
+    retain_tmp_dir = true;
 }
 
 /// Call this to complete a clipboard request sent to apprt. This should
