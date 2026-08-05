@@ -319,6 +319,14 @@ pub const ImageStorage = struct {
             p,
         });
 
+        // Tracked pins are marked garbage when their underlying history is
+        // pruned. Kitty removes placements once they scroll out of retained
+        // history, so reclaim those placements before growing the map for a
+        // new one. If allocation below fails, the sweep is still a content
+        // mutation and must be visible to consumers.
+        const removed_garbage = self.removeGarbagePlacements(s);
+        errdefer if (removed_garbage) self.markMutated(io);
+
         // The important piece here is that the placement ID needs to
         // be marked internal if it is zero. This allows multiple placements
         // to be added for the same image. If it is non-zero, then it is
@@ -343,6 +351,29 @@ pub const ImageStorage = struct {
         gop.value_ptr.* = p;
 
         self.markMutated(io);
+    }
+
+    /// Remove pin-backed placements whose tracked content has been pruned.
+    /// Virtual placements have no tracked screen location and are retained.
+    fn removeGarbagePlacements(
+        self: *ImageStorage,
+        s: *terminal.Screen,
+    ) bool {
+        var removed = false;
+        var it = self.placements.iterator();
+        while (it.next()) |entry| {
+            const pin = switch (entry.value_ptr.location) {
+                .pin => |pin| pin,
+                .virtual => continue,
+            };
+            if (!pin.garbage) continue;
+
+            entry.value_ptr.deinit(s);
+            self.placements.removeByPtr(entry.key_ptr);
+            removed = true;
+        }
+
+        return removed;
     }
 
     fn clearPlacements(self: *ImageStorage, s: *terminal.Screen) void {
@@ -990,6 +1021,7 @@ pub const ImageStorage = struct {
                 .pin => |p| p,
                 .virtual => return null,
             };
+            if (pin.garbage) return null;
 
             // A zero pixel-sized placement can produce a zero grid size when
             // pixel geometry is unavailable. It occupies no rectangle.
@@ -1089,6 +1121,43 @@ test "storage: replacing placement releases tracked pin" {
         s.placements.get(.{
             .image_id = 1,
             .placement_id = .{ .tag = .external, .id = 1 },
+        }).?.location.pin,
+    );
+}
+
+test "storage: adding placement reclaims garbage placements" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const io = testing.io;
+    var t = try terminal.Terminal.init(io, alloc, .{ .cols = 3, .rows = 3 });
+    defer t.deinit(alloc);
+
+    var s: ImageStorage = .{};
+    defer s.deinit(alloc, t.screens.active);
+    try s.addImage(io, alloc, .{ .id = 1 });
+
+    const tracked = t.screens.active.pages.countTrackedPins();
+    const old_pin = try trackPin(&t, .{ .x = 0, .y = 0 });
+    try s.addPlacement(io, alloc, t.screens.active, 1, 0, .{
+        .location = .{ .pin = old_pin },
+    });
+    old_pin.garbage = true;
+
+    const new_pin = try trackPin(&t, .{ .x = 1, .y = 1 });
+    try s.addPlacement(io, alloc, t.screens.active, 1, 0, .{
+        .location = .{ .pin = new_pin },
+    });
+
+    try testing.expectEqual(@as(usize, 1), s.placements.count());
+    try testing.expectEqual(
+        tracked + 1,
+        t.screens.active.pages.countTrackedPins(),
+    );
+    try testing.expectEqual(
+        new_pin,
+        s.placements.get(.{
+            .image_id = 1,
+            .placement_id = .{ .tag = .internal, .id = 1 },
         }).?.location.pin,
     );
 }
@@ -1718,6 +1787,19 @@ test "storage: placement geometry handles untrusted dimensions" {
         const rect = placement.rect(.{ .width = 1, .height = 1 }, &t).?;
         try testing.expectEqual(@as(size.CellCountInt, 1), rect.bottom_right.x);
     }
+
+    // A garbage pin represents content that has been pruned from retained
+    // history. Its fallback location must not make the placement visible.
+    pin.garbage = true;
+    {
+        const placement: ImageStorage.Placement = .{
+            .location = .{ .pin = pin },
+            .columns = 1,
+            .rows = 1,
+        };
+        try testing.expect(placement.rect(.{ .width = 1, .height = 1 }, &t) == null);
+    }
+    pin.garbage = false;
 
     // Terminals can temporarily have no pixel geometry. A placement whose
     // computed grid is empty has no rectangle, so rect must not subtract one
