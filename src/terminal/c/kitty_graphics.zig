@@ -631,9 +631,8 @@ fn computeViewportPos(
     // is above the viewport, or its top edge is at or below the
     // viewport's last row.
     const grid_size = p.gridSize(image.*, t);
-    const rows_i32: i32 = @intCast(grid_size.rows);
-    const term_rows: i32 = @intCast(t.rows);
-    const visible = vp_row + rows_i32 > 0 and vp_row < term_rows;
+    const bottom_row = @as(i64, vp_row) + @as(i64, grid_size.rows);
+    const visible = bottom_row > 0 and vp_row < @as(i32, t.rows);
 
     return .{ .col = vp_col, .row = vp_row, .visible = visible };
 }
@@ -1622,6 +1621,39 @@ test "placement_render_info returns all fields" {
     try testing.expectEqual(0, ri.source_y);
     try testing.expectEqual(1, ri.source_width);
     try testing.expectEqual(2, ri.source_height);
+}
+
+test "placement_render_info handles maximum grid dimensions" {
+    if (comptime !build_options.kitty_graphics) return error.SkipZigTest;
+
+    var t: terminal_c.Terminal = null;
+    try testing.expectEqual(Result.success, terminal_c.new(
+        &lib.alloc.test_allocator,
+        &t,
+        80,
+        24,
+    ));
+    defer terminal_c.free(t);
+    try testing.expectEqual(Result.success, terminal_c.resize(t, 80, 24, 10, 20));
+
+    const cmd = "\x1b_Ga=T,t=d,f=24,i=1,p=1,s=1,v=2,c=1,r=4294967295,C=1;////////\x1b\\";
+    terminal_c.vt_write(t, cmd.ptr, cmd.len);
+
+    var graphics: KittyGraphics = undefined;
+    try testing.expectEqual(Result.success, terminal_c.get(t, .kitty_graphics, @ptrCast(&graphics)));
+    const img = image_get_handle(graphics, 1);
+    try testing.expect(img != null);
+
+    var iter: PlacementIterator = null;
+    try testing.expectEqual(Result.success, placement_iterator_new(&lib.alloc.test_allocator, &iter));
+    defer placement_iterator_free(iter);
+    try testing.expectEqual(Result.success, get(graphics, .placement_iterator, @ptrCast(&iter)));
+    try testing.expect(placement_iterator_next(iter));
+
+    var ri: PlacementRenderInfo = .{};
+    try testing.expectEqual(Result.success, placement_render_info(iter, img, t, &ri));
+    try testing.expect(ri.viewport_visible);
+    try testing.expectEqual(std.math.maxInt(u32), ri.grid_rows);
 }
 
 test "placement_render_info off-screen sets viewport_visible false" {
