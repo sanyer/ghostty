@@ -256,6 +256,7 @@ fn display(
     storage.addPlacement(
         io,
         alloc,
+        terminal.screens.active,
         img.id,
         result.placement_id,
         p,
