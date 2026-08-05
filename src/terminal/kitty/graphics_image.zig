@@ -9,6 +9,7 @@ const fastmem = @import("../../fastmem.zig");
 const command = @import("graphics_command.zig");
 const PageList = @import("../PageList.zig");
 const sys = @import("../sys.zig");
+const LimitedAllocator = @import("../../datastruct/main.zig").LimitedAllocator;
 
 const log = std.log.scoped(.kitty_gfx);
 
@@ -551,14 +552,20 @@ pub const LoadingImage = struct {
 
         const decode_png_fn = sys.decode_png orelse
             return error.UnsupportedFormat;
+
+        var limited: LimitedAllocator = .init(alloc, max_size);
+        const decode_alloc = limited.allocator();
         const result = decode_png_fn(
-            alloc,
+            decode_alloc,
             self.data.items,
         ) catch |err| switch (err) {
             error.InvalidData => return error.InvalidData,
-            error.OutOfMemory => return error.OutOfMemory,
+            error.OutOfMemory => if (limited.limit_exceeded)
+                return error.InvalidData
+            else
+                return error.OutOfMemory,
         };
-        defer alloc.free(result.data);
+        defer decode_alloc.free(result.data);
 
         if (result.data.len > max_size) {
             log.warn("png image too large size={} max_size={}", .{ result.data.len, max_size });
@@ -1244,6 +1251,72 @@ test "image load: png, not compressed, regular file" {
     try testing.expect(img.compression == .none);
     try testing.expect(img.format == .rgba);
     try tmp_dir.dir.access(testing.io, path, .{});
+}
+
+test "image load: png rejects oversized decoder allocation" {
+    const testing = std.testing;
+
+    const oversized_decoder = struct {
+        fn decode(
+            alloc: Allocator,
+            _: []const u8,
+        ) sys.DecodeError!sys.Image {
+            const data = try alloc.alloc(u8, max_size + 1);
+            return .{
+                .width = 1,
+                .height = 1,
+                .data = data,
+            };
+        }
+    }.decode;
+
+    const original_decode_png = sys.decode_png;
+    defer sys.decode_png = original_decode_png;
+    sys.decode_png = &oversized_decoder;
+
+    // Fail any allocation which reaches the underlying allocator. The size
+    // limiter should reject the decoder's request before it gets that far.
+    var failing = testing.FailingAllocator.init(testing.allocator, .{
+        .fail_index = 0,
+    });
+    const alloc = failing.allocator();
+
+    var loading: LoadingImage = .{
+        .image = .{ .format = .png },
+        .quiet = .no,
+        .temporary_directory = null,
+    };
+    defer loading.deinit(alloc);
+
+    try testing.expectError(error.InvalidData, loading.complete(alloc));
+    try testing.expect(!failing.has_induced_failure);
+}
+
+test "image load: png rejects oversized Wuffs image before allocation" {
+    if (sys.decode_png == null) return error.SkipZigTest;
+
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    // Turn the small test PNG into a 32768x32767 image. Its decoded RGBA
+    // size is just under Wuffs' 4 GiB package limit but over Kitty's 400 MiB
+    // limit, which previously allowed the large allocation to happen first.
+    var data = @embedFile("testdata/image-png-none-50x76-2147483647-raw.data").*;
+    std.mem.writeInt(u32, data[16..20], 32768, .big);
+    std.mem.writeInt(u32, data[20..24], 32767, .big);
+    std.mem.writeInt(u32, data[29..33], std.hash.Crc32.hash(data[12..29]), .big);
+
+    const cmd: command.Command = .{
+        .control = .{ .transmit = .{
+            .format = .png,
+            .medium = .direct,
+        } },
+        .data = &data,
+    };
+    var loading = try LoadingImage.init(testing.io, alloc, &cmd, .direct);
+    defer loading.deinit(alloc);
+
+    try testing.expectError(error.InvalidData, loading.complete(alloc));
 }
 
 test "limits: direct medium always allowed" {
