@@ -334,6 +334,7 @@ const DerivedConfig = struct {
     title: ?[:0]const u8,
     title_report: bool,
     links: []DerivedConfig.Link,
+    link_osc8: bool,
     link_previews: configpkg.LinkPreviews,
     scroll_to_bottom: configpkg.Config.ScrollToBottom,
     notify_on_command_finish: configpkg.Config.NotifyOnCommandFinish,
@@ -413,6 +414,7 @@ const DerivedConfig = struct {
             .title = config.title,
             .title_report = config.@"title-report",
             .links = links,
+            .link_osc8 = config.@"link-osc8",
             .link_previews = config.@"link-previews",
             .scroll_to_bottom = config.@"scroll-to-bottom",
             .notify_on_command_finish = config.@"notify-on-command-finish",
@@ -4326,7 +4328,9 @@ fn linkAtPos(
     const mouse_mods = self.mouseModsWithCapture(self.mouse.mods);
 
     // If we have the proper modifiers set then we can check for OSC8 links.
-    if (mouse_mods.equal(input.ctrlOrSuper(.{}))) hyperlink: {
+    if (self.config.link_osc8 and
+        mouse_mods.equal(input.ctrlOrSuper(.{})))
+    hyperlink: {
         const rac = mouse_pin.rowAndCell();
         const cell = rac.cell;
         if (!cell.hyperlink) break :hyperlink;
@@ -4436,7 +4440,7 @@ fn processLinks(self: *Surface, pos: apprt.CursorPos) !bool {
                 log.warn("failed to get URI for OSC8 hyperlink", .{});
                 return false;
             };
-            try self.openUrl(.{ .kind = .unknown, .url = uri });
+            try self.openUrl(.{ .kind = .osc8, .url = uri });
         },
     }
 
