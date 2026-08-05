@@ -2270,7 +2270,12 @@ pub const Surface = extern struct {
 
         // Logic around bell reaction happens on every event even if we're
         // already in the ringing state.
-        if (ringing) self.ringBell();
+        if (ringing) {
+            self.ringBell();
+            // focus clears ringing state, so we should not change state to
+            // ringing if we're already focused
+            if (self.getFocused()) return;
+        }
 
         // Property change only happens on actual state change
         const priv = self.private();
