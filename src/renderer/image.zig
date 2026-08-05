@@ -1000,7 +1000,7 @@ test "kitty renderer ignores pending payloads and retains native placements" {
     const pin = try t.screens.active.pages.trackPin(
         t.screens.active.cursor.page_pin.*,
     );
-    try storage.addPlacement(io, alloc, 1, 1, .{
+    try storage.addPlacement(io, alloc, t.screens.active, 1, 1, .{
         .location = .{ .pin = pin },
         .columns = 1,
         .rows = 1,

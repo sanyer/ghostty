@@ -1231,6 +1231,7 @@ test "complete snapshot preserves Kitty virtual placeholders" {
     try t.screens.active.kitty_images.addPlacement(
         testing.io,
         testing.allocator,
+        t.screens.active,
         1,
         0,
         .{
