@@ -667,12 +667,20 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
 
         // More than 1 window means we have tabs and we're closing a tab
         if window?.tabGroup?.windows.count ?? 0 > 1 {
-            closeTab(nil)
+            if withConfirmation {
+                closeTab(nil)
+            } else {
+                closeTabImmediately()
+            }
             return
         }
 
         // 1 window, closing the window
-        closeWindow(nil)
+        if withConfirmation {
+            closeWindow(nil)
+        } else {
+            closeWindowImmediately()
+        }
     }
 
     func closeTabImmediately(registerRedo: Bool = true) {
