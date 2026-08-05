@@ -56,6 +56,11 @@ pub const Handler = struct {
     /// effects.
     effects: Effects = .readonly,
 
+    /// Whether CSI 21 t may report the terminal title. This is disabled by
+    /// default because reporting an attacker-controlled title to the pty can
+    /// inject text into the input stream of the foreground process.
+    title_report: bool = false,
+
     /// The APC command handler maintains the APC state. APC is like
     /// CSI or OSC, but it is a private escape sequence that is used
     /// to send commands to the terminal emulator. This is used by
@@ -565,6 +570,7 @@ pub const Handler = struct {
         // Build the response.
         switch (style) {
             .csi_21_t => {
+                if (!self.title_report) return;
                 const title = self.terminal.getTitle() orelse "";
                 aw.writer.print("\x1b]l{s}\x1b\\", .{title}) catch return;
             },
@@ -2684,7 +2690,7 @@ test "size report no effect callback" {
     try testing.expect(S.written == null);
 }
 
-test "size report csi_21_t title" {
+test "size report csi_21_t title disabled by default" {
     var t: Terminal = try .init(testing.io, testing.allocator, .{ .cols = 80, .rows = 24 });
     defer t.deinit(testing.allocator);
 
@@ -2698,6 +2704,33 @@ test "size report csi_21_t title" {
 
     var handler: Handler = .init(&t);
     handler.effects.write_pty = &S.writePty;
+
+    var s: Stream = .init(.{ .allocator = testing.allocator, .handler = handler });
+    defer s.deinit();
+
+    // Set a title first
+    s.nextSlice("\x1b]2;My Title\x1b\\");
+
+    // CSI 21 t - report title (no size effect needed)
+    s.nextSlice("\x1b[21t");
+    try testing.expect(S.written == null);
+}
+
+test "size report csi_21_t title enabled" {
+    var t: Terminal = try .init(testing.io, testing.allocator, .{ .cols = 80, .rows = 24 });
+    defer t.deinit(testing.allocator);
+
+    const S = struct {
+        var written: ?[]const u8 = null;
+        fn writePty(_: *Handler, data: [:0]const u8) void {
+            written = testing.allocator.dupe(u8, data) catch @panic("OOM");
+        }
+    };
+    S.written = null;
+
+    var handler: Handler = .init(&t);
+    handler.effects.write_pty = &S.writePty;
+    handler.title_report = true;
 
     var s: Stream = .init(.{ .allocator = testing.allocator, .handler = handler });
     defer s.deinit();
