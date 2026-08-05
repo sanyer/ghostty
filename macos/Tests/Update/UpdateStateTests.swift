@@ -25,11 +25,9 @@ struct UpdateStateTests {
     }
 
     @Test func testInstallingEquality() {
-        let state1: UpdateState = .installing(.init(isAutoUpdate: false, retryTerminatingApplication: {}, dismiss: {}))
-        let state2: UpdateState = .installing(.init(isAutoUpdate: false, retryTerminatingApplication: {}, dismiss: {}))
+        let state1: UpdateState = .installing(.init(retryTerminatingApplication: {}))
+        let state2: UpdateState = .installing(.init(retryTerminatingApplication: {}))
         #expect(state1 == state2)
-        let state3: UpdateState = .installing(.init(isAutoUpdate: true, retryTerminatingApplication: {}, dismiss: {}))
-        #expect(state3 != state2)
     }
 
     @Test func testPermissionRequestEquality() {
@@ -100,13 +98,28 @@ struct UpdateStateTests {
 
     // MARK: - isHidden Tests
 
-    @Test func testIsIdleTrue() {
-        let state: UpdateState = .idle
-        #expect(state.isHidden == true)
+    @Test(
+        arguments: [
+            (UpdateState.idle, true),
+            (.installing(.init(appcastItem: .empty(), retryTerminatingApplication: {})), true),
+            (.checking(.init(cancel: {})), false),
+            (.installing(.init(retryTerminatingApplication: {})), false)
+        ]
+    )
+    func testIsHidden(_ state: UpdateState, expected: Bool) {
+        #expect(state.isHidden == expected)
     }
 
-    @Test func testIsIdleFalse() {
-        let state: UpdateState = .checking(.init(cancel: {}))
-        #expect(state.isHidden == false)
+    // MARK: - shouldTerminateWithoutWarning Tests
+
+    @Test(
+        arguments: [
+            (UpdateState.idle, false),
+            (.installing(.init(appcastItem: .empty(), retryTerminatingApplication: {})), false),
+            (.installing(.init(retryTerminatingApplication: {})), true)
+        ]
+    )
+    func testShouldTerminateWithoutWarning(_ state: UpdateState, expected: Bool) {
+        #expect(state.shouldTerminateWithoutWarning == expected)
     }
 }
