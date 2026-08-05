@@ -1449,13 +1449,17 @@ test "DECRQSS responses" {
     s.nextSlice("\x1B[1m\x1BP$qm\x1B\\");
     try S.expectResponse("\x1BP1$r0;1m\x1B\\");
 
+    // Overline
+    s.nextSlice("\x1B[0;53m\x1BP$qm\x1B\\");
+    try S.expectResponse("\x1BP1$r0;53m\x1B\\");
+
     // Requests larger than the parser's fixed request buffer are ignored,
     // and the next DCS command must still be processed normally.
     s.nextSlice("\x1BP$qfoo\x1B\\");
     try testing.expectEqual(@as(usize, 0), S.calls);
     try testing.expect(!s.handler.semantic_failure);
     s.nextSlice("\x1BP$qm\x1B\\");
-    try S.expectResponse("\x1BP1$r0;1m\x1B\\");
+    try S.expectResponse("\x1BP1$r0;53m\x1B\\");
 }
 
 test "DECRQSS without write effect is ignored" {
