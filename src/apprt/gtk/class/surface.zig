@@ -36,7 +36,6 @@ const Window = @import("window.zig").Window;
 const InspectorWindow = @import("inspector_window.zig").InspectorWindow;
 const SplitTree = @import("split_tree.zig").SplitTree;
 const i18n = @import("../../../os/i18n.zig");
-const media = @import("../media.zig");
 const global = @import("../../../global.zig");
 const gtk_version = @import("../gtk_version.zig");
 
@@ -676,12 +675,6 @@ pub const Surface = extern struct {
         // true) under various scenarios, but can also manually be set to
         // false by a parent widget.
         bell_ringing: bool = false,
-
-        // The audio bell's MediaFile, reused across bells so we don't leak a
-        // GStreamer pipeline (and its GL threads) on every ring. Built lazily
-        // on the first audio bell and rebuilt when `bell-audio-path` changes;
-        // unref'd on dispose. See ringBell and media.zig.
-        bell_media: ?*gtk.MediaFile = null,
 
         /// True if this surface is in an error state. This is currently
         /// a simple boolean with no additional information on WHAT the
@@ -1880,11 +1873,6 @@ pub const Surface = extern struct {
             priv.config = null;
         }
 
-        if (priv.bell_media) |v| {
-            v.unref();
-            priv.bell_media = null;
-        }
-
         if (priv.vadj_signal_group) |group| {
             group.setTarget(null);
             group.as(gobject.Object).unref();
@@ -2544,8 +2532,6 @@ pub const Surface = extern struct {
     /// Handle bell features that need to happen every time a BEL is received
     /// Currently this is audio and system but this could change in the future.
     fn ringBell(self: *Self) void {
-        const priv = self.private();
-
         // Emit the signal
         signals.bell.impl.emit(
             self,
@@ -2557,33 +2543,7 @@ pub const Surface = extern struct {
         // Activate actions if they exist
         _ = self.as(gtk.Widget).activateAction("tab.ring-bell", null);
         _ = self.as(gtk.Widget).activateAction("win.ring-bell", null);
-
-        const config = if (priv.config) |c| c.get() else return;
-
-        // Do our sound
-        if (config.@"bell-features".audio) audio: {
-            const config_path = config.@"bell-audio-path" orelse break :audio;
-            const path, const required = switch (config_path) {
-                .optional => |path| .{ path, false },
-                .required => |path| .{ path, true },
-            };
-
-            const volume = std.math.clamp(
-                config.@"bell-audio-volume",
-                0.0,
-                1.0,
-            );
-
-            // Reuse one MediaFile per surface (rebuilt only when the path
-            // changes) so each bell replays the same pipeline instead of
-            // leaking a fresh one. Assign unconditionally: bellMediaFile frees
-            // any stale MediaFile and returns the current slot value (possibly
-            // null if the path is now inaccessible), so priv.bell_media never
-            // dangles.
-            priv.bell_media = media.bellMediaFile(priv.bell_media, path, required);
-            const media_file = priv.bell_media orelse break :audio;
-            media.playBell(media_file, volume);
-        }
+        _ = self.as(gtk.Widget).activateAction("app.ring-bell", null);
     }
 
     //---------------------------------------------------------------
