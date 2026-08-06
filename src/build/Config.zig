@@ -73,11 +73,15 @@ pub fn init(b: *std.Build, appVersion: []const u8, libVersion: []const u8) !Conf
     // Setup our standard Zig target and optimize options, i.e.
     // `-Doptimize` and `-Dtarget`.
     const optimize = b.standardOptimizeOption(.{});
+
+    // Default dependency builds to libghostty-vt-only mode. Consumers can
+    // still explicitly disable this to request the full Ghostty build.
+    const is_dep = b.dep_prefix.len > 0;
     const emit_lib_vt = b.option(
         bool,
         "emit-lib-vt",
         "Set defaults for a libghostty-vt-only build (disables xcframework, macOS app, and docs).",
-    ) orelse false;
+    ) orelse is_dep;
     const target = target: {
         var result = b.standardTargetOptions(.{});
 
@@ -113,10 +117,6 @@ pub fn init(b: *std.Build, appVersion: []const u8, libVersion: []const u8) !Conf
 
         break :target result;
     };
-
-    // Detect if Ghostty is a dependency of another project.
-    // dep_prefix is non-empty when this build is running as a dependency.
-    const is_dep = b.dep_prefix.len > 0;
 
     // This is set to true when we're building a system package. For now
     // this is trivially detected using the "system_package_mode" bool
