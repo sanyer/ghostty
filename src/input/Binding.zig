@@ -747,7 +747,7 @@ pub const Action = union(enum) {
 
     /// Maximize or unmaximize the current window.
     ///
-    /// On macOS this zooms the window, which is the closest equivalent
+    /// On macOS, this zooms the window, which is the closest equivalent
     /// since macOS has no concept of a maximized window.
     toggle_maximize,
 
