@@ -45,6 +45,7 @@ const CloseConfirmationDialog = @import("close_confirmation_dialog.zig").CloseCo
 const ConfigErrorsDialog = @import("config_errors_dialog.zig").ConfigErrorsDialog;
 const GlobalShortcuts = @import("global_shortcuts.zig").GlobalShortcuts;
 const OpenURI = @import("../portal.zig").OpenURI;
+const media = @import("../media.zig");
 
 const log = std.log.scoped(.gtk_ghostty_application);
 
@@ -222,6 +223,12 @@ pub const Application = extern struct {
         saved_language: ?[:0]const u8 = null,
 
         open_uri: OpenURI = undefined,
+
+        // The audio bell's MediaFile, reused across bells so we don't leak a
+        // GStreamer pipeline (and its GL threads) on every ring. Built lazily
+        // on the first audio bell and rebuilt when `bell-audio-path` changes;
+        // unref'd on dispose. See ringBell and media.zig.
+        bell_media: ?*gtk.MediaFile = null,
 
         pub var offset: c_int = 0;
     };
@@ -1478,6 +1485,7 @@ pub const Application = extern struct {
             .init("quit", actionQuit, null),
             .init("reload-config", actionReloadConfig, null),
             .init("toggle-quick-terminal", actionToggleQuickTerminal, null),
+            .init("ring-bell", actionRingBell, null),
         };
 
         ext.actions.add(Self, self, &actions);
@@ -1547,6 +1555,11 @@ pub const Application = extern struct {
                 log.warn("unable to remove signal source", .{});
             }
             priv.signal_source = null;
+        }
+
+        if (priv.bell_media) |v| {
+            v.unref();
+            priv.bell_media = null;
         }
 
         gobject.Object.virtual_methods.dispose.call(
@@ -1946,6 +1959,40 @@ pub const Application = extern struct {
             },
             .forever,
         );
+    }
+
+    pub fn actionRingBell(
+        _: *gio.SimpleAction,
+        _: ?*glib.Variant,
+        self: *Self,
+    ) callconv(.c) void {
+        const priv: *Private = self.private();
+        const config = priv.config.get();
+
+        // Do our sound
+        if (config.@"bell-features".audio) audio: {
+            const config_path = config.@"bell-audio-path" orelse break :audio;
+            const path, const required = switch (config_path) {
+                .optional => |path| .{ path, false },
+                .required => |path| .{ path, true },
+            };
+
+            const volume = std.math.clamp(
+                config.@"bell-audio-volume",
+                0.0,
+                1.0,
+            );
+
+            // Reuse one MediaFile per application (rebuilt only when the path
+            // changes) so each bell replays the same pipeline instead of
+            // leaking a fresh one. Assign unconditionally: bellMediaFile frees
+            // any stale MediaFile and returns the current slot value (possibly
+            // null if the path is now inaccessible), so priv.bell_media never
+            // dangles.
+            priv.bell_media = media.bellMediaFile(priv.bell_media, path, required);
+            const media_file = priv.bell_media orelse break :audio;
+            media.playBell(media_file, volume);
+        }
     }
 
     //----------------------------------------------------------------
