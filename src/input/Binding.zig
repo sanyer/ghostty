@@ -747,8 +747,8 @@ pub const Action = union(enum) {
 
     /// Maximize or unmaximize the current window.
     ///
-    /// This has no effect on macOS as it does not have the concept of
-    /// maximized windows.
+    /// On macOS, this zooms the window, which is the closest equivalent
+    /// since macOS has no concept of a maximized window.
     toggle_maximize,
 
     /// Fullscreen or unfullscreen the current window.
