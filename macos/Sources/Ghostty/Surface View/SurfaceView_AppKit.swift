@@ -301,15 +301,14 @@ extension Ghostty {
                     guard let self else { return false }
                     return notification.object as AnyObject? === self
                 }
-                .map {
+                .map { _ in
                     // Debounce retains its latest upstream value. In this
                     // case its a Notification, which retains its object,
                     // which is a surface. So this creates a retain cycle.
                     // This discards the notification before debounce.
-                    _ in ()
                 }
                 .debounce(for: .milliseconds(100), scheduler: DispatchQueue.main)
-                .sink { [weak self] _ in
+                .sink { [weak self] in
                     guard let self else { return }
                     NSAccessibility.post(element: self, notification: .selectedTextChanged)
                 }
