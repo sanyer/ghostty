@@ -294,10 +294,19 @@ extension Ghostty {
             accessibilitySelectionCancellable = NotificationCenter.default
                 // The publisher retains its object, so filtering with a weak capture
                 // avoids a cycle between self and the stored cancellable.
+                // But we also need to be careful to do the map below (see
+                // comment below)
                 .publisher(for: .ghosttySelectionDidChange)
                 .filter { [weak self] notification in
                     guard let self else { return false }
                     return notification.object as AnyObject? === self
+                }
+                .map {
+                    // Debounce retains its latest upstream value. In this
+                    // case its a Notification, which retains its object,
+                    // which is a surface. So this creates a retain cycle.
+                    // This discards the notification before debounce.
+                    _ in ()
                 }
                 .debounce(for: .milliseconds(100), scheduler: DispatchQueue.main)
                 .sink { [weak self] _ in
