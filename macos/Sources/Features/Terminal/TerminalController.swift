@@ -1160,6 +1160,8 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
         }
 
         super.showWindow(sender)
+
+        syncAppearance()
     }
 
     // Shows the "+" button in the tab bar, responds to that click.
