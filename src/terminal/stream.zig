@@ -110,7 +110,7 @@ pub const Action = union(Key) {
     dcs_put: u8,
     dcs_unhook,
     apc_start,
-    apc_end,
+    apc_end: ApcEnd,
     apc_put: u8,
     apc_put_slice: ApcPutSlice,
     end_hyperlink,
@@ -289,6 +289,11 @@ pub const Action = union(Key) {
         pub fn cval(self: ApcPutSlice) ApcPutSlice.C {
             return .{ .bytes = self.bytes.ptr, .len = self.bytes.len };
         }
+    };
+
+    pub const ApcEnd = extern struct {
+        /// False when CAN, SUB, or another aborting transition ended the APC.
+        terminated: bool,
     };
 
     pub const InvokeCharset = lib.Struct(lib.target, struct {
@@ -774,18 +779,21 @@ pub fn Stream(comptime H: type) type {
                             std.ascii.control_code.esc => {
                                 self.parser.clear();
                                 self.parser.state = .escape;
-                                self.handler.vt(.apc_end, {});
+                                self.handler.vt(.apc_end, .{ .terminated = true });
                                 offset += 1;
                                 continue;
                             },
                             0x9C => {
                                 self.parser.state = .ground;
-                                self.handler.vt(.apc_end, {});
+                                self.handler.vt(.apc_end, .{ .terminated = true });
                                 offset += 1;
                                 continue;
                             },
                             else => {},
                         }
+
+                        // Aborting transitions need the scalar path so the
+                        // handler can distinguish them from terminators.
                     }
                 }
 
@@ -1127,7 +1135,9 @@ pub fn Stream(comptime H: type) type {
                     .dcs_unhook => self.handler.vt(.dcs_unhook, {}),
                     .apc_start => self.handler.vt(.apc_start, {}),
                     .apc_put => |code| self.handler.vt(.apc_put, code),
-                    .apc_end => self.handler.vt(.apc_end, {}),
+                    .apc_end => self.handler.vt(.apc_end, .{
+                        .terminated = c == std.ascii.control_code.esc or c == 0x9C,
+                    }),
                 }
             }
         }

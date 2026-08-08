@@ -70,6 +70,12 @@ pub const Handler = struct {
     /// The DCS command handler maintains state for DCS queries.
     dcs_handler: dcs.Handler = .{},
 
+    /// Called for sequence identifiers not supported by this library.
+    /// Currently, only APC is reported. Content is borrowed and only valid
+    /// for the duration of the callback. Set `apc_handler.unknown_max_bytes`
+    /// before starting the Stream to enable APC capture.
+    unknown_sequence: ?*const fn (*Handler, UnknownSequence) void = null,
+
     pub const Effects = struct {
         /// Called when the terminal needs to write data back to the pty,
         /// e.g. in response to a DECRQM query. The data is only valid
@@ -157,6 +163,18 @@ pub const Handler = struct {
         };
     };
 
+    /// A sequence unsupported by the active handler. Payload data is borrowed
+    /// only for the duration of the handler callback.
+    pub const UnknownSequence = union(enum) {
+        apc: String,
+
+        /// Content between a string sequence's introducer and terminator.
+        pub const String = struct {
+            content: []const u8,
+            truncated: bool,
+        };
+    };
+
     pub fn init(terminal: *Terminal) Handler {
         return .{
             .terminal = terminal,
@@ -209,6 +227,11 @@ pub const Handler = struct {
             self.semantic_failure = true;
             log.warn("error handling VT action action={} err={}", .{ action, err });
         };
+    }
+
+    fn unknownSequence(self: *Handler, value: UnknownSequence) void {
+        const func = self.unknown_sequence orelse return;
+        func(self, value);
     }
 
     inline fn vtFallible(
@@ -326,7 +349,7 @@ pub const Handler = struct {
             .apc_start => self.apc_handler.start(),
             .apc_put => self.apc_handler.feed(self.terminal.gpa(), value),
             .apc_put_slice => self.apc_handler.feedSlice(self.terminal.gpa(), value.bytes),
-            .apc_end => self.apcEnd(),
+            .apc_end => self.apcEnd(value.terminated),
 
             // Effect-based handlers
             .bell => self.bell(),
@@ -948,13 +971,18 @@ pub const Handler = struct {
         }
     }
 
-    fn apcEnd(self: *Handler) void {
+    fn apcEnd(self: *Handler, terminated: bool) void {
         const io = self.terminal.io();
         const alloc = self.terminal.gpa();
-        var cmd = self.apc_handler.end() orelse return;
-        defer cmd.deinit(alloc);
-
-        switch (cmd) {
+        var result = self.apc_handler.end() orelse return;
+        defer result.deinit(alloc);
+        switch (result) {
+            .unknown => |*unknown| {
+                if (terminated) self.unknownSequence(.{ .apc = .{
+                    .content = unknown.content,
+                    .truncated = unknown.truncated,
+                } });
+            },
             .kitty => |*kitty_cmd| if (comptime build_options.kitty_graphics) {
                 if (self.terminal.kittyGraphics(
                     io,
@@ -1014,6 +1042,51 @@ test "resize clears synchronized output on unchanged cell dimensions" {
     try testing.expect(!t.modes.get(.synchronized_output));
     try testing.expectEqual(@as(u32, 720), t.width_px);
     try testing.expectEqual(@as(u32, 432), t.height_px);
+}
+
+test "unknown APC effect callback" {
+    var t: Terminal = try .init(testing.io, testing.allocator, .{ .cols = 80, .rows = 24 });
+    defer t.deinit(testing.allocator);
+
+    const S = struct {
+        var count: usize = 0;
+        var content: [16]u8 = undefined;
+        var content_len: usize = undefined;
+        var truncated: bool = undefined;
+
+        fn unknownSequence(_: *Handler, value: Handler.UnknownSequence) void {
+            switch (value) {
+                .apc => |apc_value| {
+                    content_len = apc_value.content.len;
+                    @memcpy(content[0..apc_value.content.len], apc_value.content);
+                    truncated = apc_value.truncated;
+                },
+            }
+            count += 1;
+        }
+    };
+    S.count = 0;
+
+    var handler: Handler = .init(&t);
+    handler.unknown_sequence = &S.unknownSequence;
+    handler.apc_handler.unknown_max_bytes = 8;
+    var s: Stream = .init(.{
+        .allocator = testing.allocator,
+        .handler = handler,
+    });
+    defer s.deinit();
+
+    // Unknown OSC commands retain their legacy behavior and are ignored.
+    s.nextSlice("\x1B]999;abcdef\x07");
+    s.nextSlice("\x1B_abcd;payload\x1B\\");
+
+    try testing.expectEqual(@as(usize, 1), S.count);
+    try testing.expectEqualStrings("abcd;pay", S.content[0..S.content_len]);
+    try testing.expect(S.truncated);
+
+    // Aborted unknown APCs are suppressed.
+    s.nextSlice("\x1B_Xpayload\x18");
+    try testing.expectEqual(@as(usize, 1), S.count);
 }
 
 test "resize reports mode 2048 geometry" {
