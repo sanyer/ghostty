@@ -766,8 +766,26 @@ pub fn Stream(comptime H: type) type {
                     if (self.parser.state == .sos_pm_apc_string) {
                         offset += self.consumeApcString(input[offset..]);
                         if (offset >= input.len) return input.len;
-                        // The next byte exits the string state; let
-                        // nextNonUtf8 below handle it.
+
+                        // Fast-path normal string termination. This matches
+                        // Parser.next's exit and entry actions while avoiding
+                        // the generic action loop for every completed APC.
+                        switch (input[offset]) {
+                            std.ascii.control_code.esc => {
+                                self.parser.clear();
+                                self.parser.state = .escape;
+                                self.handler.vt(.apc_end, {});
+                                offset += 1;
+                                continue;
+                            },
+                            0x9C => {
+                                self.parser.state = .ground;
+                                self.handler.vt(.apc_end, {});
+                                offset += 1;
+                                continue;
+                            },
+                            else => {},
+                        }
                     }
                 }
 
@@ -3987,6 +4005,18 @@ test "stream: apc bulk slice" {
         try testing.expectEqual(@as(usize, 1), s.handler.slices);
         try testing.expectEqual(@as(usize, 0), s.handler.puts);
     }
+}
+
+test "stream: apc bulk slice C1 ST" {
+    var s: Stream(ApcTestHandler) = .init(.{ .handler = .{} });
+    s.nextSlice("\x1b_Gpayload\x9c");
+
+    try testing.expectEqual(@as(usize, 1), s.handler.started);
+    try testing.expectEqual(@as(usize, 1), s.handler.ended);
+    try testing.expectEqualStrings(
+        "Gpayload",
+        s.handler.buf[0..s.handler.len],
+    );
 }
 
 test "stream: apc bulk slice split across inputs" {
