@@ -2356,8 +2356,13 @@ keybind: Keybinds = .{},
 ///
 ///  - `auto` *(default)*
 ///
-///    Automatically show and hide the drag handle. The handle is only
-///    shown when there are two or more splits present.
+///    Automatically show and hide the drag handle.
+///
+///    On Linux, the handle is only shown when there are two or
+///    more splits present.
+///
+///    On macOS, the handle is only hidden when there's one split
+///    in **fullscreen** mode, otherwise it's shown when hovered.
 ///
 ///  - `never`
 ///
@@ -2365,8 +2370,6 @@ keybind: Keybinds = .{},
 ///    mouse controls.
 ///
 /// Available since: 1.4.0.
-///
-/// Currently only supported on Linux (GTK).
 @"drag-handle": DragHandle = .auto,
 
 /// This controls when resize overlays are shown. Resize overlays are a
