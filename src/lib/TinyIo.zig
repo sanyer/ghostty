@@ -1402,11 +1402,12 @@ test "dirClose closes the descriptor" {
     const dir: Dir = .{ .handle = opened.handle };
     test_io.vtable.dirClose(test_io.userdata, &.{dir});
 
-    // Verify with a raw fstat that the fd is gone. We check the errno
+    // Verify with a raw dup that the fd is gone. We check the errno
     // directly rather than going through our Io so no error path prints
-    // "unexpected errno" diagnostics in debug test builds.
-    var st = std.mem.zeroes(posix.Stat);
-    try testing.expectEqual(posix.E.BADF, posix.errno(fstat_sym(dir.handle, &st)));
+    // "unexpected errno" diagnostics in debug test builds. `dup` rather
+    // than `fstat` because glibc has no LFS64 `fstat` symbol, so
+    // `fstat_sym` doesn't exist on Linux.
+    try testing.expectEqual(posix.E.BADF, posix.errno(posix.system.dup(dir.handle)));
 }
 
 test "cancel protection operations are benign" {
