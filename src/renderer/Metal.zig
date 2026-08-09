@@ -421,7 +421,34 @@ pub inline fn beginFrame(
 /// one-time cost.
 pub fn warmup() void {
     const device = chooseDevice() catch return;
-    device.release();
+    defer device.release();
+
+    // Create and release a command queue. The first command queue
+    // created for a device pays additional one-time driver setup
+    // costs; subsequent creations are much cheaper.
+    const queue = device.msgSend(objc.Object, objc.sel("newCommandQueue"), .{});
+    queue.release();
+
+    // Build and discard our shader pipelines for both pixel formats we
+    // may use (which one is used depends on the blending config). The
+    // first pipeline state creation compiles shaders which is slow;
+    // once warm, later creations hit driver and OS caches.
+    inline for (.{
+        mtl.MTLPixelFormat.bgra8unorm_srgb,
+        mtl.MTLPixelFormat.bgra8unorm,
+    }) |format| {
+        if (shaders.Shaders.init(
+            std.heap.c_allocator,
+            device,
+            &.{},
+            format,
+        )) |s| {
+            var s_mut = s;
+            s_mut.deinit(std.heap.c_allocator);
+        } else |err| {
+            log.warn("metal warmup shader init failed err={}", .{err});
+        }
+    }
 }
 
 fn chooseDevice() error{NoMetalDevice}!objc.Object {
