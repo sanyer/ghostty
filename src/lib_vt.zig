@@ -38,6 +38,17 @@ const terminal = @import("terminal/main.zig");
 /// Additional functionality will be added here over time as needed.
 pub const sys = terminal.sys;
 
+/// A tiny, blocking `std.Io` implementation optimized for binary size.
+///
+/// Constructing a `Terminal` requires a `std.Io` for features that touch
+/// the filesystem (e.g. Kitty graphics file transmission). Embedders that
+/// don't have their own `Io` can use `TinyIo` (e.g.
+/// `(TinyIo.init).io()`) instead of `std.Io.Threaded` to avoid linking
+/// Threaded's full vtable (networking, process spawning, async
+/// machinery, etc.), which is worth roughly 110KB of binary size. See
+/// the TinyIo docs for the exact tradeoffs.
+pub const TinyIo = @import("lib/TinyIo.zig");
+
 pub const apc = terminal.apc;
 pub const dcs = terminal.dcs;
 pub const osc = terminal.osc;
