@@ -1210,6 +1210,22 @@ typedef enum GHOSTTY_ENUM_TYPED {
    * Input type: size_t*
    */
   GHOSTTY_TERMINAL_OPT_UNKNOWN_MAX_BYTES = 36,
+
+  /**
+   * Set the name of the terminfo entry this terminal runs as, reported
+   * in response to an XTGETTCAP query for "TN" (e.g. "xterm-256color").
+   *
+   * The string data is copied into the terminal. A NULL value pointer
+   * clears the name (equivalent to setting an empty string). A name
+   * longer than 128 bytes returns GHOSTTY_INVALID_VALUE.
+   *
+   * If this is unset then we don't report anything for an XTGETTCAP
+   * TN query, because we don't know what the embedding terminal around
+   * libghostty is advertising itself as.
+   *
+   * Input type: GhosttyString*
+   */
+  GHOSTTY_TERMINAL_OPT_TERMINFO_NAME = 37,
   GHOSTTY_TERMINAL_OPT_MAX_VALUE = GHOSTTY_ENUM_MAX_VALUE,
 } GhosttyTerminalOption;
 
