@@ -350,6 +350,22 @@ pub const CoreText = struct {
         _ = self;
     }
 
+    /// Warm up the system font registry.
+    ///
+    /// The first CoreText query in a process initializes the system font
+    /// database, which takes multiple milliseconds, while subsequent
+    /// queries are microseconds.
+    pub fn warmup() void {
+        const name = macos.foundation.String.createWithBytes(
+            "AppleColorEmoji",
+            .utf8,
+            false,
+        ) catch return;
+        defer name.release();
+        const ct_font = macos.text.Font.createWithName(name, 12) catch return;
+        ct_font.release();
+    }
+
     /// Discover fonts from a descriptor. This returns an iterator that can
     /// be used to build up the deferred fonts.
     pub fn discover(self: *const CoreText, alloc: Allocator, desc: Descriptor) !DiscoverIterator {
