@@ -691,6 +691,7 @@ pub const Surface = extern struct {
         // True if the current surface is a split, this is used to apply
         // unfocused-split-* options
         is_split: bool = false,
+        is_split_binding: ?*gobject.Binding = null,
 
         action_group: ?*gio.SimpleActionGroup = null,
 
@@ -845,6 +846,18 @@ pub const Surface = extern struct {
         };
 
         return @intFromBool(config.@"bell-features".border);
+    }
+
+    pub fn bindIsSplit(self: *Self, tree: *SplitTree) void {
+        const priv = self.private();
+        if (priv.is_split_binding) |bind| bind.unbind();
+
+        priv.is_split_binding = tree.as(gobject.Object).bindProperty(
+            "is-split",
+            self.as(gobject.Object),
+            "is-split",
+            .{ .sync_create = true },
+        );
     }
 
     /// Callback used to determine whether unfocused-split-fill / unfocused-split-opacity
