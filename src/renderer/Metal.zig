@@ -407,6 +407,23 @@ pub inline fn beginFrame(
     return try Frame.begin(.{ .queue = self.queue }, renderer, target);
 }
 
+/// Warm up the Metal device machinery. The first Metal device query in
+/// a process takes multiple milliseconds; once warm, subsequent queries
+/// are effectively free. Calling this early (e.g. on a background
+/// thread at app startup; Metal device queries are thread-safe) moves
+/// that one-time cost off the critical path of the first surface's
+/// renderer initialization.
+///
+/// We deliberately do NOT cache the chosen device: the device set can
+/// change at runtime (e.g. an eGPU being plugged in or removed) and
+/// chooseDevice prefers removable GPUs, so every renderer init must
+/// re-choose. Only the underlying framework initialization is a
+/// one-time cost.
+pub fn warmup() void {
+    const device = chooseDevice() catch return;
+    device.release();
+}
+
 fn chooseDevice() error{NoMetalDevice}!objc.Object {
     var chosen_device: ?objc.Object = null;
 

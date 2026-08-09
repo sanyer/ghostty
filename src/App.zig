@@ -106,6 +106,18 @@ fn threadedWarmup() void {
             log.warn("font warmup thread spawn failed err={}", .{err});
         }
     }
+
+    // Same for the renderer's graphics API (e.g. Metal), which pays
+    // one-time framework initialization costs on first use.
+    if (comptime @hasDecl(renderer.Renderer.API, "warmup")) {
+        if (std.Thread.spawn(
+            .{},
+            renderer.Renderer.API.warmup,
+            .{},
+        )) |thr| thr.detach() else |err| {
+            log.warn("renderer warmup thread spawn failed err={}", .{err});
+        }
+    }
 }
 
 /// Initialize the main app instance. This creates the main window, sets
