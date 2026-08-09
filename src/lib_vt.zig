@@ -426,18 +426,44 @@ pub const std_options: std.Options = opts: {
     break :opts options;
 };
 
+/// True for builds where we keep the full std debug machinery (stack
+/// traces on panic, std.debug.print, etc.). These builds are for
+/// development, where the roughly 160KB of binary size it costs is
+/// worth it.
+const debug_machinery: bool = builtin.is_test or switch (builtin.mode) {
+    .Debug, .ReleaseSafe => true,
+    .ReleaseFast, .ReleaseSmall => false,
+};
+
 /// The panic handler for when this file is the root module.
 ///
 /// In ReleaseFast and ReleaseSmall builds we print the panic message to
 /// stderr and trap, but do not attempt to unwind the stack to print a
 /// stack trace.
-pub const panic: type = if (builtin.is_test or switch (builtin.mode) {
-    .Debug, .ReleaseSafe => true,
-    .ReleaseFast, .ReleaseSmall => false,
-})
+pub const panic: type = if (debug_machinery)
     std.debug.FullPanic(std.debug.defaultPanic)
 else
     std.debug.FullPanic(tinyPanicImpl);
+
+/// Guards release builds against accidentally reintroducing the std
+/// debug Io machinery.
+///
+/// `std.Options.debug_io` defaults to `std.Io.Threaded`, and anything
+/// that reaches it (std.debug.print, std.debug.lockStderr, the default
+/// std.log handler, etc.) pins Threaded's entire vtable into the binary:
+/// roughly 110KB of unreachable code.
+///
+/// This verifies nothing ever touches it.
+pub const std_options_debug_io: std.Io = if (debug_machinery)
+    std.Io.Threaded.global_single_threaded.io()
+else
+    @compileError(
+        \\The std debug Io machinery (std.debug.print, std.debug.lockStderr,
+        \\std.log's default handler, ...) is disabled in libghostty-vt release
+        \\builds because it costs ~110KB of binary size. Use std.log (routed
+        \\through our logFn), os/stderr.zig for raw diagnostic writes, or
+        \\gate the code on debug builds.
+    );
 
 /// Prints the panic message to stderr (best-effort) and traps.
 ///
