@@ -1,10 +1,14 @@
-// Ghostty embedding API. The documentation for the embedding API is
-// only within the Zig source files that define the implementations. This
-// isn't meant to be a general purpose embedding API (yet) so there hasn't
-// been documentation or example work beyond that.
+// Ghostty's internal embedder API, a.k.a. "libghostty-internal".
 //
-// The only consumer of this API is the macOS app, but the API is built to
-// be more general purpose.
+// The only consumer of this API is the macOS app, and while it is fairly
+// comprehensive, it is tailored to the needs of the macOS app and not designed
+// for external use, hence why most functions are undocumented and some are
+// macOS-specific (e.g. ones dealing with the Metal graphics API).
+// 
+// External embedders should instead use `libghostty-vt` or other related
+// packages, which are extensively documented and designed from the ground up
+// to be used in other software. Header files for which can be found in
+// `include/ghostty/`.
 #ifndef GHOSTTY_H
 #define GHOSTTY_H
 
