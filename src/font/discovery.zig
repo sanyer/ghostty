@@ -383,6 +383,54 @@ pub const CoreText = struct {
         };
     }
 
+    /// Discover a font by its exact name (family, full, or PostScript
+    /// name). This is significantly faster than `discover` because it
+    /// avoids the system-wide font matching that CTFontCollection does
+    /// (which takes multiple milliseconds). This should be preferred
+    /// when the desired font is known exactly, e.g. system fonts such
+    /// as Apple Color Emoji.
+    ///
+    /// Returns null if no font with this exact family name exists;
+    /// CoreText fallback fonts are never returned.
+    pub fn discoverExactFamily(
+        self: *const CoreText,
+        family: []const u8,
+    ) !?DeferredFace {
+        _ = self;
+
+        const family_str = try macos.foundation.String.createWithBytes(
+            family,
+            .utf8,
+            false,
+        );
+        defer family_str.release();
+
+        // Create our font. We need a size to initialize it so we use size
+        // 12 but we will alter the size later (same as DiscoverIterator).
+        const ct_font = try macos.text.Font.createWithName(family_str, 12);
+
+        // CTFontCreateWithName never returns null: if the requested font
+        // isn't installed it returns a substitute font. Verify we got
+        // the family we asked for, otherwise report not found.
+        const found: bool = found: {
+            const actual = ct_font.copyFamilyName();
+            defer actual.release();
+            var buf: [256]u8 = undefined;
+            const actual_slice = actual.cstring(&buf, .utf8) orelse
+                break :found false;
+            break :found std.mem.eql(u8, actual_slice, family);
+        };
+        if (!found) {
+            ct_font.release();
+            return null;
+        }
+
+        return .{ .ct = .{
+            .font = ct_font,
+            .variations = &.{},
+        } };
+    }
+
     pub fn discoverFallback(
         self: *const CoreText,
         alloc: Allocator,
