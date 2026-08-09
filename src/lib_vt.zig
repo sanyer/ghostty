@@ -11,6 +11,7 @@ const lib = @This();
 
 const std = @import("std");
 const builtin = @import("builtin");
+const stderr = @import("os/stderr.zig");
 
 // The public API below reproduces a lot of terminal/main.zig but
 // is separate because (1) we need our root file to be in `src/`
@@ -413,6 +414,53 @@ pub const std_options: std.Options = opts: {
 
     break :opts options;
 };
+
+/// The panic handler for when this file is the root module.
+///
+/// In ReleaseFast and ReleaseSmall builds we print the panic message to
+/// stderr and trap, but do not attempt to unwind the stack to print a
+/// stack trace.
+pub const panic: type = if (builtin.is_test or switch (builtin.mode) {
+    .Debug, .ReleaseSafe => true,
+    .ReleaseFast, .ReleaseSmall => false,
+})
+    std.debug.FullPanic(std.debug.defaultPanic)
+else
+    std.debug.FullPanic(tinyPanicImpl);
+
+/// Prints the panic message to stderr (best-effort) and traps.
+///
+/// This intentionally avoids `std.debug.lockStderr`, which routes through
+/// `std.Options.debug_io` and would keep the entire `std.Io.Threaded`
+/// vtable alive in the binary which takes up hundreds of KB.
+///
+/// This is safe to call from any thread (and even from signal handlers):
+/// it takes no locks, performs no allocation, and touches no shared
+/// mutable state. The message is emitted with a single raw write so that
+/// concurrent stderr output doesn't interleave with it.
+fn tinyPanicImpl(msg: []const u8, ra: ?usize) noreturn {
+    @branchHint(.cold);
+    _ = ra;
+
+    // 256 bytes is enough for most messages, so try that first
+    // so that we can try to write in a single syscall.
+    var buf: [256]u8 = undefined;
+    if (std.fmt.bufPrint(
+        &buf,
+        "panic: {s}\n",
+        .{msg},
+    )) |line| {
+        stderr.write(line);
+    } else |_| {
+        stderr.write("panic: ");
+        stderr.write(msg);
+        stderr.write("\n");
+    }
+
+    // Trap forces a standard crash that embedder-provided debuggers
+    // or environments can catch.
+    @trap();
+}
 
 test {
     // Zig 0.16.0 has made test logging more strict. Now, *anything* that gets
