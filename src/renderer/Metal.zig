@@ -413,12 +413,6 @@ pub inline fn beginFrame(
 /// thread at app startup; Metal device queries are thread-safe) moves
 /// that one-time cost off the critical path of the first surface's
 /// renderer initialization.
-///
-/// We deliberately do NOT cache the chosen device: the device set can
-/// change at runtime (e.g. an eGPU being plugged in or removed) and
-/// chooseDevice prefers removable GPUs, so every renderer init must
-/// re-choose. Only the underlying framework initialization is a
-/// one-time cost.
 pub fn warmup() void {
     const device = chooseDevice() catch return;
     defer device.release();

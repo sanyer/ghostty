@@ -79,21 +79,6 @@ pub fn create(alloc: Allocator) CreateError!*App {
     errdefer alloc.destroy(app);
     try app.init(alloc);
 
-    // Warm up system services on background threads. These are
-    // multi-millisecond one-time costs that would otherwise be paid
-    // during the first surface's initialization. Doing it here overlaps
-    // them with the rest of app startup (config, app runtime, window
-    // creation).
-    threadedWarmup();
-
-    return app;
-}
-
-/// Warm up system services whose first use in a process is slow. Each
-/// subsystem gets its own background thread so that one slow subsystem
-/// doesn't delay the others. Only operations that are safe to run on
-/// any thread belong here.
-fn threadedWarmup() void {
     // If font discovery supports warmup, then we call it. Some font
     // mechanisms (e.g. CoreText) have a multi-millisecond one-time cost
     // on startup.
@@ -118,6 +103,8 @@ fn threadedWarmup() void {
             log.warn("renderer warmup thread spawn failed err={}", .{err});
         }
     }
+
+    return app;
 }
 
 /// Initialize the main app instance. This creates the main window, sets
