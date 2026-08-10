@@ -8,7 +8,7 @@ msgstr ""
 "Project-Id-Version: com.mitchellh.ghostty\n"
 "Report-Msgid-Bugs-To: m@mitchellh.com\n"
 "POT-Creation-Date: 2026-08-10 10:06-0500\n"
-"PO-Revision-Date: 2026-08-04 17:02+0300\n"
+"PO-Revision-Date: 2026-08-10 17:32+0300\n"
 "Last-Translator: Ēriks Remess <eriks@remess.lv>\n"
 "Language-Team: Latvian\n"
 "Language: lv\n"
@@ -218,11 +218,11 @@ msgstr "Konfigurācija"
 
 #: src/apprt/gtk/ui/1.2/surface.blp:427 src/apprt/gtk/ui/1.5/window.blp:306
 msgid "Open Configuration in OS Editor"
-msgstr ""
+msgstr "Atvērt konfigurāciju noklusējuma redaktorā"
 
 #: src/apprt/gtk/ui/1.2/surface.blp:433 src/apprt/gtk/ui/1.5/window.blp:312
 msgid "Open Configuration in New Window"
-msgstr ""
+msgstr "Atvērt konfigurāciju jaunā logā"
 
 #: src/apprt/gtk/ui/1.5/title-dialog.blp:5
 msgid "Leave blank to restore the default title."
@@ -286,7 +286,7 @@ msgstr "Eksportēt"
 
 #: src/apprt/gtk/class/application.zig:2783
 msgid "Editing configuration file"
-msgstr ""
+msgstr "Konfigurācijas faila rediģēšana:"
 
 #: src/apprt/gtk/class/clipboard_confirmation_dialog.zig:198
 msgid ""
@@ -798,11 +798,11 @@ msgstr "Pārvietot pašreizējo cilni pa labi."
 
 #: src/input/command.zig:446
 msgid "Move Tab to New Window"
-msgstr ""
+msgstr "Pārvietot cilni uz jaunu logu"
 
 #: src/input/command.zig:447
 msgid "Move the current tab to a new window."
-msgstr ""
+msgstr "Pārvietot pašreizējo cilni uz jaunu logu."
 
 #: src/input/command.zig:452
 msgid "Toggle Tab Overview"
@@ -962,19 +962,21 @@ msgstr "Rādīt ekrāna tastatūru, ja tā ir pieejama."
 
 #: src/input/command.zig:588
 msgid "Open Config Using OS editor"
-msgstr ""
+msgstr "Atvērt konfigurāciju noklusējuma redaktorā"
 
 #: src/input/command.zig:589
 msgid "Open the config file with the OS's default editor."
-msgstr ""
+msgstr "Atvērt konfigurācijas failu noklusējuma redaktorā."
 
 #: src/input/command.zig:593
 msgid "Open Config in New Terminal Window"
-msgstr ""
+msgstr "Atvērt konfigurāciju jaunā termināļa logā"
 
 #: src/input/command.zig:594
 msgid "Open the config file in a new window using $EDITOR or $VISUAL."
 msgstr ""
+"Atvērt konfigurācijas failu jaunā logā, izmantojot mainīgajā $EDITOR vai "
+"$VISUAL norādīto redaktoru."
 
 #: src/input/command.zig:600
 msgid "Reload Config"
