@@ -12,8 +12,22 @@ const log = std.log.scoped(.kitty_gfx);
 /// ignored, matching how unknown letter keys are ignored when building a
 /// command.
 ///
-/// For the value of this: if the value is a single printable ASCII character
-/// it is the ASCII code. Otherwise, it is parsed as a 32-bit unsigned integer.
+/// This is deliberately a dense value table plus a presence bitmap. There are
+/// only 52 possible keys(technically KIP has fever than 52 possible .. at the moment of writing), so a lookup is one machine-word bit test followed by
+/// an indexed load. The values are undefined until their presence bit is set.
+///
+/// Other alternatives were considered and should probably be revisited in the
+/// future. Some of them were:
+/// A `[52]?u32` table is 416 bytes versus 216 bytes for this layout, and
+/// its larger copies erased the smaller lookup code.
+/// `std.EnumMap` added optional-return lowering,
+/// `std.StaticBitSet(52)` kept the same size but generated larger code
+/// for the packed mask. Passing the table by pointer removed the copies
+/// but did not improve end-to-end throughput. Keep this representation
+/// unless a new benchmark shows an improvement in the zig compilers codegen.
+///
+/// For the value itself: if it is a single printable ASCII character it is the
+/// ASCII code. Otherwise, it is parsed as a 32-bit unsigned integer.
 const KV = struct {
     values: [52]u32 = undefined,
     present: u64 = 0,
