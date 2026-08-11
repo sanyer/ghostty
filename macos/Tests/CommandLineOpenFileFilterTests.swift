@@ -61,4 +61,25 @@ struct CommandLineOpenFileFilterTests {
         #expect(!filter.shouldIgnore("/tmp/finder-file.txt"))
         #expect(filter.shouldIgnore("/tmp/command-file.txt"))
     }
+
+    @Test func normalizesFileURLs() {
+        let existing: Set<String> = [
+            "/tmp/project/file #100%.txt",
+            "/tmp/project/directory",
+        ]
+        let filter = CommandLineOpenFileFilter(
+            arguments: [
+                "ghostty",
+                "-e",
+                "command",
+                "./file #100%.txt",
+                "./directory/",
+            ],
+            workingDirectory: "/tmp/project",
+            fileExists: { existing.contains($0) }
+        )
+
+        #expect(filter.shouldIgnore("/tmp/project/file #100%.txt"))
+        #expect(filter.shouldIgnore("/tmp/project/directory"))
+    }
 }
