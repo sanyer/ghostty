@@ -200,7 +200,7 @@ msgstr "Logs"
 
 #: src/apprt/gtk/ui/1.2/surface.blp:406 src/apprt/gtk/ui/1.5/window.blp:215
 msgid "Change Window Title…"
-msgstr ""
+msgstr "Mainīt loga virsrakstu…"
 
 #: src/apprt/gtk/ui/1.2/surface.blp:411 src/apprt/gtk/ui/1.5/window.blp:220
 #: src/input/command.zig:421
@@ -372,7 +372,7 @@ msgstr "Mainīt cilnes virsrakstu"
 
 #: src/apprt/gtk/class/title_dialog.zig:229
 msgid "Change Window Title"
-msgstr ""
+msgstr "Mainīt loga virsrakstu"
 
 #: src/apprt/gtk/class/window.zig:1153
 msgid "Reloaded the configuration"
