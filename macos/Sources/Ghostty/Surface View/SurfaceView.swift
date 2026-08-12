@@ -4,35 +4,6 @@ import GhosttyKit
 import System
 
 extension Ghostty {
-    /// Render a terminal for the active app in the environment.
-    struct Terminal: View {
-        @EnvironmentObject private var ghostty: Ghostty.App
-
-        var body: some View {
-            if let app = self.ghostty.app {
-                SurfaceForApp(app) { surfaceView in
-                    SurfaceWrapper(surfaceView: surfaceView)
-                }
-            }
-        }
-    }
-
-    /// Yields a SurfaceView for a ghostty app that can then be used however you want.
-    struct SurfaceForApp<Content: View>: View {
-        let content: ((SurfaceView) -> Content)
-
-        @StateObject private var surfaceView: SurfaceView
-
-        init(_ app: ghostty_app_t, @ViewBuilder content: @escaping ((SurfaceView) -> Content)) {
-            _surfaceView = StateObject(wrappedValue: SurfaceView(app))
-            self.content = content
-        }
-
-        var body: some View {
-            content(surfaceView)
-        }
-    }
-
     struct SurfaceWrapper: View {
         // The surface to create a view for. This must be created upstream. As long as this
         // remains the same, the surface that is being rendered remains the same.
