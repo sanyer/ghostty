@@ -967,17 +967,6 @@ pub fn needsConfirmQuit(self: *Surface) bool {
     };
 }
 
-/// True if the surface cursor is currently at a shell prompt according to
-/// semantic prompt integration. If shell integration is unavailable, this
-/// conservatively returns false.
-pub fn isAtPrompt(self: *Surface) bool {
-    if (self.child_exited) return false;
-
-    self.renderer_state.mutex.lockUncancelable(global.io());
-    defer self.renderer_state.mutex.unlock(global.io());
-    return self.io.terminal.cursorIsAtPrompt();
-}
-
 /// Called from the app thread to handle mailbox messages to our specific
 /// surface.
 pub fn handleMessage(self: *Surface, msg: Message) !void {
