@@ -102,7 +102,6 @@
 				"Features/Custom App Icon/Extensions/UserDefaults+AppIcon.swift",
 				Ghostty/Ghostty.ConfigTypes.swift,
 				Ghostty/GhosttyPackageMeta.swift,
-				Helpers/CrossKit.swift,
 				"Helpers/Extensions/NSImage+Extension.swift",
 				"Helpers/Extensions/OSColor+Extension.swift",
 				"Helpers/Extensions/OSPasteboard+Extension.swift",
@@ -113,7 +112,6 @@
 			isa = PBXFileSystemSynchronizedBuildFileExceptionSet;
 			membershipExceptions = (
 				"Features/Custom App Icon/DockTilePlugin.swift",
-				"Ghostty/Surface View/SurfaceView_UIKit.swift",
 			);
 			target = A5B30530299BEAAA0047F10C /* Ghostty */;
 		};
