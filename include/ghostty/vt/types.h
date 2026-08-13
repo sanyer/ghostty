@@ -319,8 +319,17 @@ typedef struct {
  * opts.trim = true;
  * @endcode
  */
+#ifdef __cplusplus
+#define GHOSTTY_INIT_SIZED(type)                                      \
+  ([]() noexcept {                                                    \
+    type value{};                                                     \
+    value.size = sizeof(value);                                       \
+    return value;                                                     \
+  }())
+#else
 #define GHOSTTY_INIT_SIZED(type) \
   ((type){ .size = sizeof(type) })
+#endif
 
 /**
  * Return a pointer to a null-terminated JSON string describing the
