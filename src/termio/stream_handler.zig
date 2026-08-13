@@ -16,6 +16,17 @@ const posix = std.posix;
 
 const log = std.log.scoped(.io_handler);
 
+/// Copy the longest valid UTF-8 prefix that fits in a sentinel-terminated
+/// destination. Desktop notification strings are passed to platform APIs that
+/// require valid UTF-8, so truncation must not split a multibyte codepoint.
+fn copyUtf8Z(comptime capacity: usize, dst: *[capacity:0]u8, src: []const u8) void {
+    var len = @min(src.len, capacity);
+    while (len > 0 and !std.unicode.utf8ValidateSlice(src[0..len])) : (len -= 1) {}
+
+    @memcpy(dst[0..len], src[0..len]);
+    dst[len] = 0;
+}
+
 /// This is used as the handler for the terminal.Stream type. This is
 /// stateful and is expected to live for the entire lifetime of the terminal.
 /// It is NOT VALID to stop a stream handler, create a new one, and use that
@@ -1348,13 +1359,16 @@ pub const StreamHandler = struct {
     ) !void {
         var message = apprt.surface.Message{ .desktop_notification = undefined };
 
-        const title_len = @min(title.len, message.desktop_notification.title.len);
-        @memcpy(message.desktop_notification.title[0..title_len], title[0..title_len]);
-        message.desktop_notification.title[title_len] = 0;
-
-        const body_len = @min(body.len, message.desktop_notification.body.len);
-        @memcpy(message.desktop_notification.body[0..body_len], body[0..body_len]);
-        message.desktop_notification.body[body_len] = 0;
+        copyUtf8Z(
+            message.desktop_notification.title.len,
+            &message.desktop_notification.title,
+            title,
+        );
+        copyUtf8Z(
+            message.desktop_notification.body.len,
+            &message.desktop_notification.body,
+            body,
+        );
 
         self.surfaceMessageWriter(message);
     }
@@ -1466,3 +1480,20 @@ pub const StreamHandler = struct {
         self.surfaceMessageWriter(.{ .progress_report = report });
     }
 };
+
+test "copyUtf8Z truncates at a UTF-8 codepoint boundary" {
+    var dst: [5:0]u8 = undefined;
+
+    copyUtf8Z(dst.len, &dst, "abcdЯ");
+
+    try std.testing.expectEqualStrings("abcd", std.mem.sliceTo(&dst, 0));
+    try std.testing.expect(std.unicode.utf8ValidateSlice(std.mem.sliceTo(&dst, 0)));
+}
+
+test "copyUtf8Z preserves UTF-8 that fits" {
+    var dst: [5:0]u8 = undefined;
+
+    copyUtf8Z(dst.len, &dst, "abcЯ");
+
+    try std.testing.expectEqualStrings("abcЯ", std.mem.sliceTo(&dst, 0));
+}
