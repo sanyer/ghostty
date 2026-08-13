@@ -223,10 +223,6 @@ msgstr "הגדרות"
 msgid "Open Configuration in OS Editor"
 msgstr "פתיחת ההגדרות בעורך של מערכת ההפעלה"
 
-#: src/input/command.zig:589
-msgid "Open the config file with the OS's default editor."
-msgstr "פתח/י את קובץ ההגדרות בעורך טקסט שמוגדר כברירת המחדל של מערכת ההפעלה
-
 #: src/apprt/gtk/ui/1.2/surface.blp:433 src/apprt/gtk/ui/1.5/window.blp:312
 msgid "Open Configuration in New Window"
 msgstr "פתיחת ההגדרות בחלון חדש"
