@@ -23,8 +23,10 @@
 00jciv00
 04cb
 0xdvc
+12ya
 -4rh1t3ct0r7
 52dyd
+a-lang
 aalhendi
 aaron-ang
 abdurrahmanski
@@ -38,6 +40,7 @@ akimiojr
 alaasdk
 alanmoyano
 alaviss
+alex19ep
 alexbathome
 alexfeijoo44
 alexjuca
@@ -88,6 +91,7 @@ damyanbogoev
 danneu
 danulqua
 dariogriffo
+dave92082
 davidsanchez222
 deblasis
 dervedro
@@ -116,17 +120,21 @@ exlee
 -f1813483-netizen
 fallintoplace
 faukah
+figelwump
 filip7
 flou
 fornwall
 francescarpi
 fru1tworld
+gadgetman6
 gagbo
 ghokun
 gmile
 gordonbondon
+gotenksin
 gpanders
 guilhermetk
+-guysoft LLM communication (likely automated)
 h3nock
 hakonhagland
 halosatrio
@@ -142,7 +150,7 @@ illiakrauchanka
 j0hnm4r5
 jacobsandlund
 jake-stewart
-jamesarch
+-jamesarch Bad AI etiquette
 jamylak
 jarred-sumner
 jcollie
@@ -179,6 +187,7 @@ lepips
 liby
 linustalacko
 lonsagisawa
+lotheac
 louisunlimited
 luisnquin
 lynicis
@@ -242,6 +251,7 @@ pluiedev
 pouwerkerk
 poweruser64
 prakhar54-byte
+prihlop
 priyans-hu
 puzza007
 qappell
@@ -270,9 +280,11 @@ sanjj1
 secrus
 seruman
 seyoungjeong
+shorsher
 silveirapf
 simonbcn
 slsrepo
+steven-tk
 sunshine-syz
 svmhdvn
 tasselx
@@ -289,6 +301,7 @@ turbolent
 tweedbeetle
 uhojin
 unphased
+unsaltedscholar
 uzaaft
 vancluever
 vaughanandrews
@@ -304,6 +317,7 @@ yak3d
 yamshta
 ydah
 -zaviro
+zenangst
 zenyr
 zeshi09
 zubb
