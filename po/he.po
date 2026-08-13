@@ -184,7 +184,7 @@ msgstr "כרטיסייה"
 #: src/apprt/gtk/ui/1.2/surface.blp:386 src/apprt/gtk/ui/1.5/window.blp:232
 #: src/apprt/gtk/ui/1.5/window.blp:339 src/input/command.zig:464
 msgid "Change Tab Title…"
-msgstr "שנה/י את כותרת הכרטיסייה…"
+msgstr "שינוי כותרת הכרטיסייה…"
 
 #: src/apprt/gtk/ui/1.2/surface.blp:391 src/apprt/gtk/ui/1.5/window.blp:60
 #: src/apprt/gtk/ui/1.5/window.blp:110 src/apprt/gtk/ui/1.5/window.blp:237
@@ -203,7 +203,7 @@ msgstr "חלון"
 
 #: src/apprt/gtk/ui/1.2/surface.blp:406 src/apprt/gtk/ui/1.5/window.blp:215
 msgid "Change Window Title…"
-msgstr "שנה/י את כותרת החלון…"
+msgstr "שינוי כותרת החלון…"
 
 #: src/apprt/gtk/ui/1.2/surface.blp:411 src/apprt/gtk/ui/1.5/window.blp:220
 #: src/input/command.zig:421
@@ -221,11 +221,15 @@ msgstr "הגדרות"
 
 #: src/apprt/gtk/ui/1.2/surface.blp:427 src/apprt/gtk/ui/1.5/window.blp:306
 msgid "Open Configuration in OS Editor"
-msgstr "פתח/י הגדרות בעורך של מערכת ההפעלה"
+msgstr "פתיחת ההגדרות בעורך של מערכת ההפעלה"
+
+#: src/input/command.zig:589
+msgid "Open the config file with the OS's default editor."
+msgstr "פתח/י את קובץ ההגדרות בעורך טקסט שמוגדר כברירת המחדל של מערכת ההפעלה
 
 #: src/apprt/gtk/ui/1.2/surface.blp:433 src/apprt/gtk/ui/1.5/window.blp:312
 msgid "Open Configuration in New Window"
-msgstr "פתח/י הגדרות בחלון חדש"
+msgstr "פתיחת ההגדרות בחלון חדש"
 
 #: src/apprt/gtk/ui/1.5/title-dialog.blp:5
 msgid "Leave blank to restore the default title."
@@ -281,7 +285,7 @@ msgstr "קיצור המקשים הגלובלי אינו זמין"
 
 #: src/apprt/gtk/class/application.zig:2259
 msgid "Export Terminal IO Events"
-msgstr "ייצא/י אירועי קלט/פלט של המסוף"
+msgstr "ייצוא אירועי קלט/פלט של המסוף"
 
 #: src/apprt/gtk/class/application.zig:2262
 msgid "Export"
@@ -372,7 +376,7 @@ msgstr "שינוי כותרת הכרטיסייה"
 
 #: src/apprt/gtk/class/title_dialog.zig:229
 msgid "Change Window Title"
-msgstr "שינוי כותרת חלון"
+msgstr "שינוי כותרת החלון"
 
 #: src/apprt/gtk/class/window.zig:1153
 msgid "Reloaded the configuration"
@@ -802,11 +806,11 @@ msgstr "שנה/י את כותרת המסוף…"
 
 #: src/input/command.zig:459
 msgid "Prompt for a new title for the current terminal."
-msgstr "בקש/י כותרת חדשה עבור המסוף הנוכחי."
+msgstr "הצג/י בקשה לכותרת חדשה עבור המסוף הנוכחי."
 
 #: src/input/command.zig:465
 msgid "Prompt for a new title for the current tab."
-msgstr "בקש/י כותרת חדשה עבור הכרטיסייה הנוכחית."
+msgstr "הצג/י בקשה לכותרת חדשה עבור הכרטיסייה הנוכחית."
 
 #: src/input/command.zig:478
 msgid "Split the terminal to the left."
@@ -950,7 +954,7 @@ msgstr "פתיחת ההגדרות באמצעות עורך הטקסט של המע
 
 #: src/input/command.zig:589
 msgid "Open the config file with the OS's default editor."
-msgstr "פתח/י את קובץ ההגדרות בעורך טקסט שמוגדר כברירת המחדל של מערכת ההפעלה."
+msgstr "פתח/י את קובץ ההגדרות בעורך הטקסט שמוגדר כברירת המחדל של מערכת ההפעלה."
 
 #: src/input/command.zig:593
 msgid "Open Config in New Terminal Window"
