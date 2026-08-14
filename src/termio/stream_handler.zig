@@ -16,12 +16,22 @@ const posix = std.posix;
 
 const log = std.log.scoped(.io_handler);
 
-/// Copy the longest valid UTF-8 prefix that fits in a sentinel-terminated
-/// destination. Desktop notification strings are passed to platform APIs that
-/// require valid UTF-8, so truncation must not split a multibyte codepoint.
+/// UTF-8 continuation bytes occupy the range 0x80 through 0xBF.
+fn isUtf8ContinuationByte(byte: u8) bool {
+    return switch (byte) {
+        0x80...0xBF => true,
+        else => false,
+    };
+}
+
+/// Copy as much of `src` as fits, backing up from a UTF-8 continuation byte
+/// so valid input is never truncated in the middle of a codepoint.
 fn copyUtf8Z(comptime capacity: usize, dst: *[capacity:0]u8, src: []const u8) void {
     var len = @min(src.len, capacity);
-    while (len > 0 and !std.unicode.utf8ValidateSlice(src[0..len])) : (len -= 1) {}
+    while (len > 0 and
+        len < src.len and
+        isUtf8ContinuationByte(src[len])) : (len -= 1)
+    {}
 
     @memcpy(dst[0..len], src[0..len]);
     dst[len] = 0;
@@ -1481,13 +1491,46 @@ pub const StreamHandler = struct {
     }
 };
 
-test "copyUtf8Z truncates at a UTF-8 codepoint boundary" {
+test "copyUtf8Z handles len at the final byte of every UTF-8 sequence length" {
+    var dst_1_byte: [1:0]u8 = undefined;
+    const src_ending_in_1_byte_codepoint = "ab";
+    try std.testing.expect(!isUtf8ContinuationByte(
+        src_ending_in_1_byte_codepoint[dst_1_byte.len],
+    ));
+    copyUtf8Z(dst_1_byte.len, &dst_1_byte, src_ending_in_1_byte_codepoint);
+    try std.testing.expectEqualStrings("a", std.mem.sliceTo(&dst_1_byte, 0));
+
+    var dst_2_bytes: [2:0]u8 = undefined;
+    const src_ending_in_2_byte_codepoint = "aЯ";
+    try std.testing.expect(isUtf8ContinuationByte(
+        src_ending_in_2_byte_codepoint[dst_2_bytes.len],
+    ));
+    copyUtf8Z(dst_2_bytes.len, &dst_2_bytes, src_ending_in_2_byte_codepoint);
+    try std.testing.expectEqualStrings("a", std.mem.sliceTo(&dst_2_bytes, 0));
+
+    var dst_3_bytes: [3:0]u8 = undefined;
+    const src_ending_in_3_byte_codepoint = "a€";
+    try std.testing.expect(isUtf8ContinuationByte(
+        src_ending_in_3_byte_codepoint[dst_3_bytes.len],
+    ));
+    copyUtf8Z(dst_3_bytes.len, &dst_3_bytes, src_ending_in_3_byte_codepoint);
+    try std.testing.expectEqualStrings("a", std.mem.sliceTo(&dst_3_bytes, 0));
+
+    var dst_4_bytes: [4:0]u8 = undefined;
+    const src_ending_in_4_byte_codepoint = "a😀";
+    try std.testing.expect(isUtf8ContinuationByte(
+        src_ending_in_4_byte_codepoint[dst_4_bytes.len],
+    ));
+    copyUtf8Z(dst_4_bytes.len, &dst_4_bytes, src_ending_in_4_byte_codepoint);
+    try std.testing.expectEqualStrings("a", std.mem.sliceTo(&dst_4_bytes, 0));
+}
+
+test "copyUtf8Z keeps a complete codepoint at the truncation boundary" {
     var dst: [5:0]u8 = undefined;
 
-    copyUtf8Z(dst.len, &dst, "abcdЯ");
+    copyUtf8Z(dst.len, &dst, "abcЯz");
 
-    try std.testing.expectEqualStrings("abcd", std.mem.sliceTo(&dst, 0));
-    try std.testing.expect(std.unicode.utf8ValidateSlice(std.mem.sliceTo(&dst, 0)));
+    try std.testing.expectEqualStrings("abcЯ", std.mem.sliceTo(&dst, 0));
 }
 
 test "copyUtf8Z preserves UTF-8 that fits" {
