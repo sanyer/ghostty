@@ -9973,9 +9973,32 @@ pub const Theme = struct {
         // Trim our value
         const trimmed = std.mem.trim(u8, input, cli.args.whitespace);
 
+        // Expand our value
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+        const expanded = expanded: {
+            if (!std.mem.startsWith(u8, trimmed, "~/"))
+                break :expanded trimmed;
+        
+            var environ_map = global.environMap() catch |err| {
+                log.warn("error getting environment map for theme path {s}: {}", .{ trimmed, err });
+                break :expanded trimmed;
+            };
+            defer environ_map.deinit();
+        
+            break :expanded internal_os.expandHome(
+                global.io(),
+                &environ_map,
+                trimmed,
+                &buf,
+            ) catch |err| {
+                log.warn("error expanding home directory in theme path {s}: {}", .{ trimmed, err });
+                break :expanded trimmed;
+            };
+        };
+
         // Set the value to the specified value directly.
         self.* = .{
-            .light = try alloc.dupeZ(u8, trimmed),
+            .light = try alloc.dupeZ(u8, expanded),
             .dark = self.light,
         };
     }
@@ -10026,6 +10049,33 @@ pub const Theme = struct {
             try v.parseCLI(alloc, "  foo  ");
             try testing.expectEqualStrings("foo", v.light);
             try testing.expectEqualStrings("foo", v.dark);
+        }
+
+        // Expand home
+        {
+            var environ_map = try testing.environ.createMap(alloc);
+            defer environ_map.deinit();
+
+            var home_buf: [std.fs.max_path_bytes]u8 = undefined;
+            const home = try internal_os.expandHome(
+                testing.io,
+                &environ_map,
+                "~/theme",
+                &home_buf,
+            );
+
+            var v: Theme = undefined;
+            try v.parseCLI(alloc, "~/theme/foo");
+
+            var expected_buf: [std.fs.max_path_bytes]u8 = undefined;
+            const expected = try std.fmt.bufPrint(
+                &expected_buf,
+                "{s}/theme/foo",
+                .{home},
+            );
+
+            try testing.expectEqualStrings(expected, v.light);
+            try testing.expectEqualStrings(expected, v.dark);
         }
 
         // Light/dark

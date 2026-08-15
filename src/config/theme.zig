@@ -5,8 +5,6 @@ const internal_os = @import("../os/main.zig");
 const cli = @import("../cli.zig");
 const global = @import("../global.zig");
 
-const log = std.log.scoped(.config);
-
 /// Location of possible themes. The order of this enum matters because it
 /// defines the priority of theme search (from top to bottom).
 pub const Location = enum {
@@ -115,40 +113,12 @@ pub const LocationIterator = struct {
 /// will be added to the list and null will be returned.
 pub fn open(
     arena_alloc: Allocator,
-    theme_: []const u8,
+    theme: []const u8,
     diags: *cli.DiagnosticList,
 ) error{ OutOfMemory, Unexpected }!?struct {
     path: []const u8,
     file: std.Io.File,
 } {
-    var buf: [std.fs.max_path_bytes]u8 = undefined;
-    const theme = expanded: {
-        if (!std.mem.startsWith(u8, theme_, "~/"))
-            break :expanded theme_;
-
-        var environ_map = global.environMap() catch |err| {
-            log.warn(
-                "error getting environment map when expanding theme path={s}: {}",
-                .{ theme_, err },
-            );
-            break :expanded theme_;
-        };
-        defer environ_map.deinit();
-
-        break :expanded internal_os.expandHome(
-            global.io(),
-            &environ_map,
-            theme_,
-            &buf,
-        ) catch |err| {
-            log.warn(
-                "error expanding home directory for theme path={s}: {}",
-                .{ theme_, err },
-            );
-            break :expanded theme_;
-        };
-    };
-
     // Absolute themes are loaded a different path.
     if (std.fs.path.isAbsolute(theme)) {
         const file: std.Io.File = try openAbsolute(
