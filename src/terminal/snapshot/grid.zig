@@ -893,7 +893,7 @@ pub fn decode(
                 reader,
                 cells[0..count],
             ),
-            .four => try decodeWordCells(
+            .four => _ = try decodeWordCells(
                 .four,
                 page,
                 row,
@@ -913,7 +913,9 @@ pub fn decode(
                     try reader.readSliceAll(
                         std.mem.sliceAsBytes(cells[0..count]),
                     );
+                    var row_or: u64 = 0;
                     for (0..count) |x| {
+                        row_or |= words[x];
                         applyCell(
                             page,
                             row,
@@ -924,8 +926,9 @@ pub fn decode(
                             hyperlink_remap,
                         );
                     }
+                    normalizeWideRow(.eight, row, cells, count, row_or);
                 } else {
-                    try decodeWordCells(
+                    _ = try decodeWordCells(
                         .eight,
                         page,
                         row,
@@ -1102,6 +1105,9 @@ inline fn widenValue(
 
 /// Decode one row of width-four or fallback full-width cells through the
 /// complete per-cell normalization path.
+///
+/// Returns the bitwise OR of every decoded wire word so callers can gate
+/// the trailing wide-pair resolution pass without a second scan.
 fn decodeWordCells(
     comptime width: Cell.EncodedWidth,
     page: *TerminalPage,
@@ -1111,8 +1117,9 @@ fn decodeWordCells(
     reader: *std.Io.Reader,
     style_remap: *const StyleRemap,
     hyperlink_remap: *const HyperlinkRemap,
-) DecodeError!void {
+) DecodeError!u64 {
     const size = comptime width.size();
+    var row_or: u64 = 0;
 
     // The staged payload path has the complete row buffered.
     const total = count * size;
@@ -1124,6 +1131,7 @@ fn decodeWordCells(
                 bytes[x * size ..][0..size],
                 .little,
             ));
+            row_or |= bits;
             applyCell(
                 page,
                 row,
@@ -1135,12 +1143,14 @@ fn decodeWordCells(
             );
         }
         reader.toss(total);
-        return;
+        normalizeWideRow(width, row, cells, count, row_or);
+        return row_or;
     }
 
     // Streaming sources fall back to per-cell reads.
     for (0..count) |x| {
         const bits = width.extend(try io.readInt(reader, width.Int()));
+        row_or |= bits;
         applyCell(
             page,
             row,
@@ -1151,6 +1161,28 @@ fn decodeWordCells(
             hyperlink_remap,
         );
     }
+    normalizeWideRow(width, row, cells, count, row_or);
+    return row_or;
+}
+
+/// Resolve wide-pair relationships for one decoded row.
+///
+/// Cell decoding stores every cell unresolved, so this pass applies
+/// `normalizeWide` in order, which is equivalent to interleaving it with
+/// the stores. Rows whose word OR carries no wide bits are already
+/// normalized: every cell is narrow. Width four and narrower transports
+/// cannot encode wide bits at all, so those rows skip the check entirely.
+inline fn normalizeWideRow(
+    comptime width: Cell.EncodedWidth,
+    row: *const TerminalRow,
+    cells: []TerminalCell,
+    count: usize,
+    row_or: u64,
+) void {
+    if (comptime width != .eight) return;
+    const wide_mask: u64 = comptime @bitCast(Cell{ .width = 3 });
+    if (row_or & wide_mask == 0) return;
+    for (0..count) |x| normalizeWide(row, cells, x);
 }
 
 /// Whether the value is a valid Unicode scalar value.
@@ -1160,10 +1192,10 @@ inline fn validScalar(cp: u32) bool {
 
 /// Normalize one encoded cell word and store it at `cells[x]`.
 ///
-/// This owns every per-cell decode rule except grapheme suffixes: content
-/// validation, reserved-value degradation, style and hyperlink remapping
-/// with reference counting, and wide-pair normalization against already
-/// decoded neighbors.
+/// This owns every per-cell decode rule except grapheme suffixes and
+/// wide-pair resolution: content validation, reserved-value degradation,
+/// and style and hyperlink remapping with reference counting. Callers run
+/// `normalizeWideRow` over the stored row afterward.
 fn applyCell(
     page: *TerminalPage,
     row: *TerminalRow,
@@ -1179,7 +1211,6 @@ fn applyCell(
     // reference counting, or table lookups.
     if (bits_wire == 0) {
         storeCell(cell, 0);
-        normalizeWide(row, cells, x);
         return;
     }
 
@@ -1247,8 +1278,6 @@ fn applyCell(
             page.hyperlink_set.release(page.memory, link_native);
         };
     }
-
-    normalizeWide(row, cells, x);
 }
 
 /// Resolve wide-pair relationships for the cell at `x` against its already
