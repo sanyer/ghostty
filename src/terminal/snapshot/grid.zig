@@ -865,13 +865,21 @@ pub fn decode(
             break :header .{ row_header, count };
         };
 
+        // A fully default row needs no work at all: decoded pages start
+        // zeroed, which is exactly the default row and cell state.
+        if (@as(u8, @bitCast(row_header)) == 0 and count == 0) continue;
+
+        // Update the row fields through one load and store instead of a
+        // read-modify-write per packed field.
         const row = page.getRow(y);
-        row.wrap = row_header.wrap;
-        row.wrap_continuation = row_header.wrap_continuation;
-        row.semantic_prompt = std.enums.fromInt(
+        var row_value = row.*;
+        row_value.wrap = row_header.wrap;
+        row_value.wrap_continuation = row_header.wrap_continuation;
+        row_value.semantic_prompt = std.enums.fromInt(
             TerminalRow.SemanticPrompt,
             row_header.semantic_prompt,
         ) orelse .none;
+        row.* = row_value;
 
         const cells = page.getCells(row);
         if (count > cells.len) return error.InvalidRowCellCount;
@@ -983,8 +991,34 @@ fn widenCells(
 ) void {
     const size = comptime width.size();
 
+    // With the bulk codec layout this is a pure widening store: sixteen
+    // transported bytes per step, shuffling each pair of encoded values
+    // into u64 lane position against a zero vector and shifting them into
+    // the content field. Zig 0.16 disables loop auto-vectorization, so the
+    // scalar loop would issue one widening store per cell.
+    if (comptime bulk_codec) {
+        const words: [*]u64 = @ptrCast(cells.ptr);
+        const step = 16 / size;
+        var i: usize = 0;
+        while (i + step <= cells.len) : (i += step) {
+            widenStep(width, bytes, words, i);
+        }
+        if (i < cells.len) {
+            if (cells.len >= step) {
+                // Reprocess the final full window with overlapping stores,
+                // which rewrite the same widened values.
+                widenStep(width, bytes, words, cells.len - step);
+            } else {
+                while (i < cells.len) : (i += 1) {
+                    words[i] = width.extend(widenValue(width, bytes[i * size ..]));
+                }
+            }
+        }
+        return;
+    }
+
     // When the native cell matches the wire word, this is a pure widening
-    // loop over integers that the compiler can vectorize.
+    // loop over integers.
     if (comptime native_matches_wire) {
         const words: [*]u64 = @ptrCast(cells.ptr);
         for (0..cells.len) |i| {
@@ -995,6 +1029,58 @@ fn widenCells(
 
     for (cells, 0..) |*cell, i| {
         storeCell(cell, width.extend(widenValue(width, bytes[i * size ..])));
+    }
+}
+
+/// Widen sixteen transported bytes into their cell words at cell index `i`:
+/// shuffle each pair of encoded values into u64 lane position against a
+/// zero vector, then shift the value into the content field. Width two
+/// first degrades surrogate lanes to U+FFFD, matching `widenValue`.
+inline fn widenStep(
+    comptime width: Cell.EncodedWidth,
+    bytes: []const u8,
+    words: [*]u64,
+    i: usize,
+) void {
+    const size = comptime width.size();
+    const step = 16 / size;
+
+    var in: @Vector(16, u8) = @as(
+        *align(1) const @Vector(16, u8),
+        @ptrCast(bytes[i * size ..].ptr),
+    ).*;
+
+    // Width two admits surrogates, which degrade to U+FFFD exactly
+    // like `widenValue`. Width one cannot encode an invalid scalar.
+    if (comptime width == .two) {
+        const values: @Vector(8, u16) = @bitCast(in);
+        const invalid = (values & @as(@Vector(8, u16), @splat(0xF800))) ==
+            @as(@Vector(8, u16), @splat(0xD800));
+        in = @bitCast(@select(
+            u16,
+            invalid,
+            @as(@Vector(8, u16), @splat(0xFFFD)),
+            values,
+        ));
+    }
+
+    const zero: @Vector(16, u8) = @splat(0);
+    inline for (0..step / 2) |pair| {
+        const mask: @Vector(16, i32) = comptime mask: {
+            var mask: [16]i32 = @splat(~@as(i32, 0));
+            for (0..size) |byte| {
+                mask[byte] = @intCast((2 * pair) * size + byte);
+                mask[8 + byte] = @intCast((2 * pair + 1) * size + byte);
+            }
+            break :mask mask;
+        };
+        const lanes: @Vector(2, u64) = @bitCast(
+            @shuffle(u8, in, zero, mask),
+        );
+        @as(
+            *align(@alignOf(u64)) @Vector(2, u64),
+            @ptrCast(words + i + 2 * pair),
+        ).* = lanes << @splat(@bitOffsetOf(Cell, "content"));
     }
 }
 
