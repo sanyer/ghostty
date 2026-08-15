@@ -405,7 +405,7 @@ msgstr "העתקה ללוח ההעתקה"
 #: src/input/command.zig:156
 msgid ""
 "Copy the selected text to the clipboard in both plain and styled formats."
-msgstr "העתק/י את הטקסט הנבחר ללוח ההעתקה בפורמט טקסט פשוט ומעוצב."
+msgstr "העתק/י את הטקסט הנבחר ללוח ההעתקה בפורמטים של טקסט פשוט או מעוצב."
 
 #: src/input/command.zig:159
 msgid "Copy Selection as Plain Text to Clipboard"
