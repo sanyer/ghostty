@@ -755,36 +755,57 @@ fn encodeGraphemes(
     page: *const TerminalPage,
     writer: *std.Io.Writer,
 ) EncodeError!void {
-    // Count and validate entries before the section header so the count is
-    // always exact. Rows without the native grapheme hint contain no
-    // grapheme cells in any intact page.
-    var entries: u32 = 0;
-    for (0..page.size.rows) |y| {
-        const row = page.getRow(y);
-        if (!row.grapheme) continue;
-        for (page.getCells(row)) |*cell| {
-            if (!cell.hasGrapheme()) continue;
-            const cps = page.lookupGrapheme(cell) orelse unreachable;
-            if (cps.len > std.math.maxInt(u16)) return error.TooManyGraphemes;
-            entries += 1;
-        }
-    }
-
-    try io.writeInt(writer, u32, entries);
+    // Every grapheme cell owns exactly one entry in the page's grapheme
+    // map, so the section header comes straight from the page without a
+    // counting pass over the grid. Rows without the native grapheme hint
+    // contain no grapheme cells in any intact page.
+    const entries = page.graphemeCount();
+    try io.writeInt(writer, u32, @intCast(entries));
     if (entries == 0) return;
 
+    // Entries are batched into a local buffer so hot pages perform one
+    // writer call per flush instead of several per entry.
+    var buffer: [4096]u8 = undefined;
+    var used: usize = 0;
+    var emitted: usize = 0;
     for (0..page.size.rows) |y| {
         const row = page.getRow(y);
         if (!row.grapheme) continue;
         for (page.getCells(row), 0..) |*cell, x| {
             if (!cell.hasGrapheme()) continue;
             const cps = page.lookupGrapheme(cell) orelse unreachable;
-            try io.writeInt(writer, u16, @intCast(y));
-            try io.writeInt(writer, u16, @intCast(x));
-            try io.writeInt(writer, u16, @intCast(cps.len));
-            for (cps) |cp| try io.writeInt(writer, u32, cp);
+            if (cps.len > std.math.maxInt(u16)) return error.TooManyGraphemes;
+            emitted += 1;
+
+            const needed = 6 + cps.len * 4;
+            if (buffer.len - used < needed) {
+                try writer.writeAll(buffer[0..used]);
+                used = 0;
+            }
+            if (needed > buffer.len) {
+                // An entry larger than the whole buffer streams directly.
+                try io.writeInt(writer, u16, @intCast(y));
+                try io.writeInt(writer, u16, @intCast(x));
+                try io.writeInt(writer, u16, @intCast(cps.len));
+                for (cps) |cp| try io.writeInt(writer, u32, cp);
+                continue;
+            }
+
+            std.mem.writeInt(u16, buffer[used..][0..2], @intCast(y), .little);
+            std.mem.writeInt(u16, buffer[used + 2 ..][0..2], @intCast(x), .little);
+            std.mem.writeInt(u16, buffer[used + 4 ..][0..2], @intCast(cps.len), .little);
+            used += 6;
+            for (cps) |cp| {
+                std.mem.writeInt(u32, buffer[used..][0..4], cp, .little);
+                used += 4;
+            }
         }
     }
+    try writer.writeAll(buffer[0..used]);
+
+    // The declared count is trusted by decoders for framing, so the grid
+    // must have produced exactly that many entries.
+    assert(emitted == entries);
 }
 
 pub const DecodeError = std.Io.Reader.Error || error{
@@ -1183,9 +1204,23 @@ fn decodeGraphemes(
 ) DecodeError!void {
     const entries = try io.readInt(reader, u32);
     for (0..entries) |_| {
-        const y = try io.readInt(reader, u16);
-        const x = try io.readInt(reader, u16);
-        const cp_count = try io.readInt(reader, u16);
+        // The staged and borrowed payload paths have every header buffered.
+        const y: u16, const x: u16, const cp_count: u16 = header: {
+            if (reader.bufferedLen() >= 6) {
+                const bytes = reader.buffered()[0..6];
+                defer reader.toss(6);
+                break :header .{
+                    std.mem.readInt(u16, bytes[0..2], .little),
+                    std.mem.readInt(u16, bytes[2..4], .little),
+                    std.mem.readInt(u16, bytes[4..6], .little),
+                };
+            }
+            break :header .{
+                try io.readInt(reader, u16),
+                try io.readInt(reader, u16),
+                try io.readInt(reader, u16),
+            };
+        };
 
         // Resolve the target cell. Entries whose target cannot carry a
         // suffix are optional detail: their codepoints are consumed to
@@ -1207,29 +1242,65 @@ fn decodeGraphemes(
             break :target .{ .row = row, .cell = cell };
         };
 
-        // Always consume every declared codepoint. Invalid scalars and NUL are
-        // not meaningful grapheme suffix components and are ignored. If native
-        // capacity is exhausted, remove any prefix already attached so the
-        // cell never exposes a truncated cluster.
-        var accept = target != null;
-        for (0..cp_count) |_| {
-            const cp = try io.readInt(reader, u32);
-            if (!accept) continue;
-            if (cp == 0 or !validScalar(cp)) continue;
+        // Always consume every declared codepoint. Invalid scalars and NUL
+        // are not meaningful grapheme suffix components and are ignored. A
+        // dropped entry's codepoints are discarded in bulk.
+        const resolved = target orelse {
+            try reader.discardAll(@as(usize, cp_count) * 4);
+            continue;
+        };
 
-            page.appendGrapheme(
-                target.?.row,
-                target.?.cell,
-                @intCast(cp),
-            ) catch {
-                if (target.?.cell.hasGrapheme()) {
-                    page.clearGrapheme(target.?.cell);
-                    page.updateRowGraphemeFlag(target.?.row);
-                }
-                accept = false;
-            };
+        var accept = true;
+        var index: usize = 0;
+        while (index < cp_count) {
+            const buffered = reader.buffered();
+            if (buffered.len >= 4) {
+                const n = @min(cp_count - index, buffered.len / 4);
+                for (0..n) |i| applyGraphemeSuffix(
+                    page,
+                    resolved.row,
+                    resolved.cell,
+                    &accept,
+                    std.mem.readInt(u32, buffered[i * 4 ..][0..4], .little),
+                );
+                reader.toss(n * 4);
+                index += n;
+            } else {
+                applyGraphemeSuffix(
+                    page,
+                    resolved.row,
+                    resolved.cell,
+                    &accept,
+                    try io.readInt(reader, u32),
+                );
+                index += 1;
+            }
         }
     }
+}
+
+/// Attach one decoded suffix codepoint to its resolved target cell.
+///
+/// If native capacity is exhausted, any prefix already attached is removed
+/// so the cell never exposes a truncated cluster, and `accept` latches
+/// false so the entry's remaining codepoints are consumed but dropped.
+fn applyGraphemeSuffix(
+    page: *TerminalPage,
+    row: *TerminalRow,
+    cell: *TerminalCell,
+    accept: *bool,
+    cp: u32,
+) void {
+    if (!accept.*) return;
+    if (cp == 0 or !validScalar(cp)) return;
+
+    page.appendGrapheme(row, cell, @intCast(cp)) catch {
+        if (cell.hasGrapheme()) {
+            page.clearGrapheme(cell);
+            page.updateRowGraphemeFlag(row);
+        }
+        accept.* = false;
+    };
 }
 
 /// The encoded word for one native cell and its hyperlink ID.
