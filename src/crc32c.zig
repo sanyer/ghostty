@@ -7,8 +7,7 @@
 //! compile time.
 //!
 //! Targets without a dedicated instruction, such as WebAssembly, use a
-//! slicing-by-16 table implementation that processes sixteen bytes per
-//! iteration instead of one.
+//! custom implementation that is faster than Zig's stdlib.
 //!
 //! The resulting value is identical across all backends: this is the
 //! iSCSI CRC32C parameter set (reflected, initial and final XOR
@@ -149,13 +148,21 @@ const Software = struct {
     /// The reflected CRC32C (Castagnoli) polynomial.
     const reflected_poly: u32 = 0x82F63B78;
 
-    /// Slicing tables: `tables[i][b]` is the CRC of byte `b` followed
-    /// by `i` zero bytes. Table zero is the classic one-byte-per-step table;
-    /// the higher tables let one iteration fold sixteen input bytes with
-    /// sixteen independent lookups instead of a sixteen-step dependency chain.
-    const tables: [16][256]u32 = tables: {
-        @setEvalBranchQuota(100_000);
-        var result: [16][256]u32 = undefined;
+    /// Number of slicing tables, which is also the bytes folded per
+    /// iteration.
+    const slices = 16;
+
+    /// Inputs below this length use the single-stream pass: the
+    /// stream-combine matrix work would not pay for itself.
+    const multi_stream_threshold = 4096;
+
+    /// Slicing tables: `tables[i][b]` is the CRC of byte `b` followed by
+    /// `i` zero bytes. Table zero is the classic one-byte-per-step table;
+    /// the higher tables let one iteration fold a whole block with
+    /// independent lookups instead of a byte-by-byte dependency chain.
+    const tables: [slices][256]u32 = tables: {
+        @setEvalBranchQuota(200_000);
+        var result: [slices][256]u32 = undefined;
         for (0..256) |n| {
             var crc: u32 = n;
             for (0..8) |_| {
@@ -163,7 +170,7 @@ const Software = struct {
             }
             result[0][n] = crc;
         }
-        for (1..16) |i| {
+        for (1..slices) |i| {
             for (0..256) |n| {
                 const prev = result[i - 1][n];
                 result[i][n] = (prev >> 8) ^ result[0][prev & 0xFF];
@@ -172,34 +179,135 @@ const Software = struct {
         break :tables result;
     };
 
-    /// One update pass using slicing-by-16: each iteration XORs the running
-    /// CRC into the first of four little-endian words and folds all sixteen
-    /// bytes through per-position tables. The remainder finishes one byte per
-    /// step through table zero.
     fn update(initial: u32, bytes: []const u8) u32 {
+        if (bytes.len >= multi_stream_threshold) return updateMulti(
+            initial,
+            bytes,
+        );
+
+        return updateSingle(initial, bytes);
+    }
+
+    /// One single-stream update pass using slicing.
+    fn updateSingle(initial: u32, bytes: []const u8) u32 {
         const t = &tables;
         var crc = initial;
-        var remaining = bytes;
-
-        while (remaining.len >= 16) : (remaining = remaining[16..]) {
-            const a = std.mem.readInt(u32, remaining[0..4], .little) ^ crc;
-            const b = std.mem.readInt(u32, remaining[4..8], .little);
-            const c = std.mem.readInt(u32, remaining[8..12], .little);
-            const d = std.mem.readInt(u32, remaining[12..16], .little);
-            crc = t[15][a & 0xFF] ^ t[14][(a >> 8) & 0xFF] ^
-                t[13][(a >> 16) & 0xFF] ^ t[12][a >> 24] ^
-                t[11][b & 0xFF] ^ t[10][(b >> 8) & 0xFF] ^
-                t[9][(b >> 16) & 0xFF] ^ t[8][b >> 24] ^
-                t[7][c & 0xFF] ^ t[6][(c >> 8) & 0xFF] ^
-                t[5][(c >> 16) & 0xFF] ^ t[4][c >> 24] ^
-                t[3][d & 0xFF] ^ t[2][(d >> 8) & 0xFF] ^
-                t[1][(d >> 16) & 0xFF] ^ t[0][d >> 24];
+        var i: usize = 0;
+        while (i + slices <= bytes.len) : (i += slices) {
+            crc = foldChunk(bytes, i, crc);
         }
-        for (remaining) |byte| {
+        for (bytes[i..]) |byte| {
             crc = (crc >> 8) ^ t[0][(crc ^ byte) & 0xFF];
         }
         return crc;
     }
+
+    /// One update pass as three independent interleaved streams. Faster
+    /// for large enough inputs.
+    fn updateMulti(initial: u32, bytes: []const u8) u32 {
+        // Both leading parts are block multiples so the interleaved loop
+        // needs no tail handling; the third part absorbs the remainder.
+        const part = (bytes.len / 3) & ~@as(usize, slices - 1);
+        const p0 = bytes[0..part];
+        const p1 = bytes[part..][0..part];
+        const p2 = bytes[2 * part ..];
+
+        var s0 = initial;
+        var s1: u32 = 0;
+        var s2: u32 = 0;
+        var i: usize = 0;
+        while (i + slices <= part) : (i += slices) {
+            s0 = foldChunk(p0, i, s0);
+            s1 = foldChunk(p1, i, s1);
+            s2 = foldChunk(p2, i, s2);
+        }
+        s2 = updateSingle(s2, p2[part..]);
+
+        const s01 = s1 ^ zeroShift(s0, p1.len);
+        return s2 ^ zeroShift(s01, p2.len);
+    }
+
+    /// Fold one aligned block through the per-position slicing tables.
+    /// The running CRC must already be XORed into the block's first word.
+    inline fn foldBlock(comptime len: usize, words: *const [len / 4]u32) u32 {
+        const t = &tables;
+        var crc: u32 = 0;
+        inline for (0..len / 4) |w| {
+            const word = words[w];
+            const base = len - 1 - w * 4;
+            crc ^= t[base][word & 0xFF] ^
+                t[base - 1][(word >> 8) & 0xFF] ^
+                t[base - 2][(word >> 16) & 0xFF] ^
+                t[base - 3][word >> 24];
+        }
+        return crc;
+    }
+
+    /// Fold the block starting at `offset`, chaining the running CRC state.
+    inline fn foldChunk(bytes: []const u8, offset: usize, crc: u32) u32 {
+        var words: [slices / 4]u32 = undefined;
+        inline for (&words, 0..) |*word, w| {
+            word.* = std.mem.readInt(
+                u32,
+                bytes[offset + w * 4 ..][0..4],
+                .little,
+            );
+        }
+        words[0] ^= crc;
+        return foldBlock(slices, &words);
+    }
+
+    /// Advance a CRC state as if `len` zero bytes had been processed.
+    fn zeroShift(state: u32, len: usize) u32 {
+        var s = state;
+        var remaining = len;
+        var k: usize = 0;
+        while (remaining != 0) : ({
+            remaining >>= 1;
+            k += 1;
+        }) {
+            if (remaining & 1 != 0) {
+                const mat = &zero_shift_matrices[k / 2];
+                s = matTimesVec(mat, s);
+                if (k % 2 != 0) s = matTimesVec(mat, s);
+            }
+        }
+        return s;
+    }
+
+    /// Multiply the GF(2) matrix by a CRC state column vector.
+    inline fn matTimesVec(mat: *const [32]u32, vec: u32) u32 {
+        var sum: u32 = 0;
+        var v = vec;
+        var i: usize = 0;
+        while (v != 0) : ({
+            v >>= 1;
+            i += 1;
+        }) {
+            if (v & 1 != 0) sum ^= mat[i];
+        }
+        return sum;
+    }
+
+    const zero_shift_matrices: [32][32]u32 = matrices: {
+        @setEvalBranchQuota(500_000);
+        var matrices: [32][32]u32 = undefined;
+        var previous: [32]u32 = undefined;
+        for (0..32) |i| {
+            const unit: u32 = 1 << i;
+            previous[i] = (unit >> 8) ^ tables[0][unit & 0xFF];
+        }
+        matrices[0] = previous;
+        for (1..64) |k| {
+            var squared: [32]u32 = undefined;
+            for (0..32) |i| {
+                squared[i] = matTimesVec(&previous, previous[i]);
+            }
+            previous = squared;
+            if (k % 2 == 0) matrices[k / 2] = squared;
+        }
+        break :matrices matrices;
+    };
 };
 
 /// The standard-library implementation of the same parameter set. This is
@@ -234,6 +342,39 @@ test "software slicing matches the standard library" {
         try std.testing.expectEqual(
             reference.crc,
             Software.update(first, long[split..]),
+        );
+    }
+}
+
+test "software multi-stream matches the standard library" {
+    // Lengths around and far above the interleaving threshold, plus odd
+    // remainders, so all three streams and both combine steps are covered.
+    var bytes: [96 * 1024]u8 = undefined;
+    var prng = std.Random.DefaultPrng.init(0x3517_1A3B);
+    prng.random().bytes(&bytes);
+
+    for ([_]usize{
+        Software.multi_stream_threshold - 1,
+        Software.multi_stream_threshold,
+        Software.multi_stream_threshold + 1,
+        Software.multi_stream_threshold + 97,
+        12 * 1024,
+        64 * 1024 + 31,
+        bytes.len,
+    }) |len| {
+        const input = bytes[0..len];
+        var reference: Reference = .{ .crc = 0xFFFF_FFFF };
+        reference.update(input);
+        try std.testing.expectEqual(
+            reference.crc,
+            Software.update(0xFFFF_FFFF, input),
+        );
+
+        // Continuation across a split inside the multi-stream range.
+        const first = Software.update(0xFFFF_FFFF, input[0 .. len / 2]);
+        try std.testing.expectEqual(
+            reference.crc,
+            Software.update(first, input[len / 2 ..]),
         );
     }
 }
