@@ -468,25 +468,21 @@ pub fn encode(
         const row = page.getRow(y);
         const cells = page.getCells(row);
 
-        // Trailing default cells decode implicitly. Wide/spacer pairs and
+        // Trailing default cells decode implicitly: wide/spacer pairs and
         // hyperlinked or styled cells are always nonzero, so eliding the
-        // zero suffix never drops encoded state.
-        const count: usize = count: {
-            var i: usize = cells.len;
-            while (i > 0) : (i -= 1) {
-                if (!cells[i - 1].isZero()) break :count i;
-            }
-            break :count 0;
-        };
+        // zero suffix never drops encoded state. The scan also accumulates
+        // the OR of the row's cell words to select its encoded cell width.
+        const count: usize, const word_or: u64 = scanRow(cells);
 
         // Validate the wide state of every encoded cell so we don't encode
-        // corrupt data, and accumulate the OR of the row's cell words to
-        // select its encoded cell width. Trailing default cells are narrow,
-        // so checking the encoded prefix against the full row width covers
-        // every pair.
-        var word_or: u64 = 0;
-        for (cells[0..count], 0..) |*cell, x| {
-            switch (cell.wide) {
+        // corrupt data. The width bits of the OR word witness whether any
+        // encoded cell is non-narrow at all; rows without them, the common
+        // case, satisfy every pair rule vacuously. Trailing default cells
+        // are narrow, so checking the encoded prefix against the full row
+        // width covers every pair.
+        const wide_mask: u64 = comptime @bitCast(Cell{ .width = 3 });
+        if (word_or & wide_mask != 0) {
+            for (cells[0..count], 0..) |*cell, x| switch (cell.wide) {
                 .narrow => {},
                 .wide => if (x + 1 == cells.len or
                     cells[x + 1].wide != .spacer_tail)
@@ -501,21 +497,66 @@ pub fn encode(
                 .spacer_head => if (x + 1 != cells.len or !row.wrap) {
                     return error.InvalidWideCell;
                 },
-            }
-            word_or |= classifyWord(cell);
+            };
         }
 
         // Canonical rows use the smallest admissible width.
         const cell_width: Cell.EncodedWidth = .select(word_or);
 
+        const row_header: Row = .{
+            .wrap = row.wrap,
+            .wrap_continuation = row.wrap_continuation,
+            .semantic_prompt = @intFromEnum(row.semantic_prompt),
+            .cell_width = cell_width,
+        };
+
+        // The bulk codec emits the row header and its encoded cells directly
+        // into the destination's spare buffer capacity, so a row costs no
+        // writer call at all instead of one for the header and one per cell
+        // chunk.
+        if (comptime bulk_codec) emit: {
+            const words: [*]const u64 = @ptrCast(cells.ptr);
+            switch (cell_width) {
+                inline .one, .two, .four => |width| {
+                    const size = comptime width.size();
+                    const needed = 3 + count * size;
+                    if (writer.unusedCapacityLen() < needed) break :emit;
+                    const out = writer.unusedCapacitySlice()[0..needed];
+                    out[0] = @bitCast(row_header);
+                    std.mem.writeInt(u16, out[1..3], @intCast(count), .little);
+                    encodeNarrowInto(width, words, count, out[3..]);
+                    writer.advance(needed);
+                    continue;
+                },
+                .eight => {
+                    // Hyperlink IDs live in a native side table, but we
+                    // embed them in ours, so if we have any hyperlinks we
+                    // need to fall back to the loop below.
+                    const witness: Cell = @bitCast(word_or);
+                    if (!witness.hyperlink and witness.hyperlink_id == 0) {
+                        const needed = 3 + count * 8;
+                        if (writer.unusedCapacityLen() < needed) break :emit;
+                        const out = writer.unusedCapacitySlice()[0..needed];
+                        out[0] = @bitCast(row_header);
+                        std.mem.writeInt(
+                            u16,
+                            out[1..3],
+                            @intCast(count),
+                            .little,
+                        );
+                        @memcpy(
+                            out[3..],
+                            std.mem.sliceAsBytes(cells[0..count]),
+                        );
+                        writer.advance(needed);
+                        continue;
+                    }
+                },
+            }
+        }
+
         // Row header: flags then the encoded cell count.
         {
-            const row_header: Row = .{
-                .wrap = row.wrap,
-                .wrap_continuation = row.wrap_continuation,
-                .semantic_prompt = @intFromEnum(row.semantic_prompt),
-                .cell_width = cell_width,
-            };
             var header_bytes: [3]u8 = undefined;
             header_bytes[0] = @bitCast(row_header);
             std.mem.writeInt(u16, header_bytes[1..3], @intCast(count), .little);
@@ -559,6 +600,47 @@ pub fn encode(
     try encodeGraphemes(page, writer);
 }
 
+/// The encoded cell count (through the last nonzero cell) and the bitwise
+/// OR of every encoded cell word for one row.
+fn scanRow(cells: []const TerminalCell) struct { usize, u64 } {
+    if (comptime bulk_codec) {
+        const words: [*]const u64 = @ptrCast(cells.ptr);
+        const V = @Vector(4, u64);
+        const VPtr = *align(@alignOf(u64)) const V;
+
+        // Count the zero cells using vectorized instructions
+        var count = cells.len;
+        while (count >= 4) {
+            const tail = @as(VPtr, @ptrCast(words + count - 4)).*;
+            if (@reduce(.Or, tail) != 0) break;
+            count -= 4;
+        }
+        while (count > 0 and words[count - 1] == 0) count -= 1;
+
+        // Accumulate the OR of the classifaction vectorized, with the
+        // scalar tail continuing from where the vector loop stopped.
+        const word_or: u64 = word_or: {
+            var acc: V = @splat(0);
+            var i: usize = 0;
+            while (i + 4 <= count) : (i += 4) {
+                acc |= @as(VPtr, @ptrCast(words + i)).*;
+            }
+            var word_or: u64 = @reduce(.Or, acc);
+            while (i < count) : (i += 1) word_or |= words[i];
+            break :word_or word_or;
+        };
+
+        return .{ count, word_or };
+    }
+
+    // Scalar path, count backwards
+    var count: usize = cells.len;
+    while (count > 0 and cells[count - 1].isZero()) count -= 1;
+    var word_or: u64 = 0;
+    for (cells[0..count]) |*cell| word_or |= classifyWord(cell);
+    return .{ count, word_or };
+}
+
 /// The word used to select a row's encoded cell width. This is the cell's
 /// wire word with the hyperlink flag reflecting the native cell, so linked
 /// cells and nonzero native padding disqualify every narrow width.
@@ -584,33 +666,88 @@ fn encodeNarrowCells(
     var i: usize = 0;
     while (i < cells.len) {
         const n = @min(cells.len - i, chunk.len / size);
+        for (cells[i..][0..n], 0..) |*cell, j| {
+            std.mem.writeInt(
+                width.Int(),
+                chunk[j * size ..][0..size],
+                width.truncate(classifyWord(cell)),
+                .little,
+            );
+        }
+        try writer.writeAll(chunk[0 .. n * size]);
+        i += n;
+    }
+}
 
-        if (comptime native_matches_wire) {
-            // A pure truncating loop over integers that the compiler can
-            // vectorize.
-            const words: [*]const u64 = @ptrCast(cells.ptr);
-            for (0..n) |j| {
-                std.mem.writeInt(
-                    width.Int(),
-                    chunk[j * size ..][0..size],
-                    width.truncate(words[i + j]),
-                    .little,
-                );
+/// Truncate one row's cell words into `out` at the given encoded width.
+fn encodeNarrowInto(
+    comptime width: Cell.EncodedWidth,
+    words: [*]const u64,
+    count: usize,
+    out: []u8,
+) void {
+    comptime assert(bulk_codec);
+    const size = comptime width.size();
+    const V = @Vector(2, u64);
+    const shift: V = @splat(comptime switch (width) {
+        .one, .two => @bitOffsetOf(Cell, "content"),
+        .four => 0,
+        .eight => unreachable,
+    });
+    const mask: @Vector(size * 4, i32) = comptime mask: {
+        var mask: [size * 4]i32 = undefined;
+        for (0..2) |lane| {
+            for (0..size) |byte| {
+                mask[lane * size + byte] = @intCast(lane * 8 + byte);
+                mask[(lane + 2) * size + byte] =
+                    ~@as(i32, @intCast(lane * 8 + byte));
             }
+        }
+        break :mask mask;
+    };
+
+    var j: usize = 0;
+    while (j + 4 <= count) : (j += 4) encodeNarrowStep(
+        width,
+        words,
+        j,
+        out,
+        shift,
+        mask,
+    );
+    if (j < count) {
+        if (count >= 4) {
+            encodeNarrowStep(width, words, count - 4, out, shift, mask);
         } else {
-            for (cells[i..][0..n], 0..) |*cell, j| {
+            while (j < count) : (j += 1) {
                 std.mem.writeInt(
                     width.Int(),
-                    chunk[j * size ..][0..size],
-                    width.truncate(classifyWord(cell)),
+                    out[j * size ..][0..size],
+                    width.truncate(words[j]),
                     .little,
                 );
             }
         }
-
-        try writer.writeAll(chunk[0 .. n * size]);
-        i += n;
     }
+}
+
+/// Emit four truncated cell words starting at cell index `j`.
+inline fn encodeNarrowStep(
+    comptime width: Cell.EncodedWidth,
+    words: [*]const u64,
+    j: usize,
+    out: []u8,
+    shift: @Vector(2, u64),
+    mask: @Vector(width.size() * 4, i32),
+) void {
+    const size = comptime width.size();
+    const VPtr = *align(@alignOf(u64)) const @Vector(2, u64);
+    const lo: @Vector(16, u8) = @bitCast(@as(VPtr, @ptrCast(words + j)).* >> shift);
+    const hi: @Vector(16, u8) = @bitCast(@as(VPtr, @ptrCast(words + j + 2)).* >> shift);
+    @as(
+        *align(1) @Vector(size * 4, u8),
+        @ptrCast(out[j * size ..].ptr),
+    ).* = @shuffle(u8, lo, hi, mask);
 }
 
 /// Encode the grapheme suffix section for every kind 1 cell in the grid.
