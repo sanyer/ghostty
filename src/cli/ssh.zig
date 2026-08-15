@@ -7,7 +7,7 @@ const diagnostics = @import("diagnostics.zig");
 const Action = @import("ghostty.zig").Action;
 const DiskCache = @import("ssh_cache.zig").DiskCache;
 const internal_os = @import("../os/main.zig");
-const ghostty_terminfo = @import("../terminfo/main.zig").ghostty;
+const terminfopkg = @import("../terminfo/main.zig");
 const global = @import("../global.zig");
 
 const log = std.log.scoped(.ssh);
@@ -252,7 +252,11 @@ fn runInner(
         } else null;
 
         if (cache) |c| {
-            const cached = c.contains(alloc, dest) catch |err| cached: {
+            const cached = c.contains(
+                alloc,
+                dest,
+                terminfopkg.version,
+            ) catch |err| cached: {
                 if (DiskCache.isFailure(err)) warnPrint(
                     stderr,
                     "unable to read the cache '{s}': {t}",
@@ -313,10 +317,12 @@ fn runInner(
 
     // Attempt to cache (if needed) on a successful ssh execution.
     if (exit_code == 0) if (session.to_cache) |entry| {
-        if (entry.cache.add(alloc, entry.dest, std.Io.Timestamp.now(
-            global.io(),
-            .real,
-        ).toSeconds())) |_| {
+        if (entry.cache.add(
+            alloc,
+            entry.dest,
+            terminfopkg.version,
+            std.Io.Timestamp.now(global.io(), .real).toSeconds(),
+        )) |_| {
             verbosePrint(opts, stderr, "cache: wrote {s}", .{entry.dest});
         } else |err| {
             if (DiskCache.isFailure(err)) {
@@ -473,7 +479,7 @@ fn installRemoteTerminfo(
 ) !void {
     var buf: std.Io.Writer.Allocating = .init(alloc);
     defer buf.deinit();
-    try ghostty_terminfo.encode(&buf.writer);
+    try terminfopkg.ghostty.encode(&buf.writer);
     const terminfo = buf.written();
 
     // ControlPath is in TMPDIR with a short, random basename. ssh uses
