@@ -367,12 +367,19 @@ fn decodePayloadBody(
     page.pauseIntegrityChecks(true);
     defer page.pauseIntegrityChecks(false);
 
-    var style_remap = grid.StyleRemap.init(alloc) catch
-        return error.OutOfMemory;
+    // Pages without styles or hyperlinks, the common case for plain
+    // scrollback, skip the remap tables entirely: every encoded cell ID
+    // resolves to the default through the empty remap.
+    var style_remap: grid.StyleRemap = if (header.style_count > 0)
+        grid.StyleRemap.init(alloc) catch return error.OutOfMemory
+    else
+        .empty;
     defer style_remap.deinit(alloc);
 
-    var hyperlink_remap = grid.HyperlinkRemap.init(alloc) catch
-        return error.OutOfMemory;
+    var hyperlink_remap: grid.HyperlinkRemap = if (header.hyperlink_count > 0)
+        grid.HyperlinkRemap.init(alloc) catch return error.OutOfMemory
+    else
+        .empty;
     defer hyperlink_remap.deinit(alloc);
 
     // Styles

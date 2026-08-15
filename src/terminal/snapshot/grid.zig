@@ -1515,6 +1515,11 @@ fn Remap(comptime Id: type) type {
         /// semantics.
         seen: std.DynamicBitSetUnmanaged,
 
+        /// A remap with no entries at all: every lookup is unmapped. Use
+        /// this instead of `init` when the encoded table is empty so pages
+        /// without styles or hyperlinks allocate nothing.
+        pub const empty: Self = .{ .entries = &.{}, .seen = .{} };
+
         pub fn init(alloc: Allocator) Allocator.Error!Self {
             const entries = try alloc.alloc(Id, capacity);
             errdefer alloc.free(entries);
@@ -1527,25 +1532,29 @@ fn Remap(comptime Id: type) type {
         }
 
         pub fn deinit(self: *Self, alloc: Allocator) void {
-            alloc.free(self.entries);
-            self.seen.deinit(alloc);
+            if (self.entries.len != 0) {
+                alloc.free(self.entries);
+                self.seen.deinit(alloc);
+            }
             self.* = undefined;
         }
 
-        /// Record one encoded-to-native mapping.
+        /// Record one encoded-to-native mapping. Illegal on `empty`.
         pub fn put(self: *Self, encoded: Id, native: Id) void {
             assert(!self.seen.isSet(encoded));
             self.entries[encoded] = native;
             self.seen.set(encoded);
         }
 
-        /// Whether the encoded ID already has an entry, even a default one.
+        /// Whether the encoded ID already has an entry, even a default
+        /// one. Illegal on `empty`.
         pub fn contains(self: *const Self, encoded: Id) bool {
             return self.seen.isSet(encoded);
         }
 
         /// The native ID for an encoded ID, or zero when unmapped.
         pub inline fn get(self: *const Self, encoded: Id) Id {
+            if (self.entries.len == 0) return 0;
             return self.entries[encoded];
         }
     };
