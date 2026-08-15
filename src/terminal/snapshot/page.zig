@@ -233,7 +233,17 @@ pub const Decoder = struct {
         // payload, so this is the byte count of the tables and grid.
         const remaining = self.record_reader.header.payload_len - Header.len;
 
-        if (remaining <= max_staged_payload) {
+        if (self.record_reader.payloadReader().bufferedLen() >= remaining) {
+            // The complete payload is already buffered, e.g. borrowed from
+            // an in-memory snapshot. Parse it in place with no staging
+            // copy; `finish` still enforces the CRC and exact exhaustion.
+            try decodePayloadBody(
+                self.record_reader.payloadReader(),
+                alloc,
+                destination,
+                self.header,
+            );
+        } else if (remaining <= max_staged_payload) {
             // Stage the payload with one bulk read. The whole payload passes
             // through the checksum hasher as one update and the payload
             // decoders then parse a flat buffer, which keeps per-row work free
