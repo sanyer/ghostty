@@ -128,9 +128,9 @@ pub const Options = struct {
 ///      forwarding to succeed.
 ///
 ///   2. **Terminfo install** (`--terminfo`). On the first connection to a
-///      given destination, installs Ghostty's terminfo entry on the remote
-///      host using `infocmp -x xterm-ghostty | ssh tic -x -` over a
-///      shared `ControlMaster` connection. Successful installs are cached
+///      given destination, installs Ghostty's embedded terminfo entry on the
+///      remote host using `ssh tic -x -` over a shared `ControlMaster`
+///      connection. Successful installs are cached
 ///      (see `ghostty +ssh-cache`) so subsequent connections skip this
 ///      step. When terminfo is successfully installed or already cached,
 ///      `TERM` is set to `xterm-ghostty` instead of `xterm-256color`.
@@ -491,20 +491,17 @@ fn installRemoteTerminfo(
     // the most common failure source) and inherit ssh's stderr so it
     // reaches the user's terminal. Other steps stay quiet either way.
     const remote_script = if (opts.verbose)
-        \\infocmp xterm-ghostty >/dev/null 2>&1 && exit 0
         \\command -v tic >/dev/null 2>&1 || exit 1
         \\mkdir -p ~/.terminfo 2>/dev/null && tic -x - && exit 0
         \\exit 1
     else
-        \\infocmp xterm-ghostty >/dev/null 2>&1 && exit 0
         \\command -v tic >/dev/null 2>&1 || exit 1
         \\mkdir -p ~/.terminfo 2>/dev/null && tic -x - 2>/dev/null && exit 0
         \\exit 1
     ;
 
     // Set up an SSH ControlMaster scoped to this single install:
-    //   - ControlMaster=yes makes our client also act as the master,
-    //     so `infocmp | ssh tic` runs over a single connection.
+    //   - ControlMaster=yes makes our client also act as the master.
     //   - ControlPersist=no tears the master down when our client
     //     exits; no socket lingers on the remote side.
     const argv = try std.mem.concat(alloc, []const u8, &.{
