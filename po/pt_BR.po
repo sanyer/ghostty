@@ -879,7 +879,7 @@ msgstr "Focar divisão: anterior"
 
 #: src/input/command.zig:501
 msgid "Focus the previous split, if any."
-msgstr "Foca a divisão anterior, se houver."
+msgstr "Focar a divisão anterior, se houver."
 
 #: src/input/command.zig:505
 msgid "Focus Split: Next"
