@@ -859,7 +859,7 @@ msgstr "Solicita um novo título para a aba atual."
 
 #: src/input/command.zig:478
 msgid "Split the terminal to the left."
-msgstr "Divide o terminal à esquerda."
+msgstr "Dividir o terminal à esquerda."
 
 #: src/input/command.zig:483
 msgid "Split the terminal to the right."
