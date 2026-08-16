@@ -911,7 +911,7 @@ msgstr "Focar divisão: acima"
 
 #: src/input/command.zig:521
 msgid "Focus the split above, if it exists."
-msgstr "Foca a divisão acima, se ela existir."
+msgstr "Focar a divisão acima, se ela existir."
 
 #: src/input/command.zig:525
 msgid "Focus Split: Down"
