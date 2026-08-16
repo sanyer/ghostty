@@ -871,7 +871,7 @@ msgstr "Dividir o terminal para cima."
 
 #: src/input/command.zig:493
 msgid "Split the terminal down."
-msgstr "Divide o terminal para baixo."
+msgstr "Dividir o terminal para baixo."
 
 #: src/input/command.zig:500
 msgid "Focus Split: Previous"
