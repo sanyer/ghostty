@@ -63,7 +63,10 @@ extern "C" {
  * tracking which rows in a partially dirty frame have changed. 
  *
  * The user of the render state API is expected to unset both of these.
- * The `update` call does not unset dirty state, it only updates it.
+ * The `update` call does not unset dirty state, it only updates it. After
+ * successfully rendering a complete frame, use ghostty_render_state_clean()
+ * to unset both layers in one call. The granular setters remain available
+ * for callers that only consume part of a frame.
  *
  * An extremely important detail: setting one dirty state doesn't unset
  * the other. For example, setting the global dirty state to false does not
@@ -422,6 +425,23 @@ GHOSTTY_API GhosttyResult ghostty_render_state_begin_update(GhosttyRenderState s
 GHOSTTY_API GhosttyResult ghostty_render_state_end_update(GhosttyRenderState state);
 
 /**
+ * Mark all dirty render-state data as consumed.
+ *
+ * This sets the global dirty state to GHOSTTY_RENDER_STATE_DIRTY_FALSE and
+ * clears every per-row dirty flag. It is idempotent and does not modify cell
+ * contents or dirty state owned by the terminal. Call this only after a
+ * complete frame has been rendered successfully; partial consumers should
+ * use ghostty_render_state_set() and ghostty_render_state_row_set() instead.
+ *
+ * @param state The render state handle (NULL returns GHOSTTY_INVALID_VALUE)
+ * @return GHOSTTY_SUCCESS on success, GHOSTTY_INVALID_VALUE if `state` is
+ *         NULL
+ *
+ * @ingroup render
+ */
+GHOSTTY_API GhosttyResult ghostty_render_state_clean(GhosttyRenderState state);
+
+/**
  * Get a value from a render state.
  *
  * The `out` pointer must point to a value of the type corresponding to the
@@ -534,7 +554,8 @@ GHOSTTY_API void ghostty_render_state_row_iterator_free(GhosttyRenderStateRowIte
 /**
  * Move a render-state row iterator to the next row.
  *
- * Returns true if the iterator moved successfully and row data is
+ * Rows are visited contiguously in ascending viewport order, starting at
+ * y = 0. Returns true if the iterator moved successfully and row data is
  * available to read at the new position.
  *
  * @param iterator The iterator handle to advance (may be NULL)
@@ -546,11 +567,35 @@ GHOSTTY_API void ghostty_render_state_row_iterator_free(GhosttyRenderStateRowIte
 GHOSTTY_API bool ghostty_render_state_row_iterator_next(GhosttyRenderStateRowIterator iterator);
 
 /**
+ * Move a render-state row iterator to the next row requiring a redraw.
+ *
+ * If the global dirty state is GHOSTTY_RENDER_STATE_DIRTY_FALSE, this returns
+ * false. If it is GHOSTTY_RENDER_STATE_DIRTY_PARTIAL, clean rows are skipped.
+ * If it is GHOSTTY_RENDER_STATE_DIRTY_FULL, every remaining row is returned
+ * regardless of its per-row dirty flag. Rows are returned in ascending
+ * viewport order. This function does not clear any dirty state.
+ *
+ * @param iterator The iterator handle to advance (NULL returns false)
+ * @param[out] out_y Receives the viewport y coordinate when true is returned
+ *                   (NULL returns false); it is not modified when false is
+ *                   returned
+ * @return true if advanced to a row requiring a redraw, false if an argument
+ *         is NULL or the iterator has reached the end of the effective dirty
+ *         rows
+ *
+ * @ingroup render
+ */
+GHOSTTY_API bool ghostty_render_state_row_iterator_next_dirty(
+    GhosttyRenderStateRowIterator iterator,
+    uint16_t* out_y);
+
+/**
  * Get a value from the current row in a render-state row iterator.
  *
  * The `out` pointer must point to a value of the type corresponding to the
  * requested data kind (see GhosttyRenderStateRowData).
- * Call ghostty_render_state_row_iterator_next() at least once before
+ * Call ghostty_render_state_row_iterator_next() or
+ * ghostty_render_state_row_iterator_next_dirty() at least once before
  * calling this function.
  *
  * @param iterator The iterator handle to query (NULL returns GHOSTTY_INVALID_VALUE)
@@ -599,7 +644,8 @@ GHOSTTY_API GhosttyResult ghostty_render_state_row_get_multi(
  *
  * The `value` pointer must point to a value of the type corresponding to the
  * requested option kind (see GhosttyRenderStateRowOption).
- * Call ghostty_render_state_row_iterator_next() at least once before
+ * Call ghostty_render_state_row_iterator_next() or
+ * ghostty_render_state_row_iterator_next_dirty() at least once before
  * calling this function.
  *
  * @param iterator The iterator handle to update (NULL returns GHOSTTY_INVALID_VALUE)
