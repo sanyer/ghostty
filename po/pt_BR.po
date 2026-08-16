@@ -1123,7 +1123,7 @@ msgstr "Verificar atualizações"
 
 #: src/input/command.zig:685
 msgid "Check for updates to the application."
-msgstr "Verifica se há atualizações para o aplicativo."
+msgstr "Verificar se há atualizações para o aplicativo."
 
 #: src/input/command.zig:690
 msgid "Undo"
