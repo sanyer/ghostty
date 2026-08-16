@@ -269,15 +269,15 @@ msgstr "Выканаць каманду…"
 
 #: src/apprt/gtk/class/application.zig:1767
 msgid "The keybind was revoked by the system."
-msgstr "Спалучэнне клавіш было адкліканае сістэмай."
+msgstr "Спалучэнне клавіш адклікана сістэмай."
 
 #: src/apprt/gtk/class/application.zig:1769
 msgid "The keybind was denied by the system."
-msgstr "Спалучэнне клавіш было адхілена сістэмай."
+msgstr "Спалучэнне клавіш адхілена сістэмай."
 
 #: src/apprt/gtk/class/application.zig:1780
 msgid "Global keybind unavailable"
-msgstr "Глабальнае спалучэнне клавіш недаступнае"
+msgstr "Глабальнае спалучэнне клавіш недаступна."
 
 #: src/apprt/gtk/class/application.zig:2259
 msgid "Export Terminal IO Events"
@@ -408,7 +408,7 @@ msgstr "Скапіяваць у буфер абмену"
 #: src/input/command.zig:156
 msgid ""
 "Copy the selected text to the clipboard in both plain and styled formats."
-msgstr "Скапіяваць вылучаны тэкст у буфер абмену ў звычайным і фарматаваным выглядзе."
+msgstr "Скапіяваць вылучаны тэкст у буфер абмену ў двух фарматах: звычайным і фарматаваным."
 
 #: src/input/command.zig:159
 msgid "Copy Selection as Plain Text to Clipboard"
@@ -424,7 +424,7 @@ msgstr "Скапіяваць вылучэнне як ANSI-паслядоўнас
 
 #: src/input/command.zig:164
 msgid "Copy the selected text as ANSI escape sequences to the clipboard."
-msgstr "Скапіяваць вылучаны тэкст як кіруючыя паслядоўнасці ANSI у буфер абмену."
+msgstr "Скапіяваць вылучаны тэкст як кіруючыя паслядоўнасці ANSI ў буфер абмену."
 
 #: src/input/command.zig:167
 msgid "Copy Selection as HTML to Clipboard"
@@ -651,7 +651,7 @@ msgstr "Скапіяваць экран як ANSI-паслядоўнасці ў 
 msgid ""
 "Copy the screen contents as ANSI escape sequences to a temporary file and "
 "copy the path to the clipboard."
-msgstr "Скапіяваць змест экрана як кіруючыя паслядоўнасці ANSI у часовы файл і скапіяваць шлях у буфер абмену."
+msgstr "Скапіяваць змест экрана як кіруючыя паслядоўнасці ANSI ў часовы файл і скапіяваць шлях у буфер абмену."
 
 #: src/input/command.zig:338
 msgid "Copy Screen as ANSI Sequences to Temporary File and Paste Path"
@@ -661,7 +661,7 @@ msgstr "Скапіяваць экран як ANSI-паслядоўнасці ў 
 msgid ""
 "Copy the screen contents as ANSI escape sequences to a temporary file and "
 "paste the path to the file."
-msgstr "Скапіяваць змест экрана як кіруючыя паслядоўнасці ANSI у часовы файл і ўставіць шлях да яго."
+msgstr "Скапіяваць змест экрана як кіруючыя паслядоўнасці ANSI ў часовы файл і ўставіць шлях да яго."
 
 #: src/input/command.zig:346
 msgid "Copy Screen as ANSI Sequences to Temporary File and Open"
@@ -671,7 +671,7 @@ msgstr "Скапіяваць экран як ANSI-паслядоўнасці ў 
 msgid ""
 "Copy the screen contents as ANSI escape sequences to a temporary file and "
 "open it."
-msgstr "Скапіяваць змест экрана як кіруючыя паслядоўнасці ANSI у часовы файл і адкрыць яго."
+msgstr "Скапіяваць змест экрана як кіруючыя паслядоўнасці ANSI ў часовы файл і адкрыць яго."
 
 #: src/input/command.zig:354
 msgid "Copy Selection to Temporary File and Copy Path"
@@ -737,7 +737,7 @@ msgstr "Скапіяваць вылучэнне як ANSI-паслядоўнас
 msgid ""
 "Copy the selection contents as ANSI escape sequences to a temporary file and "
 "copy the path to the clipboard."
-msgstr "Скапіяваць змест вылучэння як кіруючыя паслядоўнасці ANSI у часовы файл і скапіяваць шлях у буфер абмену."
+msgstr "Скапіяваць змест вылучэння як кіруючыя паслядоўнасці ANSI ў часовы файл і скапіяваць шлях у буфер абмену."
 
 #: src/input/command.zig:406
 msgid "Copy Selection as ANSI Sequences to Temporary File and Paste Path"
@@ -747,7 +747,7 @@ msgstr "Скапіяваць вылучэнне як ANSI-паслядоўнас
 msgid ""
 "Copy the selection contents as ANSI escape sequences to a temporary file and "
 "paste the path to the file."
-msgstr "Скапіяваць змест вылучэння як кіруючыя паслядоўнасці ANSI у часовы файл і ўставіць шлях да яго."
+msgstr "Скапіяваць змест вылучэння як кіруючыя паслядоўнасці ANSI ў часовы файл і ўставіць шлях да яго."
 
 #: src/input/command.zig:414
 msgid "Copy Selection as ANSI Sequences to Temporary File and Open"
@@ -757,7 +757,7 @@ msgstr "Скапіяваць вылучэнне як ANSI-паслядоўнас
 msgid ""
 "Copy the selection contents as ANSI escape sequences to a temporary file and "
 "open it."
-msgstr "Скапіяваць змест вылучэння як кіруючыя паслядоўнасці ANSI у часовы файл і адкрыць яго."
+msgstr "Скапіяваць змест вылучэння як кіруючыя паслядоўнасці ANSI ў часовы файл і адкрыць яго."
 
 #: src/input/command.zig:422
 msgid "Open a new window."
@@ -897,7 +897,7 @@ msgstr "Пераключыць маштабаванне падзела"
 
 #: src/input/command.zig:546
 msgid "Toggle the zoom state of the current split."
-msgstr "Пераключыць стан маштабавання бягучага падзела."
+msgstr "Пераключыць маштабаванне бягучага падзела."
 
 #: src/input/command.zig:551
 msgid "Toggle Read-Only Mode"
@@ -905,7 +905,7 @@ msgstr "Пераключыць рэжым толькі для чытання"
 
 #: src/input/command.zig:552
 msgid "Toggle read-only mode for the current surface."
-msgstr "Пераключыць рэжым толькі для чытання для бягучага тэрмінала."
+msgstr "Пераключыць рэжым толькі для чытання бягучага тэрмінала."
 
 #: src/input/command.zig:557
 msgid "Equalize Splits"
@@ -945,7 +945,7 @@ msgstr "Паказаць экранную клавіятуру"
 
 #: src/input/command.zig:582
 msgid "Show the on-screen keyboard if present."
-msgstr "Паказаць экранную клавіятуру, калі яна даступная."
+msgstr "Паказаць экранную клавіятуру, калі яна ёсць."
 
 #: src/input/command.zig:588
 msgid "Open Config Using OS editor"
@@ -1005,11 +1005,11 @@ msgstr "Закрыць бягучае акно."
 
 #: src/input/command.zig:636
 msgid "Close All Windows"
-msgstr "Закрыць усе вокны"
+msgstr "Закрыць усе акны"
 
 #: src/input/command.zig:637
 msgid "Close all windows."
-msgstr "Закрыць усе вокны."
+msgstr "Закрыць усе акны."
 
 #: src/input/command.zig:642
 msgid "Toggle Maximize"
@@ -1041,7 +1041,7 @@ msgstr "Пераключыць рэжым «заўсёды зверху»"
 
 #: src/input/command.zig:661
 msgid "Toggle the float on top state of the current window."
-msgstr "Пераключыць стан «заўсёды зверху» бягучага акна."
+msgstr "Пераключыць рэжым «заўсёды зверху» бягучага акна."
 
 #: src/input/command.zig:666
 msgid "Toggle Secure Input"
@@ -1049,7 +1049,7 @@ msgstr "Пераключыць бяспечны ўвод"
 
 #: src/input/command.zig:667
 msgid "Toggle secure input mode."
-msgstr "Пераключыць рэжым бяспечнага ўводу."
+msgstr "Пераключыць бяспечны ўвод."
 
 #: src/input/command.zig:672
 msgid "Toggle Mouse Reporting"
@@ -1085,11 +1085,11 @@ msgstr "Адмяніць апошняе дзеянне."
 
 #: src/input/command.zig:696
 msgid "Redo"
-msgstr "Паўтарыць"
+msgstr "Аднавіць"
 
 #: src/input/command.zig:697
 msgid "Redo the last undone action."
-msgstr "Паўтарыць апошняе адмененае дзеянне."
+msgstr "Аднавіць апошняе адмененае дзеянне."
 
 #: src/input/command.zig:703
 msgid "Quit the application."
@@ -1101,4 +1101,4 @@ msgstr "Ghostty"
 
 #: src/input/command.zig:709
 msgid "Put a little Ghostty in your terminal."
-msgstr "Дадайце трохі Ghostty ў свой тэрмінал."
+msgstr "Дадаць трохі Ghostty ў свой тэрмінал."
