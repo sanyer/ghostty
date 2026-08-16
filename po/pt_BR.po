@@ -827,7 +827,7 @@ msgstr "Mover aba para a direita"
 
 #: src/input/command.zig:440
 msgid "Move the current tab to the right."
-msgstr "Move a aba atual para a direita."
+msgstr "Mover a aba atual para a direita."
 
 #: src/input/command.zig:446
 msgid "Move Tab to New Window"
