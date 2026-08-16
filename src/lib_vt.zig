@@ -286,7 +286,6 @@ comptime {
             @export(&c.render_state_get, .{ .name = "ghostty_render_state_get" });
             @export(&c.render_state_get_multi, .{ .name = "ghostty_render_state_get_multi" });
             @export(&c.render_state_set, .{ .name = "ghostty_render_state_set" });
-            @export(&c.render_state_colors_get, .{ .name = "ghostty_render_state_colors_get" });
             @export(&c.render_state_row_iterator_new, .{ .name = "ghostty_render_state_row_iterator_new" });
             @export(&c.render_state_row_iterator_next, .{ .name = "ghostty_render_state_row_iterator_next" });
             @export(&c.render_state_row_get, .{ .name = "ghostty_render_state_row_get" });
