@@ -863,7 +863,7 @@ msgstr "Dividir o terminal à esquerda."
 
 #: src/input/command.zig:483
 msgid "Split the terminal to the right."
-msgstr "Divide o terminal à direita."
+msgstr "Dividir o terminal à direita."
 
 #: src/input/command.zig:488
 msgid "Split the terminal up."
