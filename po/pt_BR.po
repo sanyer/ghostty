@@ -887,7 +887,7 @@ msgstr "Focar divisão: próxima"
 
 #: src/input/command.zig:506
 msgid "Focus the next split, if any."
-msgstr "Foca a próxima divisão, se houver."
+msgstr "Focar a próxima divisão, se houver."
 
 #: src/input/command.zig:510
 msgid "Focus Split: Left"
