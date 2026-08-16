@@ -9995,11 +9995,11 @@ pub const Theme = struct {
     /// Expand tilde paths in light/dark theme values.
     pub fn finalize(self: *Theme, alloc: Allocator) Allocator.Error!void {
         var buf: [std.fs.max_path_bytes]u8 = undefined;
-    
+
         const light = expandHome(self.light, &buf);
         if (!std.mem.eql(u8, light, self.light))
             self.light = try alloc.dupeZ(u8, light);
-    
+
         const dark = expandHome(self.dark, &buf);
         if (!std.mem.eql(u8, dark, self.dark))
             self.dark = try alloc.dupeZ(u8, dark);
