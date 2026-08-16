@@ -1143,7 +1143,7 @@ msgstr "Refazer a última ação desfeita."
 
 #: src/input/command.zig:703
 msgid "Quit the application."
-msgstr "Sai do aplicativo."
+msgstr "Sair do aplicativo."
 
 #: src/input/command.zig:708
 msgid "Ghostty"
