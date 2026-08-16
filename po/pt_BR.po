@@ -819,7 +819,7 @@ msgstr "Mover aba para a esquerda"
 
 #: src/input/command.zig:435
 msgid "Move the current tab to the left."
-msgstr "Move a aba atual para a esquerda."
+msgstr "Mover a aba atual para a esquerda."
 
 #: src/input/command.zig:439
 msgid "Move Tab Right"
