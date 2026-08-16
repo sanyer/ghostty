@@ -843,7 +843,7 @@ msgstr "Alternar visão geral das abas"
 
 #: src/input/command.zig:453
 msgid "Toggle the tab overview."
-msgstr "Alterna a visão geral das abas."
+msgstr "Alternar a visão geral das abas."
 
 #: src/input/command.zig:458
 msgid "Change Terminal Title…"
