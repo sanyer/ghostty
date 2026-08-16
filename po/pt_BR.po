@@ -811,7 +811,7 @@ msgstr "Abrir uma nova janela."
 
 #: src/input/command.zig:428
 msgid "Open a new tab."
-msgstr "Abre uma nova aba."
+msgstr "Abrir uma nova aba."
 
 #: src/input/command.zig:434
 msgid "Move Tab Left"
