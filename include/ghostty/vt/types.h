@@ -342,6 +342,13 @@ typedef struct {
  * this manifest rather than hardcoding them. Consumers should reject unknown
  * schema versions and verify the descriptors they require at initialization.
  *
+ * Packed type descriptors define fields using `lsb` and `width`. `lsb` is
+ * relative to bit zero of the containing numerical value; for nested packed
+ * layouts it is relative to the immediate containing field. Tagged packed
+ * unions select an inline arm layout using the named tag field. These layouts
+ * describe the current linked build and are not a cross-version stability
+ * promise.
+ *
  * The formal format is defined by the
  * <a href="types.schema.json">libghostty-vt ABI manifest JSON Schema</a>.
  *

@@ -16,6 +16,7 @@ const focus_pkg = @import("../focus.zig");
 const formatter_pkg = @import("../formatter.zig");
 const modes_pkg = @import("../modes.zig");
 const mouse_pkg = @import("../mouse.zig");
+const page = @import("../page.zig");
 const point = @import("../point.zig");
 const Selection = @import("../Selection.zig");
 const sgr = @import("../sgr.zig");
@@ -72,6 +73,7 @@ const TypeDecl = struct {
         @"struct",
         @"union",
         @"enum",
+        @"packed",
         alias,
         @"opaque",
     };
@@ -144,6 +146,10 @@ const TypeDecl = struct {
             .prefix = prefix,
             .sentinel_suffix = sentinel_suffix,
         };
+    }
+
+    fn initPacked(comptime name: []const u8, comptime T: type) TypeDecl {
+        return .{ .name = name, .T = T, .kind = .@"packed" };
     }
 
     fn initAlias(
@@ -297,7 +303,7 @@ const type_decls = [_]TypeDecl{
     .initEnum("GhosttyTerminalScrollViewportTag", terminal.ZigTerminal.ScrollViewport.Tag, "GHOSTTY_SCROLL_VIEWPORT_"),
     .initEnum("GhosttyTerminalUnknownSequenceTag", terminal.UnknownSequence.Tag, "GHOSTTY_TERMINAL_UNKNOWN_SEQUENCE_"),
 
-    .initAlias("GhosttyCell", u64, "u64"),
+    .initPacked("GhosttyCell", page.Cell.CLayout),
     .initAlias("GhosttyColorPaletteIndex", u8, "u8"),
     .initAlias("GhosttyKittyKeyFlags", u8, "u8"),
     .initAlias("GhosttyMode", u16, "u16"),
@@ -438,6 +444,7 @@ const Json = struct {
                 try jws.write(std.math.maxInt(c_int));
                 try jws.endObject();
             },
+            .@"packed" => try writePackedType(decl.T, jws),
             .alias => {
                 try writeSizeAlign(decl.T, jws);
                 try jws.objectField("type");
@@ -445,6 +452,98 @@ const Json = struct {
             },
             .@"opaque" => try writeSizeAlign(*anyopaque, jws),
         }
+        try jws.endObject();
+    }
+
+    fn writePackedType(
+        comptime Layout: type,
+        jws: *std.json.Stringify,
+    ) std.Io.Writer.Error!void {
+        try writeSizeAlign(Layout.Zig, jws);
+        try jws.objectField("underlying");
+        try jws.write(publicTypeName(Layout.Backing));
+        try jws.objectField("bits");
+        try jws.beginObject();
+        try writePackedBits(Layout, jws);
+        try jws.endObject();
+    }
+
+    fn writePackedBits(
+        comptime Layout: type,
+        jws: *std.json.Stringify,
+    ) std.Io.Writer.Error!void {
+        inline for (@typeInfo(Layout.Zig).@"struct".fields) |field| {
+            const field_tag = @field(Layout.Field, field.name);
+            const name = comptime Layout.fieldName(field_tag) orelse continue;
+            const options = Layout.fieldOptions(field_tag);
+
+            try jws.objectField(name);
+            try jws.beginObject();
+            try jws.objectField("lsb");
+            try jws.write(Layout.bitOffset(field_tag));
+            try jws.objectField("width");
+            try jws.write(Layout.bitWidth(field_tag));
+
+            switch (options.encoding) {
+                .scalar => {
+                    try jws.objectField("type");
+                    try jws.write(options.type_name orelse publicTypeName(field.type));
+                },
+                .@"packed" => |Nested| {
+                    try jws.objectField("kind");
+                    try jws.write("packed");
+                    try jws.objectField("bits");
+                    try jws.beginObject();
+                    try writePackedBits(Nested, jws);
+                    try jws.endObject();
+                },
+                .tagged_union => |UnionLayout| try writePackedTaggedUnion(Layout, UnionLayout, jws),
+            }
+            try jws.endObject();
+        }
+    }
+
+    fn writePackedTaggedUnion(
+        comptime Layout: type,
+        comptime UnionLayout: type,
+        jws: *std.json.Stringify,
+    ) std.Io.Writer.Error!void {
+        try jws.objectField("kind");
+        try jws.write("union");
+        try jws.objectField("tag");
+        try jws.write(Layout.fieldName(UnionLayout.tag_field).?);
+        try jws.objectField("arms");
+        try jws.beginObject();
+
+        const tag_options = Layout.fieldOptions(UnionLayout.tag_field);
+        const tag_type_name = tag_options.type_name orelse publicTypeName(UnionLayout.Tag);
+        inline for (@typeInfo(UnionLayout.Tag).@"enum".fields) |tag| {
+            try writeEnumObjectField(tag_type_name, tag.name, jws);
+            const arm = UnionLayout.arm(@field(UnionLayout.Tag, tag.name)) orelse {
+                try jws.write(null);
+                continue;
+            };
+            switch (arm) {
+                inline else => |ArmLayout| try writePackedArm(ArmLayout, jws),
+            }
+        }
+
+        try jws.endObject();
+    }
+
+    fn writePackedArm(
+        comptime Layout: type,
+        jws: *std.json.Stringify,
+    ) std.Io.Writer.Error!void {
+        try jws.beginObject();
+        try jws.objectField("kind");
+        try jws.write("packed");
+        try jws.objectField("width");
+        try jws.write(@bitSizeOf(Layout.Zig));
+        try jws.objectField("bits");
+        try jws.beginObject();
+        try writePackedBits(Layout, jws);
+        try jws.endObject();
         try jws.endObject();
     }
 
@@ -653,7 +752,7 @@ const Json = struct {
     fn publicTypeName(comptime T: type) []const u8 {
         inline for (type_decls) |decl| switch (decl.kind) {
             .@"struct", .@"union", .@"enum" => if (T == decl.T) return decl.name,
-            .alias, .@"opaque" => {},
+            .@"packed", .alias, .@"opaque" => {},
         };
         return switch (@typeInfo(T)) {
             .bool => "bool",
@@ -681,14 +780,14 @@ const Json = struct {
                 16 => "i16",
                 32 => "i32",
                 64 => "i64",
-                else => "opaque",
+                else => std.fmt.comptimePrint("i{d}", .{bits}),
             },
             .unsigned => switch (bits) {
                 8 => "u8",
                 16 => "u16",
                 32 => "u32",
                 64 => "u64",
-                else => "opaque",
+                else => std.fmt.comptimePrint("u{d}", .{bits}),
             },
         };
     }
@@ -727,6 +826,12 @@ const Json = struct {
         };
         for (builtins) |builtin_name| {
             if (std.mem.eql(u8, name, builtin_name)) return true;
+        }
+        if (name.len > 1 and (name[0] == 'i' or name[0] == 'u') and
+            name[1] >= '1' and name[1] <= '9')
+        {
+            for (name[2..]) |c| if (!std.ascii.isDigit(c)) return false;
+            return true;
         }
         return false;
     }
@@ -779,6 +884,87 @@ test "manifest describes enums, arrays, and tagged unions" {
     try std.testing.expect(value.get("arms").?.object.get("NONE").? == .null);
 }
 
+test "manifest describes the complete packed cell layout" {
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, json, .{});
+    defer parsed.deinit();
+    const manifest_types = parsed.value.object.get("types").?.object;
+    const descriptor = manifest_types.get("GhosttyCell").?.object;
+
+    try std.testing.expectEqualStrings("packed", descriptor.get("kind").?.string);
+    try std.testing.expectEqual(@as(i64, @sizeOf(page.Cell.CLayout.Zig)), descriptor.get("size").?.integer);
+    try std.testing.expectEqualStrings("u64", descriptor.get("underlying").?.string);
+
+    const bits = descriptor.get("bits").?.object;
+    inline for (@typeInfo(page.Cell.CLayout.Zig).@"struct".fields) |field| {
+        const field_tag = @field(page.Cell.CLayout.Field, field.name);
+        const name = comptime page.Cell.CLayout.fieldName(field_tag);
+        if (name) |public_name| {
+            const bit = bits.get(public_name).?.object;
+            try std.testing.expectEqual(
+                @as(i64, @intCast(@bitOffsetOf(page.Cell.CLayout.Zig, field.name))),
+                bit.get("lsb").?.integer,
+            );
+            try std.testing.expectEqual(
+                @as(i64, @intCast(@bitSizeOf(field.type))),
+                bit.get("width").?.integer,
+            );
+        } else {
+            try std.testing.expect(!bits.contains(field.name));
+        }
+    }
+
+    const content = bits.get("content").?.object;
+    try std.testing.expectEqualStrings("union", content.get("kind").?.string);
+    try std.testing.expectEqualStrings("content_tag", content.get("tag").?.string);
+    const arms = content.get("arms").?.object;
+
+    const Content = @FieldType(page.Cell.CLayout.Zig, "content");
+    const Codepoint = @FieldType(Content, "codepoint");
+    const codepoint = arms.get("CODEPOINT").?.object;
+    const grapheme = arms.get("CODEPOINT_GRAPHEME").?.object;
+    try expectPackedArmField(codepoint, "codepoint", Codepoint, "data", "u21");
+    try expectPackedArmField(grapheme, "codepoint", Codepoint, "data", "u21");
+    try expectPackedArmField(
+        arms.get("BG_COLOR_PALETTE").?.object,
+        "index",
+        @FieldType(Content, "color_palette"),
+        "data",
+        "GhosttyColorPaletteIndex",
+    );
+
+    const rgb = arms.get("BG_COLOR_RGB").?.object;
+    const Rgb = @FieldType(Content, "color_rgb");
+    inline for (@typeInfo(Rgb).@"struct".fields) |field|
+        try expectPackedArmField(rgb, field.name, Rgb, field.name, "u8");
+}
+
+test "manifest packed cell layouts decode real values" {
+    const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, json, .{});
+    defer parsed.deinit();
+    const manifest_types = parsed.value.object.get("types").?.object;
+    const cell_bits = manifest_types.get("GhosttyCell").?.object.get("bits").?.object;
+
+    var codepoint = page.Cell.CLayout.Zig.init('A');
+    try expectDecodedCellContent(manifest_types, cell_bits, @bitCast(codepoint), "codepoint", 'A');
+
+    codepoint.content_tag = .codepoint_grapheme;
+    try expectDecodedCellContent(manifest_types, cell_bits, @bitCast(codepoint), "codepoint", 'A');
+
+    var palette: page.Cell.CLayout.Zig = @bitCast(@as(u64, 0));
+    palette.content_tag = .bg_color_palette;
+    palette.content = .{ .color_palette = .{ .data = 173 } };
+    try expectDecodedCellContent(manifest_types, cell_bits, @bitCast(palette), "index", 173);
+
+    var rgb: page.Cell.CLayout.Zig = @bitCast(@as(u64, 0));
+    rgb.content_tag = .bg_color_rgb;
+    rgb.content = .{ .color_rgb = .{ .r = 0x12, .g = 0x34, .b = 0x56 } };
+    const rgb_arm = activeCellContentArm(manifest_types, cell_bits, @bitCast(rgb));
+    const content = extractManifestBits(@bitCast(rgb), cell_bits.get("content").?.object);
+    try std.testing.expectEqual(@as(u64, 0x12), extractManifestBits(content, rgb_arm.get("bits").?.object.get("r").?.object));
+    try std.testing.expectEqual(@as(u64, 0x34), extractManifestBits(content, rgb_arm.get("bits").?.object.get("g").?.object));
+    try std.testing.expectEqual(@as(u64, 0x56), extractManifestBits(content, rgb_arm.get("bits").?.object.get("b").?.object));
+}
+
 test "manifest uses public enum names" {
     const parsed = try std.json.parseFromSlice(std.json.Value, std.testing.allocator, json, .{});
     defer parsed.deinit();
@@ -827,6 +1013,13 @@ test "manifest named references resolve" {
     var type_iterator = manifest_types.iterator();
     while (type_iterator.next()) |type_entry| {
         const descriptor = type_entry.value_ptr.object;
+        if (descriptor.get("bits")) |bits_value| {
+            try expectManifestBitsValid(
+                manifest_types,
+                bits_value.object,
+                @intCast(descriptor.get("size").?.integer * 8),
+            );
+        }
         const fields_value = descriptor.get("fields") orelse continue;
         var field_iterator = fields_value.object.iterator();
         while (field_iterator.next()) |field_entry| {
@@ -854,6 +1047,105 @@ test "manifest named references resolve" {
                     try std.testing.expect(union_fields.contains(arm_entry.value_ptr.string));
                 }
             }
+        }
+    }
+}
+
+fn expectPackedArmField(
+    arm: std.json.ObjectMap,
+    manifest_name: []const u8,
+    comptime T: type,
+    comptime zig_name: []const u8,
+    expected_type: []const u8,
+) !void {
+    try std.testing.expectEqualStrings("packed", arm.get("kind").?.string);
+    try std.testing.expectEqual(@as(i64, @bitSizeOf(T)), arm.get("width").?.integer);
+    const bit = arm.get("bits").?.object.get(manifest_name).?.object;
+    try std.testing.expectEqual(@as(i64, @bitOffsetOf(T, zig_name)), bit.get("lsb").?.integer);
+    try std.testing.expectEqual(@as(i64, @bitSizeOf(@FieldType(T, zig_name))), bit.get("width").?.integer);
+    try std.testing.expectEqualStrings(expected_type, bit.get("type").?.string);
+}
+
+fn extractManifestBits(value: u64, bit: std.json.ObjectMap) u64 {
+    const lsb: u6 = @intCast(bit.get("lsb").?.integer);
+    const width: u7 = @intCast(bit.get("width").?.integer);
+    const mask = if (width == 64)
+        std.math.maxInt(u64)
+    else
+        (@as(u64, 1) << @intCast(width)) - 1;
+    return (value >> lsb) & mask;
+}
+
+fn activeCellContentArm(
+    manifest_types: std.json.ObjectMap,
+    cell_bits: std.json.ObjectMap,
+    raw: u64,
+) std.json.ObjectMap {
+    const content_tag = cell_bits.get("content_tag").?.object;
+    const value = extractManifestBits(raw, content_tag);
+    const enum_values = manifest_types.get(content_tag.get("type").?.string).?.object
+        .get("values").?.object;
+    var iterator = enum_values.iterator();
+    while (iterator.next()) |entry| {
+        if (entry.value_ptr.integer == value)
+            return cell_bits.get("content").?.object.get("arms").?.object
+                .get(entry.key_ptr.*).?.object;
+    }
+    unreachable;
+}
+
+fn expectDecodedCellContent(
+    manifest_types: std.json.ObjectMap,
+    cell_bits: std.json.ObjectMap,
+    raw: u64,
+    field_name: []const u8,
+    expected: u64,
+) !void {
+    const arm = activeCellContentArm(manifest_types, cell_bits, raw);
+    const content = extractManifestBits(raw, cell_bits.get("content").?.object);
+    try std.testing.expectEqual(
+        expected,
+        extractManifestBits(content, arm.get("bits").?.object.get(field_name).?.object),
+    );
+}
+
+fn expectManifestBitsValid(
+    manifest_types: std.json.ObjectMap,
+    bits: std.json.ObjectMap,
+    container_width: usize,
+) !void {
+    var iterator = bits.iterator();
+    while (iterator.next()) |entry| {
+        const bit = entry.value_ptr.object;
+        const lsb: usize = @intCast(bit.get("lsb").?.integer);
+        const width: usize = @intCast(bit.get("width").?.integer);
+        try std.testing.expect(lsb + width <= container_width);
+
+        if (bit.get("type")) |type_value| {
+            const type_name = type_value.string;
+            try std.testing.expect(Json.isBuiltinType(type_name) or manifest_types.contains(type_name));
+            continue;
+        }
+
+        const kind = bit.get("kind").?.string;
+        if (std.mem.eql(u8, kind, "packed")) {
+            try expectManifestBitsValid(manifest_types, bit.get("bits").?.object, width);
+            continue;
+        }
+
+        try std.testing.expectEqualStrings("union", kind);
+        const tag_name = bit.get("tag").?.string;
+        const tag = bits.get(tag_name).?.object;
+        const enum_values = manifest_types.get(tag.get("type").?.string).?.object
+            .get("values").?.object;
+        var arm_iterator = bit.get("arms").?.object.iterator();
+        while (arm_iterator.next()) |arm_entry| {
+            try std.testing.expect(enum_values.contains(arm_entry.key_ptr.*));
+            if (arm_entry.value_ptr.* == .null) continue;
+            const arm = arm_entry.value_ptr.object;
+            const arm_width: usize = @intCast(arm.get("width").?.integer);
+            try std.testing.expect(arm_width <= width);
+            try expectManifestBitsValid(manifest_types, arm.get("bits").?.object, arm_width);
         }
     }
 }

@@ -45,7 +45,11 @@
     },
     "typeReference": {
       "type": "string",
-      "pattern": "^(Ghostty[A-Za-z0-9_]+|bool|f32|f64|function|i8|i16|i32|i64|opaque|u8|u16|u32|u64|void)$"
+      "pattern": "^(Ghostty[A-Za-z0-9_]+|bool|f32|f64|function|[iu][1-9][0-9]*|opaque|void)$"
+    },
+    "integerTypeReference": {
+      "type": "string",
+      "pattern": "^[iu][1-9][0-9]*$"
     },
     "abi": {
       "type": "object",
@@ -208,6 +212,129 @@
         "$ref": "#/$defs/field"
       }
     },
+    "bitBase": {
+      "type": "object",
+      "required": ["lsb", "width"],
+      "properties": {
+        "lsb": {
+          "description": "Least-significant bit relative to the containing numerical value.",
+          "$ref": "#/$defs/nonNegativeInteger"
+        },
+        "width": {
+          "description": "Physical width of this field in bits.",
+          "$ref": "#/$defs/positiveInteger"
+        }
+      }
+    },
+    "scalarBit": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/bitBase"
+        },
+        {
+          "required": ["type"],
+          "properties": {
+            "type": {
+              "$ref": "#/$defs/typeReference"
+            }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "packedBit": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/bitBase"
+        },
+        {
+          "required": ["kind", "bits"],
+          "properties": {
+            "kind": {
+              "const": "packed"
+            },
+            "bits": {
+              "$ref": "#/$defs/bits"
+            }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "packedArm": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "width", "bits"],
+      "properties": {
+        "kind": {
+          "const": "packed"
+        },
+        "width": {
+          "description": "Physical width of this inline arm in bits.",
+          "$ref": "#/$defs/positiveInteger"
+        },
+        "bits": {
+          "$ref": "#/$defs/bits"
+        }
+      }
+    },
+    "taggedUnionBit": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/bitBase"
+        },
+        {
+          "required": ["kind", "tag", "arms"],
+          "properties": {
+            "kind": {
+              "const": "union"
+            },
+            "tag": {
+              "type": "string",
+              "minLength": 1
+            },
+            "arms": {
+              "type": "object",
+              "minProperties": 1,
+              "propertyNames": {
+                "pattern": "^[A-Z][A-Z0-9_]*$"
+              },
+              "additionalProperties": {
+                "oneOf": [
+                  {
+                    "$ref": "#/$defs/packedArm"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              }
+            }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "bit": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/scalarBit"
+        },
+        {
+          "$ref": "#/$defs/packedBit"
+        },
+        {
+          "$ref": "#/$defs/taggedUnionBit"
+        }
+      ]
+    },
+    "bits": {
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {
+        "$ref": "#/$defs/bit"
+      }
+    },
     "descriptorBase": {
       "type": "object",
       "required": ["kind", "size", "align"],
@@ -291,6 +418,29 @@
       ],
       "unevaluatedProperties": false
     },
+    "packedDescriptor": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/descriptorBase"
+        },
+        {
+          "required": ["underlying", "bits"],
+          "properties": {
+            "kind": {
+              "const": "packed"
+            },
+            "underlying": {
+              "description": "Integer backing type used to interpret the packed value.",
+              "$ref": "#/$defs/integerTypeReference"
+            },
+            "bits": {
+              "$ref": "#/$defs/bits"
+            }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
     "aliasDescriptor": {
       "allOf": [
         {
@@ -335,6 +485,9 @@
         },
         {
           "$ref": "#/$defs/enumDescriptor"
+        },
+        {
+          "$ref": "#/$defs/packedDescriptor"
         },
         {
           "$ref": "#/$defs/aliasDescriptor"
