@@ -152,15 +152,9 @@ int main(void) {
   result = ghostty_render_state_row_cells_new(NULL, &cells);
   assert(result == GHOSTTY_SUCCESS);
 
-  int row_index = 0;
-  while (ghostty_render_state_row_iterator_next(row_iter)) {
-    // Check per-row dirty state; a real renderer would skip clean rows.
-    bool row_dirty = false;
-    ghostty_render_state_row_get(
-        row_iter, GHOSTTY_RENDER_STATE_ROW_DATA_DIRTY, &row_dirty);
-
-    printf("Row %2d [%s]: ", row_index,
-           row_dirty ? "dirty" : "clean");
+  uint16_t row_y = 0;
+  while (ghostty_render_state_row_iterator_next_dirty(row_iter, &row_y)) {
+    printf("Row %2u [dirty]: ", row_y);
 
     // Query the row-local selection range. Rows without a selection return
     // GHOSTTY_NO_VALUE; selected rows return inclusive start/end columns.
@@ -226,22 +220,13 @@ int main(void) {
     }
 
     printf("\n");
-
-    // Clear per-row dirty flag after "rendering" it.
-    bool clean = false;
-    ghostty_render_state_row_set(
-        row_iter, GHOSTTY_RENDER_STATE_ROW_OPTION_DIRTY, &clean);
-
-    row_index++;
   }
   //! [render-row-iterate]
 
   //! [render-dirty-reset]
-  // After finishing the frame, reset the global dirty state so the next
-  // update can report changes accurately.
-  GhosttyRenderStateDirty clean_state = GHOSTTY_RENDER_STATE_DIRTY_FALSE;
-  result = ghostty_render_state_set(
-      render_state, GHOSTTY_RENDER_STATE_OPTION_DIRTY, &clean_state);
+  // After successfully rendering the complete frame, clear both the global
+  // and per-row dirty state in one call.
+  result = ghostty_render_state_clean(render_state);
   assert(result == GHOSTTY_SUCCESS);
   //! [render-dirty-reset]
 

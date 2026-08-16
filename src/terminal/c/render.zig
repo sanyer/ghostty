@@ -42,6 +42,10 @@ const RowIteratorWrapper = struct {
     selection: []const ?[2]size.CellCountInt,
     dirty: []bool,
 
+    /// The global dirty state from the render state that populated this
+    /// iterator. This has the same borrowed lifetime as the row slices.
+    state_dirty: *const Dirty,
+
     /// The color palette from the render state, needed to resolve
     /// palette-indexed background colors on cells.
     palette: *const colorpkg.Palette,
@@ -237,6 +241,14 @@ pub fn end_update(
     return .success;
 }
 
+pub fn clean(
+    state_: RenderState,
+) callconv(lib.calling_conv) Result {
+    const state = state_ orelse return .invalid_value;
+    state.state.clean();
+    return .success;
+}
+
 pub fn get(
     state_: RenderState,
     data: Data,
@@ -318,6 +330,7 @@ fn getTyped(
                 .cells = row_data.items(.cells),
                 .selection = row_data.items(.selection),
                 .dirty = row_data.items(.dirty),
+                .state_dirty = &state.state.dirty,
                 .palette = &state.state.colors.palette,
             };
         },
@@ -537,6 +550,7 @@ pub fn row_iterator_new(
         .cells = undefined,
         .selection = undefined,
         .dirty = undefined,
+        .state_dirty = undefined,
         .palette = undefined,
     };
     result.* = ptr;
@@ -556,6 +570,36 @@ pub fn row_iterator_next(iterator_: RowIterator) callconv(lib.calling_conv) bool
     if (next_y >= it.raws.len) return false;
     it.y = next_y;
     return true;
+}
+
+pub fn row_iterator_next_dirty(
+    iterator_: RowIterator,
+    out_y: ?*size.CellCountInt,
+) callconv(lib.calling_conv) bool {
+    const it = iterator_ orelse return false;
+    const y_out = out_y orelse return false;
+
+    switch (it.state_dirty.*) {
+        .false => return false,
+        .full => {
+            // The none sentinel wraps to zero.
+            const next_y = it.y +% 1;
+            if (next_y >= it.raws.len) return false;
+            it.y = next_y;
+            y_out.* = @intCast(next_y);
+            return true;
+        },
+        .partial => {
+            var next_y = it.y +% 1;
+            while (next_y < it.raws.len) : (next_y += 1) {
+                if (!it.dirty[next_y]) continue;
+                it.y = next_y;
+                y_out.* = @intCast(next_y);
+                return true;
+            }
+            return false;
+        },
+    }
 }
 
 pub fn row_cells_new(
@@ -1168,6 +1212,42 @@ test "render: get/set dirty" {
     try testing.expectEqual(Result.success, set(state, .dirty, @ptrCast(&dirty_full)));
     try testing.expectEqual(Result.success, get(state, .dirty, @ptrCast(&dirty)));
     try testing.expectEqual(Dirty.full, dirty);
+}
+
+test "render: clean" {
+    var terminal: terminal_c.Terminal = null;
+    try testing.expectEqual(Result.success, terminal_c.new(
+        &lib.alloc.test_allocator,
+        &terminal,
+        10,
+        3,
+    ));
+    defer terminal_c.free(terminal);
+
+    var state: RenderState = null;
+    try testing.expectEqual(Result.success, new(
+        &lib.alloc.test_allocator,
+        &state,
+    ));
+    defer free(state);
+
+    try testing.expectEqual(Result.invalid_value, clean(null));
+    try testing.expectEqual(Result.success, update(state, terminal));
+    try testing.expectEqual(Dirty.full, state.?.state.dirty);
+
+    try testing.expectEqual(Result.success, clean(state));
+    try testing.expectEqual(Dirty.false, state.?.state.dirty);
+    for (state.?.state.row_data.items(.dirty)) |dirty| {
+        try testing.expect(!dirty);
+    }
+
+    // Cleaning is idempotent, and an unchanged update remains clean.
+    try testing.expectEqual(Result.success, clean(state));
+    try testing.expectEqual(Result.success, update(state, terminal));
+    try testing.expectEqual(Dirty.false, state.?.state.dirty);
+    for (state.?.state.row_data.items(.dirty)) |dirty| {
+        try testing.expect(!dirty);
+    }
 }
 
 test "render: set null value" {
@@ -1818,6 +1898,79 @@ test "render: row iterator next" {
 
     try testing.expect(!row_iterator_next(iterator));
     try testing.expectEqual(@as(usize, rows - 1), iterator.?.y);
+}
+
+test "render: row iterator next dirty" {
+    var terminal: terminal_c.Terminal = null;
+    try testing.expectEqual(Result.success, terminal_c.new(
+        &lib.alloc.test_allocator,
+        &terminal,
+        10,
+        4,
+    ));
+    defer terminal_c.free(terminal);
+
+    var state: RenderState = null;
+    try testing.expectEqual(Result.success, new(
+        &lib.alloc.test_allocator,
+        &state,
+    ));
+    defer free(state);
+    try testing.expectEqual(Result.success, update(state, terminal));
+
+    var iterator: RowIterator = null;
+    try testing.expectEqual(Result.success, row_iterator_new(
+        &lib.alloc.test_allocator,
+        &iterator,
+    ));
+    defer row_iterator_free(iterator);
+
+    // Invalid arguments neither write the output nor advance the iterator.
+    try testing.expectEqual(Result.success, get(state, .row_iterator, @ptrCast(&iterator)));
+    var out_y: size.CellCountInt = 0xCAFE;
+    try testing.expect(!row_iterator_next_dirty(null, &out_y));
+    try testing.expectEqual(@as(size.CellCountInt, 0xCAFE), out_y);
+    try testing.expect(!row_iterator_next_dirty(iterator, null));
+    try testing.expectEqual(position_none, iterator.?.y);
+
+    // A full redraw returns every row, even if its row flag was cleared.
+    @memset(state.?.state.row_data.items(.dirty), false);
+    var expected_y: size.CellCountInt = 0;
+    while (row_iterator_next_dirty(iterator, &out_y)) : (expected_y += 1) {
+        try testing.expectEqual(expected_y, out_y);
+    }
+    try testing.expectEqual(@as(size.CellCountInt, 4), expected_y);
+    try testing.expectEqual(@as(size.CellCountInt, 3), out_y);
+
+    // A partial redraw skips clean rows without consuming dirty flags.
+    const dirty = state.?.state.row_data.items(.dirty);
+    state.?.state.dirty = .partial;
+    @memset(dirty, false);
+    dirty[1] = true;
+    dirty[3] = true;
+    try testing.expectEqual(Result.success, get(state, .row_iterator, @ptrCast(&iterator)));
+    try testing.expect(row_iterator_next_dirty(iterator, &out_y));
+    try testing.expectEqual(@as(size.CellCountInt, 1), out_y);
+    try testing.expect(row_iterator_next_dirty(iterator, &out_y));
+    try testing.expectEqual(@as(size.CellCountInt, 3), out_y);
+    try testing.expect(!row_iterator_next_dirty(iterator, &out_y));
+    try testing.expectEqual(@as(size.CellCountInt, 3), out_y);
+    try testing.expect(dirty[1]);
+    try testing.expect(dirty[3]);
+
+    // The global clean state is authoritative, even if stale row flags exist.
+    state.?.state.dirty = .false;
+    try testing.expectEqual(Result.success, get(state, .row_iterator, @ptrCast(&iterator)));
+    out_y = 0xCAFE;
+    try testing.expect(!row_iterator_next_dirty(iterator, &out_y));
+    try testing.expectEqual(@as(size.CellCountInt, 0xCAFE), out_y);
+
+    // Existing iterators observe cleaning through their borrowed state.
+    state.?.state.dirty = .partial;
+    dirty[1] = true;
+    try testing.expectEqual(Result.success, get(state, .row_iterator, @ptrCast(&iterator)));
+    try testing.expectEqual(Result.success, clean(state));
+    try testing.expect(!row_iterator_next_dirty(iterator, &out_y));
 }
 
 test "render: update" {
