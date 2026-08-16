@@ -903,7 +903,7 @@ msgstr "Focar divisão: direita"
 
 #: src/input/command.zig:516
 msgid "Focus the split to the right, if it exists."
-msgstr "Foca a divisão à direita, se ela existir."
+msgstr "Focar a divisão à direita, se ela existir."
 
 #: src/input/command.zig:520
 msgid "Focus Split: Up"
