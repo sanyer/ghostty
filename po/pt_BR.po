@@ -1131,7 +1131,7 @@ msgstr "Desfazer"
 
 #: src/input/command.zig:691
 msgid "Undo the last action."
-msgstr "Desfaz a última ação."
+msgstr "Desfazer a última ação."
 
 #: src/input/command.zig:696
 msgid "Redo"
