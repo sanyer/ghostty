@@ -807,7 +807,7 @@ msgstr ""
 
 #: src/input/command.zig:422
 msgid "Open a new window."
-msgstr "Abre uma nova janela."
+msgstr "Abrir uma nova janela."
 
 #: src/input/command.zig:428
 msgid "Open a new tab."
