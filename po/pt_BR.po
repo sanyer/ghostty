@@ -1139,7 +1139,7 @@ msgstr "Refazer"
 
 #: src/input/command.zig:697
 msgid "Redo the last undone action."
-msgstr "Refaz a última ação desfeita."
+msgstr "Refazer a última ação desfeita."
 
 #: src/input/command.zig:703
 msgid "Quit the application."
