@@ -100,6 +100,19 @@ pub const CursorVisualStyle = enum(c_int) {
     }
 };
 
+/// C: GhosttyRenderStateCursor
+pub const Cursor = extern struct {
+    size: usize = @sizeOf(Cursor),
+    viewport_has_value: bool,
+    viewport_x: u16,
+    viewport_y: u16,
+    wide_tail: bool,
+    visible: bool,
+    blinking: bool,
+    password_input: bool,
+    visual_style: CursorVisualStyle,
+};
+
 /// C: GhosttyRenderStateData
 pub const Data = enum(c_int) {
     invalid = 0,
@@ -120,6 +133,8 @@ pub const Data = enum(c_int) {
     cursor_viewport_x = 15,
     cursor_viewport_y = 16,
     cursor_viewport_wide_tail = 17,
+    cursor = 18,
+    colors = 19,
 
     /// Output type expected for querying the data of the given kind.
     pub fn OutType(comptime self: Data) type {
@@ -135,6 +150,8 @@ pub const Data = enum(c_int) {
             .cursor_visible, .cursor_blinking, .cursor_password_input => bool,
             .cursor_viewport_has_value, .cursor_viewport_wide_tail => bool,
             .cursor_viewport_x, .cursor_viewport_y => size.CellCountInt,
+            .cursor => Cursor,
+            .colors => Colors,
         };
     }
 };
@@ -270,12 +287,13 @@ inline fn getDispatch(
         };
     }
 
+    const out_ptr = out orelse return .invalid_value;
     return switch (data) {
         .invalid => .invalid_value,
         inline else => |comptime_data| getTyped(
             state,
             comptime_data,
-            @ptrCast(@alignCast(out)),
+            @ptrCast(@alignCast(out_ptr)),
         ),
     };
 }
@@ -328,6 +346,8 @@ fn getTyped(
             const vp = state.state.cursor.viewport orelse return .invalid_value;
             out.* = vp.wide_tail;
         },
+        .cursor => return writeCursor(state, out),
+        .colors => return writeColors(state, out),
     }
 
     return .success;
@@ -367,12 +387,87 @@ fn setTyped(
     return .success;
 }
 
-pub fn colors_get(
-    state_: RenderState,
-    out_colors_: ?*Colors,
-) callconv(lib.calling_conv) Result {
-    const state = state_ orelse return .invalid_value;
-    const out_colors = out_colors_ orelse return .invalid_value;
+fn writeCursor(
+    state: *RenderStateWrapper,
+    out_cursor: *Cursor,
+) Result {
+    const out_size = out_cursor.size;
+    if (out_size < @sizeOf(usize)) return .invalid_value;
+
+    const cursor = &state.state.cursor;
+    if (lib.structSizedFieldFits(
+        Cursor,
+        out_size,
+        "viewport_has_value",
+    )) {
+        out_cursor.viewport_has_value = cursor.viewport != null;
+    }
+
+    if (cursor.viewport) |viewport| {
+        if (lib.structSizedFieldFits(
+            Cursor,
+            out_size,
+            "viewport_x",
+        )) {
+            out_cursor.viewport_x = viewport.x;
+        }
+
+        if (lib.structSizedFieldFits(
+            Cursor,
+            out_size,
+            "viewport_y",
+        )) {
+            out_cursor.viewport_y = viewport.y;
+        }
+
+        if (lib.structSizedFieldFits(
+            Cursor,
+            out_size,
+            "wide_tail",
+        )) {
+            out_cursor.wide_tail = viewport.wide_tail;
+        }
+    }
+
+    if (lib.structSizedFieldFits(
+        Cursor,
+        out_size,
+        "visible",
+    )) {
+        out_cursor.visible = cursor.visible;
+    }
+
+    if (lib.structSizedFieldFits(
+        Cursor,
+        out_size,
+        "blinking",
+    )) {
+        out_cursor.blinking = cursor.blinking;
+    }
+
+    if (lib.structSizedFieldFits(
+        Cursor,
+        out_size,
+        "password_input",
+    )) {
+        out_cursor.password_input = cursor.password_input;
+    }
+
+    if (lib.structSizedFieldFits(
+        Cursor,
+        out_size,
+        "visual_style",
+    )) {
+        out_cursor.visual_style = CursorVisualStyle.fromCursorStyle(cursor.visual_style);
+    }
+
+    return .success;
+}
+
+fn writeColors(
+    state: *RenderStateWrapper,
+    out_colors: *Colors,
+) Result {
     const out_size = out_colors.size;
     if (out_size < @sizeOf(usize)) return .invalid_value;
 
@@ -997,6 +1092,14 @@ test "render: begin/end update" {
 test "render: get invalid value" {
     var cols: size.CellCountInt = 0;
     try testing.expectEqual(Result.invalid_value, get(null, .cols, @ptrCast(&cols)));
+
+    var state: RenderState = null;
+    try testing.expectEqual(Result.success, new(
+        &lib.alloc.test_allocator,
+        &state,
+    ));
+    defer free(state);
+    try testing.expectEqual(Result.invalid_value, get(state, .cols, null));
 }
 
 test "render: get invalid data" {
@@ -1010,7 +1113,7 @@ test "render: get invalid data" {
     try testing.expectEqual(Result.invalid_value, get(state, .invalid, null));
 }
 
-test "render: colors get invalid value" {
+test "render: aggregate get invalid value" {
     var state: RenderState = null;
     try testing.expectEqual(Result.success, new(
         &lib.alloc.test_allocator,
@@ -1021,11 +1124,20 @@ test "render: colors get invalid value" {
     var colors: Colors = std.mem.zeroes(Colors);
     colors.size = @sizeOf(Colors);
 
-    try testing.expectEqual(Result.invalid_value, colors_get(null, &colors));
-    try testing.expectEqual(Result.invalid_value, colors_get(state, null));
+    try testing.expectEqual(Result.invalid_value, get(null, .colors, &colors));
+    try testing.expectEqual(Result.invalid_value, get(state, .colors, null));
 
     colors.size = @sizeOf(usize) - 1;
-    try testing.expectEqual(Result.invalid_value, colors_get(state, &colors));
+    try testing.expectEqual(Result.invalid_value, get(state, .colors, &colors));
+
+    var cursor: Cursor = std.mem.zeroes(Cursor);
+    cursor.size = @sizeOf(Cursor);
+
+    try testing.expectEqual(Result.invalid_value, get(null, .cursor, &cursor));
+    try testing.expectEqual(Result.invalid_value, get(state, .cursor, null));
+
+    cursor.size = @sizeOf(usize) - 1;
+    try testing.expectEqual(Result.invalid_value, get(state, .cursor, &cursor));
 }
 
 test "render: get/set dirty invalid value" {
@@ -1738,7 +1850,7 @@ test "render: update" {
     try testing.expectEqual(@as(size.CellCountInt, 24), rows_val);
 }
 
-test "render: colors get" {
+test "render: colors data get" {
     var terminal: terminal_c.Terminal = null;
     try testing.expectEqual(Result.success, terminal_c.new(
         &lib.alloc.test_allocator,
@@ -1759,7 +1871,7 @@ test "render: colors get" {
 
     var colors: Colors = std.mem.zeroes(Colors);
     colors.size = @sizeOf(Colors);
-    try testing.expectEqual(Result.success, colors_get(state, &colors));
+    try testing.expectEqual(Result.success, get(state, .colors, &colors));
 
     const state_colors = &state.?.state.colors;
     try testing.expectEqual(state_colors.background.cval(), colors.background);
@@ -1775,6 +1887,121 @@ test "render: colors get" {
     for (state_colors.palette, colors.palette) |expected, actual| {
         try testing.expectEqual(expected.cval(), actual);
     }
+}
+
+test "render: cursor data get matches scalar getters" {
+    var terminal: terminal_c.Terminal = null;
+    try testing.expectEqual(Result.success, terminal_c.new(
+        &lib.alloc.test_allocator,
+        &terminal,
+        80,
+        24,
+    ));
+    defer terminal_c.free(terminal);
+
+    var state: RenderState = null;
+    try testing.expectEqual(Result.success, new(
+        &lib.alloc.test_allocator,
+        &state,
+    ));
+    defer free(state);
+
+    try testing.expectEqual(Result.success, update(state, terminal));
+
+    var cursor: Cursor = std.mem.zeroes(Cursor);
+    cursor.size = @sizeOf(Cursor);
+    try testing.expectEqual(Result.success, get(state, .cursor, &cursor));
+
+    var viewport_has_value: bool = undefined;
+    var viewport_x: u16 = undefined;
+    var viewport_y: u16 = undefined;
+    var wide_tail: bool = undefined;
+    var visible: bool = undefined;
+    var blinking: bool = undefined;
+    var password_input: bool = undefined;
+    var visual_style: CursorVisualStyle = undefined;
+    try testing.expectEqual(Result.success, get(state, .cursor_viewport_has_value, &viewport_has_value));
+    try testing.expectEqual(Result.success, get(state, .cursor_viewport_x, &viewport_x));
+    try testing.expectEqual(Result.success, get(state, .cursor_viewport_y, &viewport_y));
+    try testing.expectEqual(Result.success, get(state, .cursor_viewport_wide_tail, &wide_tail));
+    try testing.expectEqual(Result.success, get(state, .cursor_visible, &visible));
+    try testing.expectEqual(Result.success, get(state, .cursor_blinking, &blinking));
+    try testing.expectEqual(Result.success, get(state, .cursor_password_input, &password_input));
+    try testing.expectEqual(Result.success, get(state, .cursor_visual_style, &visual_style));
+
+    try testing.expectEqual(viewport_has_value, cursor.viewport_has_value);
+    try testing.expectEqual(viewport_x, cursor.viewport_x);
+    try testing.expectEqual(viewport_y, cursor.viewport_y);
+    try testing.expectEqual(wide_tail, cursor.wide_tail);
+    try testing.expectEqual(visible, cursor.visible);
+    try testing.expectEqual(blinking, cursor.blinking);
+    try testing.expectEqual(password_input, cursor.password_input);
+    try testing.expectEqual(visual_style, cursor.visual_style);
+}
+
+test "render: cursor data get without viewport" {
+    var state: RenderState = null;
+    try testing.expectEqual(Result.success, new(
+        &lib.alloc.test_allocator,
+        &state,
+    ));
+    defer free(state);
+
+    state.?.state.cursor.viewport = null;
+    state.?.state.cursor.visible = true;
+    state.?.state.cursor.blinking = true;
+    state.?.state.cursor.password_input = true;
+    state.?.state.cursor.visual_style = .underline;
+
+    var cursor: Cursor = std.mem.zeroes(Cursor);
+    cursor.size = @sizeOf(Cursor);
+    cursor.viewport_x = 0xAAAA;
+    cursor.viewport_y = 0xBBBB;
+    cursor.wide_tail = true;
+    try testing.expectEqual(Result.success, get(state, .cursor, &cursor));
+
+    try testing.expect(!cursor.viewport_has_value);
+    try testing.expectEqual(@as(u16, 0xAAAA), cursor.viewport_x);
+    try testing.expectEqual(@as(u16, 0xBBBB), cursor.viewport_y);
+    try testing.expect(cursor.wide_tail);
+    try testing.expect(cursor.visible);
+    try testing.expect(cursor.blinking);
+    try testing.expect(cursor.password_input);
+    try testing.expectEqual(CursorVisualStyle.underline, cursor.visual_style);
+}
+
+test "render: cursor data get supports truncated sized struct" {
+    var terminal: terminal_c.Terminal = null;
+    try testing.expectEqual(Result.success, terminal_c.new(
+        &lib.alloc.test_allocator,
+        &terminal,
+        80,
+        24,
+    ));
+    defer terminal_c.free(terminal);
+
+    var state: RenderState = null;
+    try testing.expectEqual(Result.success, new(
+        &lib.alloc.test_allocator,
+        &state,
+    ));
+    defer free(state);
+
+    try testing.expectEqual(Result.success, update(state, terminal));
+    const expected = state.?.state.cursor;
+    const viewport = expected.viewport.?;
+
+    var cursor: Cursor = std.mem.zeroes(Cursor);
+    cursor.size = @offsetOf(Cursor, "viewport_y") + @sizeOf(u16);
+    cursor.wide_tail = !viewport.wide_tail;
+    cursor.visible = !expected.visible;
+    try testing.expectEqual(Result.success, get(state, .cursor, &cursor));
+
+    try testing.expect(cursor.viewport_has_value);
+    try testing.expectEqual(viewport.x, cursor.viewport_x);
+    try testing.expectEqual(viewport.y, cursor.viewport_y);
+    try testing.expectEqual(!viewport.wide_tail, cursor.wide_tail);
+    try testing.expectEqual(!expected.visible, cursor.visible);
 }
 
 test "render: row cells bg_color no background" {
@@ -2020,7 +2247,7 @@ test "render: row cells fg_color from style" {
     try testing.expectEqual(@as(u8, 30), fg.b);
 }
 
-test "render: colors get supports truncated sized struct" {
+test "render: colors data get supports truncated sized struct" {
     var terminal: terminal_c.Terminal = null;
     try testing.expectEqual(Result.success, terminal_c.new(
         &lib.alloc.test_allocator,
@@ -2044,7 +2271,7 @@ test "render: colors get supports truncated sized struct" {
     for (&colors.palette) |*entry| entry.* = sentinel;
 
     colors.size = @offsetOf(Colors, "palette") + @sizeOf(colorpkg.RGB.C) * 2;
-    try testing.expectEqual(Result.success, colors_get(state, &colors));
+    try testing.expectEqual(Result.success, get(state, .colors, &colors));
 
     const state_colors = &state.?.state.colors;
     try testing.expectEqual(state_colors.palette[0].cval(), colors.palette[0]);

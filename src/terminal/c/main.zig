@@ -90,7 +90,6 @@ pub const render_state_end_update = render.end_update;
 pub const render_state_get = render.get;
 pub const render_state_get_multi = render.get_multi;
 pub const render_state_set = render.set;
-pub const render_state_colors_get = render.colors_get;
 pub const render_state_row_iterator_new = render.row_iterator_new;
 pub const render_state_row_iterator_next = render.row_iterator_next;
 pub const render_state_row_get = render.row_get;
