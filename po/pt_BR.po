@@ -1151,4 +1151,4 @@ msgstr "Ghostty"
 
 #: src/input/command.zig:709
 msgid "Put a little Ghostty in your terminal."
-msgstr "Coloca um pouco de Ghostty no seu terminal."
+msgstr "Colocar um pouco de Ghostty no seu terminal."
