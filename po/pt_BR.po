@@ -835,7 +835,7 @@ msgstr "Mover aba para uma nova janela"
 
 #: src/input/command.zig:447
 msgid "Move the current tab to a new window."
-msgstr "Move a aba atual para uma nova janela."
+msgstr "Mover a aba atual para uma nova janela."
 
 #: src/input/command.zig:452
 msgid "Toggle Tab Overview"
