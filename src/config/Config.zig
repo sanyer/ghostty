@@ -4518,6 +4518,29 @@ fn expandPaths(self: *Config, base: []const u8) !void {
     }
 }
 
+/// Expand tilde paths to absolute paths to the user's home directory.
+/// If expansion fails, an error is logged and the original path is returned.
+fn expandHome(path: []const u8, buf: []u8) []const u8 {
+    if (!std.mem.startsWith(u8, path, "~/"))
+        return path;
+
+    var environ_map = global.environMap() catch |err| {
+        log.warn("failed to get environment map for path \"{s}\": {}", .{ path, err });
+        return path;
+    };
+    defer environ_map.deinit();
+
+    return internal_os.expandHome(
+        global.io(),
+        &environ_map,
+        path,
+        buf,
+    ) catch |err| {
+        log.warn("failed to expand home directory in path \"{s}\": {}", .{ path, err });
+        return path;
+    };
+}
+
 fn loadTheme(self: *Config, theme: Theme) !void {
     // Load the correct theme depending on the conditional state.
     // Dark/light themes were programmed prior to conditional configuration
@@ -4617,14 +4640,17 @@ fn loadTheme(self: *Config, theme: Theme) !void {
 /// Call this once after you are done setting configuration. This
 /// is idempotent but will waste memory if called multiple times.
 pub fn finalize(self: *Config) !void {
+    const alloc = self._arena.?.allocator();
+
     // We always load the theme first because it may set other fields
     // in our config.
-    if (self.theme) |theme| {
+    if (self.theme) |*theme| {
+        try theme.finalize(alloc);
         const different = !std.mem.eql(u8, theme.light, theme.dark);
 
         // Warning: loadTheme will deinit our existing config and replace
         // it so all memory from self prior to this point will be freed.
-        try self.loadTheme(theme);
+        try self.loadTheme(theme.*);
 
         // If we have different light vs dark mode themes, disable
         // window-theme = auto since that breaks it.
@@ -4637,8 +4663,6 @@ pub fn finalize(self: *Config) !void {
             self._conditional_set.insert(.theme);
         }
     }
-
-    const alloc = self._arena.?.allocator();
 
     // Used for a variety of defaults. See the function docs as well the
     // specific variable use sites for more details.
@@ -5444,20 +5468,8 @@ pub const WorkingDirectory = union(enum) {
             else => return,
         };
 
-        if (!std.mem.startsWith(u8, path, "~/")) return;
-
         var buf: [std.fs.max_path_bytes]u8 = undefined;
-        const expanded = expanded: {
-            var environ_map = global.environMap() catch |err| break :expanded err;
-            defer environ_map.deinit();
-            break :expanded internal_os.expandHome(global.io(), &environ_map, path, &buf);
-        } catch |err| {
-            log.warn(
-                "error expanding home directory for working-directory path={s}: {}",
-                .{ path, err },
-            );
-            return;
-        };
+        const expanded = expandHome(path, &buf);
 
         if (std.mem.eql(u8, expanded, path)) return;
         self.* = .{ .path = try alloc.dupe(u8, expanded) };
@@ -9973,34 +9985,24 @@ pub const Theme = struct {
         // Trim our value
         const trimmed = std.mem.trim(u8, input, cli.args.whitespace);
 
-        // Expand our value
-        var buf: [std.fs.max_path_bytes]u8 = undefined;
-        const expanded = expanded: {
-            if (!std.mem.startsWith(u8, trimmed, "~/"))
-                break :expanded trimmed;
-        
-            var environ_map = global.environMap() catch |err| {
-                log.warn("error getting environment map for theme path {s}: {}", .{ trimmed, err });
-                break :expanded trimmed;
-            };
-            defer environ_map.deinit();
-        
-            break :expanded internal_os.expandHome(
-                global.io(),
-                &environ_map,
-                trimmed,
-                &buf,
-            ) catch |err| {
-                log.warn("error expanding home directory in theme path {s}: {}", .{ trimmed, err });
-                break :expanded trimmed;
-            };
-        };
-
         // Set the value to the specified value directly.
         self.* = .{
-            .light = try alloc.dupeZ(u8, expanded),
+            .light = try alloc.dupeZ(u8, trimmed),
             .dark = self.light,
         };
+    }
+
+    /// Expand tilde paths in light/dark theme values.
+    pub fn finalize(self: *Theme, alloc: Allocator) Allocator.Error!void {
+        var buf: [std.fs.max_path_bytes]u8 = undefined;
+    
+        const light = expandHome(self.light, &buf);
+        if (!std.mem.eql(u8, light, self.light))
+            self.light = try alloc.dupeZ(u8, light);
+    
+        const dark = expandHome(self.dark, &buf);
+        if (!std.mem.eql(u8, dark, self.dark))
+            self.dark = try alloc.dupeZ(u8, dark);
     }
 
     /// Deep copy of the struct. Required by Config.
@@ -10051,7 +10053,15 @@ pub const Theme = struct {
             try testing.expectEqualStrings("foo", v.dark);
         }
 
-        // Expand home
+        // Light/dark
+        {
+            var v: Theme = undefined;
+            try v.parseCLI(alloc, " light:foo,  dark : bar  ");
+            try testing.expectEqualStrings("foo", v.light);
+            try testing.expectEqualStrings("bar", v.dark);
+        }
+
+        // Expand tilde to home
         {
             var environ_map = try testing.environ.createMap(alloc);
             defer environ_map.deinit();
@@ -10060,30 +10070,23 @@ pub const Theme = struct {
             const home = try internal_os.expandHome(
                 testing.io,
                 &environ_map,
-                "~/theme",
+                "~/",
                 &home_buf,
             );
 
             var v: Theme = undefined;
-            try v.parseCLI(alloc, "~/theme/foo");
+            try v.parseCLI(alloc, "light:~/foo, dark:~/bar");
+            try v.finalize(alloc);
 
             var expected_buf: [std.fs.max_path_bytes]u8 = undefined;
-            const expected = try std.fmt.bufPrint(
-                &expected_buf,
-                "{s}/theme/foo",
-                .{home},
+            try testing.expectEqualStrings(
+                try std.fmt.bufPrint(&expected_buf, "{s}foo", .{home}),
+                v.light,
             );
-
-            try testing.expectEqualStrings(expected, v.light);
-            try testing.expectEqualStrings(expected, v.dark);
-        }
-
-        // Light/dark
-        {
-            var v: Theme = undefined;
-            try v.parseCLI(alloc, " light:foo,  dark : bar  ");
-            try testing.expectEqualStrings("foo", v.light);
-            try testing.expectEqualStrings("bar", v.dark);
+            try testing.expectEqualStrings(
+                try std.fmt.bufPrint(&expected_buf, "{s}bar", .{home}),
+                v.dark,
+            );
         }
 
         var v: Theme = undefined;
