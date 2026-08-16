@@ -2,7 +2,8 @@
 //!
 //! The manifest is embedded in the library and returned by
 //! `ghostty_type_json`. It is intended for FFI consumers that cannot use the
-//! C headers directly, most notably WebAssembly hosts.
+//! C headers directly, most notably WebAssembly hosts. Its format is defined
+//! by `types.schema.json`.
 const std = @import("std");
 const builtin = @import("builtin");
 const build_options = @import("terminal_options");

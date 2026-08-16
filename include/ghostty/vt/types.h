@@ -342,6 +342,9 @@ typedef struct {
  * this manifest rather than hardcoding them. Consumers should reject unknown
  * schema versions and verify the descriptors they require at initialization.
  *
+ * The formal format is defined by the
+ * <a href="types.schema.json">libghostty-vt ABI manifest JSON Schema</a>.
+ *
  * Example (abbreviated):
  * @code{.json}
  * {
