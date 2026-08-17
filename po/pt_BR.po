@@ -402,7 +402,7 @@ msgstr "Redefinir terminal"
 
 #: src/input/command.zig:150
 msgid "Reset the terminal to a clean state."
-msgstr "Redefine o terminal para um estado limpo."
+msgstr "Redefinir o terminal para um estado limpo."
 
 #: src/input/command.zig:155
 msgid "Copy to Clipboard"
@@ -412,8 +412,8 @@ msgstr "Copiar para a área de transferência"
 msgid ""
 "Copy the selected text to the clipboard in both plain and styled formats."
 msgstr ""
-"Copia o texto selecionado para a área de transferência nos formatos de texto "
-"simples e estilizado."
+"Copiar o texto selecionado para a área de transferência nos formatos de "
+"texto simples e estilizado."
 
 #: src/input/command.zig:159
 msgid "Copy Selection as Plain Text to Clipboard"
@@ -422,7 +422,7 @@ msgstr "Copiar seleção como texto simples para a área de transferência"
 #: src/input/command.zig:160
 msgid "Copy the selected text as plain text to the clipboard."
 msgstr ""
-"Copia o texto selecionado como texto simples para a área de transferência."
+"Copiar o texto selecionado como texto simples para a área de transferência."
 
 #: src/input/command.zig:163
 msgid "Copy Selection as ANSI Sequences to Clipboard"
@@ -431,7 +431,7 @@ msgstr "Copiar seleção como sequências ANSI para a área de transferência"
 #: src/input/command.zig:164
 msgid "Copy the selected text as ANSI escape sequences to the clipboard."
 msgstr ""
-"Copia o texto selecionado como sequências de escape ANSI para a área de "
+"Copiar o texto selecionado como sequências de escape ANSI para a área de "
 "transferência."
 
 #: src/input/command.zig:167
@@ -440,7 +440,7 @@ msgstr "Copiar seleção como HTML para a área de transferência"
 
 #: src/input/command.zig:168
 msgid "Copy the selected text as HTML to the clipboard."
-msgstr "Copia o texto selecionado como HTML para a área de transferência."
+msgstr "Copiar o texto selecionado como HTML para a área de transferência."
 
 #: src/input/command.zig:173
 msgid "Copy URL to Clipboard"
@@ -448,7 +448,7 @@ msgstr "Copiar URL para a área de transferência"
 
 #: src/input/command.zig:174
 msgid "Copy the URL under the cursor to the clipboard."
-msgstr "Copia a URL sob o cursor para a área de transferência."
+msgstr "Copiar a URL sob o cursor para a área de transferência."
 
 #: src/input/command.zig:179
 msgid "Copy Terminal Title to Clipboard"
@@ -459,7 +459,7 @@ msgid ""
 "Copy the terminal title to the clipboard. If the terminal title is not set "
 "this has no effect."
 msgstr ""
-"Copia o título do terminal para a área de transferência. Se o título do "
+"Copiar o título do terminal para a área de transferência. Se o título do "
 "terminal não estiver definido, isso não terá efeito."
 
 #: src/input/command.zig:185
@@ -468,7 +468,7 @@ msgstr "Colar da área de transferência"
 
 #: src/input/command.zig:186
 msgid "Paste the contents of the main clipboard."
-msgstr "Cola o conteúdo da área de transferência principal."
+msgstr "Colar o conteúdo da área de transferência principal."
 
 #: src/input/command.zig:191
 msgid "Paste from Selection"
@@ -476,7 +476,7 @@ msgstr "Colar da seleção"
 
 #: src/input/command.zig:192
 msgid "Paste the contents of the selection clipboard."
-msgstr "Cola o conteúdo da área de transferência da seleção."
+msgstr "Colar o conteúdo da área de transferência da seleção."
 
 #: src/input/command.zig:197
 msgid "Start Search"
@@ -484,7 +484,7 @@ msgstr "Iniciar busca"
 
 #: src/input/command.zig:198
 msgid "Start a search if one isn't already active."
-msgstr "Inicia uma busca se ainda não houver uma ativa."
+msgstr "Iniciar uma busca se ainda não houver uma ativa."
 
 #: src/input/command.zig:203
 msgid "Search Selection"
@@ -492,7 +492,7 @@ msgstr "Buscar seleção"
 
 #: src/input/command.zig:204
 msgid "Start a search for the current text selection."
-msgstr "Inicia uma busca pela seleção de texto atual."
+msgstr "Iniciar uma busca pela seleção de texto atual."
 
 #: src/input/command.zig:209
 msgid "End Search"
@@ -501,7 +501,7 @@ msgstr "Encerrar busca"
 #: src/input/command.zig:210
 msgid "End the current search if any and hide any GUI elements."
 msgstr ""
-"Encerra a busca atual, se houver, e oculta todos os elementos da interface "
+"Encerrar a busca atual, se houver, e ocultar todos os elementos da interface "
 "gráfica."
 
 #: src/input/command.zig:215
@@ -510,7 +510,7 @@ msgstr "Próximo resultado da busca"
 
 #: src/input/command.zig:216
 msgid "Navigate to the next search result, if any."
-msgstr "Navega até o próximo resultado da busca, se houver."
+msgstr "Navegar até o próximo resultado da busca, se houver."
 
 #: src/input/command.zig:219
 msgid "Previous Search Result"
@@ -518,7 +518,7 @@ msgstr "Resultado anterior da busca"
 
 #: src/input/command.zig:220
 msgid "Navigate to the previous search result, if any."
-msgstr "Navega até o resultado anterior da busca, se houver."
+msgstr "Navegar até o resultado anterior da busca, se houver."
 
 #: src/input/command.zig:225
 msgid "Increase Font Size"
@@ -526,7 +526,7 @@ msgstr "Aumentar tamanho da fonte"
 
 #: src/input/command.zig:226
 msgid "Increase the font size by 1 point."
-msgstr "Aumenta o tamanho da fonte em 1 ponto."
+msgstr "Aumentar o tamanho da fonte em 1 ponto."
 
 #: src/input/command.zig:231
 msgid "Decrease Font Size"
@@ -534,7 +534,7 @@ msgstr "Diminuir tamanho da fonte"
 
 #: src/input/command.zig:232
 msgid "Decrease the font size by 1 point."
-msgstr "Diminui o tamanho da fonte em 1 ponto."
+msgstr "Diminuir o tamanho da fonte em 1 ponto."
 
 #: src/input/command.zig:237
 msgid "Reset Font Size"
@@ -542,7 +542,7 @@ msgstr "Restaurar tamanho da fonte"
 
 #: src/input/command.zig:238
 msgid "Reset the font size to the default."
-msgstr "Restaura o tamanho da fonte para o padrão."
+msgstr "Restaurar o tamanho da fonte para o padrão."
 
 #: src/input/command.zig:243
 msgid "Clear Screen"
@@ -550,7 +550,7 @@ msgstr "Limpar tela"
 
 #: src/input/command.zig:244
 msgid "Clear the screen and scrollback."
-msgstr "Limpa a tela e o histórico de rolagem."
+msgstr "Limpar a tela e o histórico de rolagem."
 
 #: src/input/command.zig:249
 msgid "Select All"
@@ -558,7 +558,7 @@ msgstr "Selecionar tudo"
 
 #: src/input/command.zig:250
 msgid "Select all text on the screen."
-msgstr "Seleciona todo o texto na tela."
+msgstr "Selecionar todo o texto na tela."
 
 #: src/input/command.zig:255
 msgid "Scroll to Top"
@@ -566,7 +566,7 @@ msgstr "Rolar para o início"
 
 #: src/input/command.zig:256
 msgid "Scroll to the top of the screen."
-msgstr "Rola para o início da tela."
+msgstr "Rolar para o início da tela."
 
 #: src/input/command.zig:261
 msgid "Scroll to Bottom"
@@ -574,7 +574,7 @@ msgstr "Rolar para o final"
 
 #: src/input/command.zig:262
 msgid "Scroll to the bottom of the screen."
-msgstr "Rola para o final da tela."
+msgstr "Rolar para o final da tela."
 
 #: src/input/command.zig:267
 msgid "Scroll to Selection"
@@ -582,7 +582,7 @@ msgstr "Rolar até a seleção"
 
 #: src/input/command.zig:268
 msgid "Scroll to the selected text."
-msgstr "Rola até o texto selecionado."
+msgstr "Rolar até o texto selecionado."
 
 #: src/input/command.zig:273
 msgid "Scroll Page Up"
@@ -590,7 +590,7 @@ msgstr "Rolar uma página para cima"
 
 #: src/input/command.zig:274
 msgid "Scroll the screen up by a page."
-msgstr "Rola a tela uma página para cima."
+msgstr "Rolar a tela uma página para cima."
 
 #: src/input/command.zig:279
 msgid "Scroll Page Down"
@@ -598,7 +598,7 @@ msgstr "Rolar uma página para baixo"
 
 #: src/input/command.zig:280
 msgid "Scroll the screen down by a page."
-msgstr "Rola a tela uma página para baixo."
+msgstr "Rolar a tela uma página para baixo."
 
 #: src/input/command.zig:286
 msgid "Copy Screen to Temporary File and Copy Path"
@@ -609,8 +609,8 @@ msgid ""
 "Copy the screen contents to a temporary file and copy the path to the "
 "clipboard."
 msgstr ""
-"Copia o conteúdo da tela para um arquivo temporário e copia o caminho para a "
-"área de transferência."
+"Copiar o conteúdo da tela para um arquivo temporário e copiar o caminho para "
+"a área de transferência."
 
 #: src/input/command.zig:291
 msgid "Copy Screen to Temporary File and Paste Path"
@@ -620,7 +620,7 @@ msgstr "Copiar tela para arquivo temporário e colar caminho"
 msgid ""
 "Copy the screen contents to a temporary file and paste the path to the file."
 msgstr ""
-"Copia o conteúdo da tela para um arquivo temporário e cola o caminho do "
+"Copiar o conteúdo da tela para um arquivo temporário e colar o caminho do "
 "arquivo."
 
 #: src/input/command.zig:296
@@ -629,7 +629,7 @@ msgstr "Copiar tela para arquivo temporário e abrir"
 
 #: src/input/command.zig:297
 msgid "Copy the screen contents to a temporary file and open it."
-msgstr "Copia o conteúdo da tela para um arquivo temporário e o abre."
+msgstr "Copiar o conteúdo da tela para um arquivo temporário e abri-lo."
 
 #: src/input/command.zig:305
 msgid "Copy Screen as HTML to Temporary File and Copy Path"
@@ -640,7 +640,7 @@ msgid ""
 "Copy the screen contents as HTML to a temporary file and copy the path to "
 "the clipboard."
 msgstr ""
-"Copia o conteúdo da tela como HTML para um arquivo temporário e copia o "
+"Copiar o conteúdo da tela como HTML para um arquivo temporário e copiar o "
 "caminho para a área de transferência."
 
 #: src/input/command.zig:313
@@ -652,7 +652,7 @@ msgid ""
 "Copy the screen contents as HTML to a temporary file and paste the path to "
 "the file."
 msgstr ""
-"Copia o conteúdo da tela como HTML para um arquivo temporário e cola o "
+"Copiar o conteúdo da tela como HTML para um arquivo temporário e colar o "
 "caminho do arquivo."
 
 #: src/input/command.zig:321
@@ -662,7 +662,7 @@ msgstr "Copiar tela como HTML para arquivo temporário e abrir"
 #: src/input/command.zig:322
 msgid "Copy the screen contents as HTML to a temporary file and open it."
 msgstr ""
-"Copia o conteúdo da tela como HTML para um arquivo temporário e o abre."
+"Copiar o conteúdo da tela como HTML para um arquivo temporário e abri-lo."
 
 #: src/input/command.zig:330
 msgid "Copy Screen as ANSI Sequences to Temporary File and Copy Path"
@@ -674,8 +674,8 @@ msgid ""
 "Copy the screen contents as ANSI escape sequences to a temporary file and "
 "copy the path to the clipboard."
 msgstr ""
-"Copia o conteúdo da tela como sequências de escape ANSI para um arquivo "
-"temporário e copia o caminho para a área de transferência."
+"Copiar o conteúdo da tela como sequências de escape ANSI para um arquivo "
+"temporário e copiar o caminho para a área de transferência."
 
 #: src/input/command.zig:338
 msgid "Copy Screen as ANSI Sequences to Temporary File and Paste Path"
@@ -687,8 +687,8 @@ msgid ""
 "Copy the screen contents as ANSI escape sequences to a temporary file and "
 "paste the path to the file."
 msgstr ""
-"Copia o conteúdo da tela como sequências de escape ANSI para um arquivo "
-"temporário e cola o caminho do arquivo."
+"Copiar o conteúdo da tela como sequências de escape ANSI para um arquivo "
+"temporário e colar o caminho do arquivo."
 
 #: src/input/command.zig:346
 msgid "Copy Screen as ANSI Sequences to Temporary File and Open"
@@ -699,8 +699,8 @@ msgid ""
 "Copy the screen contents as ANSI escape sequences to a temporary file and "
 "open it."
 msgstr ""
-"Copia o conteúdo da tela como sequências de escape ANSI para um arquivo "
-"temporário e o abre."
+"Copiar o conteúdo da tela como sequências de escape ANSI para um arquivo "
+"temporário e abri-lo."
 
 #: src/input/command.zig:354
 msgid "Copy Selection to Temporary File and Copy Path"
@@ -711,7 +711,7 @@ msgid ""
 "Copy the selection contents to a temporary file and copy the path to the "
 "clipboard."
 msgstr ""
-"Copia o conteúdo da seleção para um arquivo temporário e copia o caminho "
+"Copiar o conteúdo da seleção para um arquivo temporário e copiar o caminho "
 "para a área de transferência."
 
 #: src/input/command.zig:359
@@ -723,7 +723,7 @@ msgid ""
 "Copy the selection contents to a temporary file and paste the path to the "
 "file."
 msgstr ""
-"Copia o conteúdo da seleção para um arquivo temporário e cola o caminho do "
+"Copiar o conteúdo da seleção para um arquivo temporário e colar o caminho do "
 "arquivo."
 
 #: src/input/command.zig:364
@@ -732,7 +732,7 @@ msgstr "Copiar seleção para arquivo temporário e abrir"
 
 #: src/input/command.zig:365
 msgid "Copy the selection contents to a temporary file and open it."
-msgstr "Copia o conteúdo da seleção para um arquivo temporário e o abre."
+msgstr "Copiar o conteúdo da seleção para um arquivo temporário e abri-lo."
 
 #: src/input/command.zig:373
 msgid "Copy Selection as HTML to Temporary File and Copy Path"
@@ -743,7 +743,7 @@ msgid ""
 "Copy the selection contents as HTML to a temporary file and copy the path to "
 "the clipboard."
 msgstr ""
-"Copia o conteúdo da seleção como HTML para um arquivo temporário e copia o "
+"Copiar o conteúdo da seleção como HTML para um arquivo temporário e copiar o "
 "caminho para a área de transferência."
 
 #: src/input/command.zig:381
@@ -755,7 +755,7 @@ msgid ""
 "Copy the selection contents as HTML to a temporary file and paste the path "
 "to the file."
 msgstr ""
-"Copia o conteúdo da seleção como HTML para um arquivo temporário e cola o "
+"Copiar o conteúdo da seleção como HTML para um arquivo temporário e colar o "
 "caminho do arquivo."
 
 #: src/input/command.zig:389
@@ -765,7 +765,7 @@ msgstr "Copiar seleção como HTML para arquivo temporário e abrir"
 #: src/input/command.zig:390
 msgid "Copy the selection contents as HTML to a temporary file and open it."
 msgstr ""
-"Copia o conteúdo da seleção como HTML para um arquivo temporário e o abre."
+"Copiar o conteúdo da seleção como HTML para um arquivo temporário e abri-lo."
 
 #: src/input/command.zig:398
 msgid "Copy Selection as ANSI Sequences to Temporary File and Copy Path"
@@ -777,8 +777,8 @@ msgid ""
 "Copy the selection contents as ANSI escape sequences to a temporary file and "
 "copy the path to the clipboard."
 msgstr ""
-"Copia o conteúdo da seleção como sequências de escape ANSI para um arquivo "
-"temporário e copia o caminho para a área de transferência."
+"Copiar o conteúdo da seleção como sequências de escape ANSI para um arquivo "
+"temporário e copiar o caminho para a área de transferência."
 
 #: src/input/command.zig:406
 msgid "Copy Selection as ANSI Sequences to Temporary File and Paste Path"
@@ -790,8 +790,8 @@ msgid ""
 "Copy the selection contents as ANSI escape sequences to a temporary file and "
 "paste the path to the file."
 msgstr ""
-"Copia o conteúdo da seleção como sequências de escape ANSI para um arquivo "
-"temporário e cola o caminho do arquivo."
+"Copiar o conteúdo da seleção como sequências de escape ANSI para um arquivo "
+"temporário e colar o caminho do arquivo."
 
 #: src/input/command.zig:414
 msgid "Copy Selection as ANSI Sequences to Temporary File and Open"
@@ -802,8 +802,8 @@ msgid ""
 "Copy the selection contents as ANSI escape sequences to a temporary file and "
 "open it."
 msgstr ""
-"Copia o conteúdo da seleção como sequências de escape ANSI para um arquivo "
-"temporário e o abre."
+"Copiar o conteúdo da seleção como sequências de escape ANSI para um arquivo "
+"temporário e abri-lo."
 
 #: src/input/command.zig:422
 msgid "Open a new window."
@@ -851,11 +851,11 @@ msgstr "Mudar título do terminal…"
 
 #: src/input/command.zig:459
 msgid "Prompt for a new title for the current terminal."
-msgstr "Solicita um novo título para o terminal atual."
+msgstr "Solicitar um novo título para o terminal atual."
 
 #: src/input/command.zig:465
 msgid "Prompt for a new title for the current tab."
-msgstr "Solicita um novo título para a aba atual."
+msgstr "Solicitar um novo título para a aba atual."
 
 #: src/input/command.zig:478
 msgid "Split the terminal to the left."
