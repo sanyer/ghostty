@@ -71,6 +71,9 @@ pub const Handler = struct {
     /// The DCS command handler maintains state for DCS queries.
     dcs_handler: dcs.Handler = .{},
 
+    /// Whether a OSC 9;4 progress bar is active.
+    progress_active: bool = false,
+
     /// Called for sequence identifiers not supported by this library.
     /// Currently, only APC is reported. Content is borrowed and only valid
     /// for the duration of the callback. Set `apc_handler.unknown_max_bytes`
@@ -348,8 +351,8 @@ pub const Handler = struct {
             .full_reset => {
                 self.terminal.fullReset();
 
-                // Clear the progress bar
-                self.progressReport(.{ .state = .remove });
+                // Clear the progress bar if one is active.
+                if (self.progress_active) self.progressReport(.{ .state = .remove });
             },
             .start_hyperlink => try self.terminal.screens.active.startHyperlink(value.uri, value.id),
             .end_hyperlink => self.terminal.screens.active.endHyperlink(),
@@ -501,6 +504,7 @@ pub const Handler = struct {
     }
 
     fn progressReport(self: *Handler, report: osc.Command.ProgressReport) void {
+        self.progress_active = report.state != .remove;
         const func = self.effects.progress_report orelse return;
         func(self, report);
     }
@@ -2518,6 +2522,10 @@ test "progress_report effect callback" {
     try testing.expectEqual(@as(usize, cases.len + 2), S.count);
     try testing.expectEqual(osc.Command.ProgressReport.State.remove, S.last_state);
     try testing.expectEqual(@as(?u8, null), S.last_progress);
+
+    // A full reset with no active progress bar reports nothing.
+    s.nextSlice("\x1Bc");
+    try testing.expectEqual(@as(usize, cases.len + 2), S.count);
 }
 
 test "clipboard_write effect callback" {
