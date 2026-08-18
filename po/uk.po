@@ -8,7 +8,7 @@ msgstr ""
 "Project-Id-Version: com.mitchellh.ghostty\n"
 "Report-Msgid-Bugs-To: m@mitchellh.com\n"
 "POT-Creation-Date: 2026-08-10 10:06-0500\n"
-"PO-Revision-Date: 2026-08-17 08:00+0100\n"
+"PO-Revision-Date: 2026-08-18 21:23+0100\n"
 "Last-Translator: Volodymyr Chernetskyi "
 "<19735328+chernetskyi@users.noreply.github.com>\n"
 "Language-Team: Ukrainian <trans-uk@lists.fedoraproject.org>\n"
@@ -1129,8 +1129,8 @@ msgstr "Вийти із застосунку."
 
 #: src/input/command.zig:708
 msgid "Ghostty"
-msgstr "Маленький привид"
+msgstr "Привид Ghostty"
 
 #: src/input/command.zig:709
 msgid "Put a little Ghostty in your terminal."
-msgstr "Вставити маленького привида у ваш термінал."
+msgstr "Вставити маленького Ghostty у ваш термінал."
