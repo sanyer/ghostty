@@ -16,7 +16,7 @@ class KeyboardLayout {
     /// Translate a physical keycode for use as a menu key equivalent.
     ///
     /// Must be called on the main thread because Text Input Sources APIs are not thread-safe.
-    static func character(
+    @MainActor static func character(
         for keyCode: UInt16,
         modifiers: NSEvent.ModifierFlags
     ) -> Character? {

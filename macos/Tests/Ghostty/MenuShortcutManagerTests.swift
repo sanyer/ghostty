@@ -26,14 +26,14 @@ struct MenuShortcutManagerTests {
         #expect(item.keyEquivalentModifierMask == .command)
     }
 
-    @Test func physicalBackquoteUsesCurrentKeyboardLayout() async throws {
+    @MainActor @Test func physicalBackquoteUsesCurrentKeyboardLayout() throws {
         let config = try TemporaryConfig("keybind=super+backquote=toggle_quick_terminal")
         let expected = try #require(KeyboardLayout.character(for: 0x32, modifiers: .command))
         let item = NSMenuItem(title: "Quick Terminal", action: nil, keyEquivalent: "")
-        let manager = await Ghostty.MenuShortcutManager()
+        let manager = Ghostty.MenuShortcutManager()
 
-        await manager.reset()
-        await manager.syncMenuShortcut(config, action: "toggle_quick_terminal", menuItem: item)
+        manager.reset()
+        manager.syncMenuShortcut(config, action: "toggle_quick_terminal", menuItem: item)
 
         #expect(item.keyEquivalent == String(expected))
         #expect(item.keyEquivalentModifierMask == .command)
