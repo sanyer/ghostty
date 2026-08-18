@@ -453,7 +453,7 @@ pub const ImageStorage = struct {
         io: std.Io,
         alloc: Allocator,
         t: *terminal.Terminal,
-        cmd: command.Delete,
+        cmd: command.Delete.Action,
     ) void {
         // Deletes only ever remove placements/images, so comparing counts
         // before and after tells us whether anything actually changed.
