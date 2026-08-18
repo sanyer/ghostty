@@ -354,7 +354,20 @@ fn delete(
     cmd: *const Command,
 ) Response {
     const storage = &terminal.screens.active.kitty_images;
-    storage.delete(io, alloc, terminal, cmd.control.delete.action);
+
+    // Every delete command aborts an incomplete chunked upload.
+    if (storage.loading) |loading| {
+        loading.destroy(alloc);
+        storage.loading = null;
+    }
+
+    // Then perform the actual deletion request, too.
+    storage.delete(
+        io,
+        alloc,
+        terminal,
+        cmd.control.delete.action,
+    );
 
     // Delete never responds on success
     return .{};
@@ -391,7 +404,18 @@ fn loadAndAddImage(
         }
 
         break :loading loading.*;
-    } else try .init(io, alloc, cmd, storage.image_limits);
+    } else loading: {
+        // Reusing a specific image ID deletes the old image and all of its
+        // placements when the new transmission begins, not when it completes.
+        if (t.image_id > 0) {
+            storage.delete(io, alloc, terminal, .{ .id = .{
+                .image_id = t.image_id,
+                .delete = true,
+            } });
+        }
+
+        break :loading try .init(io, alloc, cmd, storage.image_limits);
+    };
 
     // We only want to deinit on error. If we're chunking, then we don't
     // want to deinit at all. If we're not chunking, then we'll deinit
@@ -663,6 +687,50 @@ test "kittygfx more chunks with chunk increasing q" {
     }
 }
 
+test "kittygfx delete aborts chunked image load" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const io = testing.io;
+
+    var t = try Terminal.init(io, alloc, .{ .rows = 5, .cols = 5 });
+    defer t.deinit(alloc);
+    const storage = &t.screens.active.kitty_images;
+
+    // Begin a two-chunk RGB image, then interrupt it with a delete.
+    {
+        const cmd = try command.Parser.parseString(
+            alloc,
+            "a=t,f=24,s=1,v=2,i=1,m=1;AAAA",
+        );
+        defer cmd.deinit(alloc);
+        try testing.expect(execute(io, alloc, &t, &cmd) == null);
+    }
+    try testing.expect(storage.loading != null);
+
+    {
+        const cmd = try command.Parser.parseString(alloc, "a=d");
+        defer cmd.deinit(alloc);
+        try testing.expect(execute(io, alloc, &t, &cmd) == null);
+    }
+    try testing.expect(storage.loading == null);
+
+    // A fresh chunked upload must start from empty state after the delete.
+    {
+        const cmd = try command.Parser.parseString(
+            alloc,
+            "a=t,f=24,s=1,v=2,i=1,m=1;AAAA",
+        );
+        defer cmd.deinit(alloc);
+        try testing.expect(execute(io, alloc, &t, &cmd) == null);
+    }
+    {
+        const cmd = try command.Parser.parseString(alloc, "m=0;AAAA");
+        defer cmd.deinit(alloc);
+        try testing.expect(execute(io, alloc, &t, &cmd).?.ok());
+    }
+    try testing.expectEqual(@as(usize, 6), storage.imageById(1).?.data.len());
+}
+
 test "kittygfx default format is rgba" {
     const testing = std.testing;
     const alloc = testing.allocator;
@@ -876,6 +944,48 @@ test "kittygfx retransmit same id removes existing placements" {
         tracked + 1,
         t.screens.active.pages.countTrackedPins(),
     );
+}
+
+test "kittygfx retransmit same id removes image on first chunk" {
+    const testing = std.testing;
+    const io = testing.io;
+    const alloc = testing.allocator;
+
+    var t = try Terminal.init(io, alloc, .{ .rows = 5, .cols = 5 });
+    defer t.deinit(alloc);
+    const storage = &t.screens.active.kitty_images;
+    const tracked = t.screens.active.pages.countTrackedPins();
+
+    // Store and display the old image.
+    {
+        const cmd = try command.Parser.parseString(
+            alloc,
+            "a=T,t=d,f=24,i=1,s=1,v=2,C=1;////////",
+        );
+        defer cmd.deinit(alloc);
+        try testing.expect(execute(io, alloc, &t, &cmd).?.ok());
+    }
+    try testing.expect(storage.imageById(1) != null);
+    try testing.expectEqual(@as(usize, 1), storage.placements.count());
+    try testing.expectEqual(
+        tracked + 1,
+        t.screens.active.pages.countTrackedPins(),
+    );
+
+    // Starting a replacement for the same explicit ID removes the old image
+    // and placements before the replacement's final chunk arrives.
+    {
+        const cmd = try command.Parser.parseString(
+            alloc,
+            "a=t,t=d,f=24,i=1,s=1,v=2,m=1;AAAA",
+        );
+        defer cmd.deinit(alloc);
+        try testing.expect(execute(io, alloc, &t, &cmd) == null);
+    }
+    try testing.expect(storage.loading != null);
+    try testing.expect(storage.imageById(1) == null);
+    try testing.expectEqual(@as(usize, 0), storage.placements.count());
+    try testing.expectEqual(tracked, t.screens.active.pages.countTrackedPins());
 }
 
 test "kittygfx delete then retransmit same id gets fresh generation" {
