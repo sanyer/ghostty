@@ -438,6 +438,7 @@ pub const State = struct {
         // Calculate the dimensions of our image, taking in to
         // account the rows / columns specified by the placement.
         const dest_size = p.pixelSize(image.*, t);
+        const cell_offset = p.cellOffset(t);
 
         const source = p.sourceRect(image.*);
 
@@ -453,8 +454,8 @@ pub const State = struct {
                 .z = p.z,
                 .width = dest_size.width,
                 .height = dest_size.height,
-                .cell_offset_x = p.x_offset,
-                .cell_offset_y = p.y_offset,
+                .cell_offset_x = cell_offset.x,
+                .cell_offset_y = cell_offset.y,
                 .source_x = source.x,
                 .source_y = source.y,
                 .source_width = source.width,
