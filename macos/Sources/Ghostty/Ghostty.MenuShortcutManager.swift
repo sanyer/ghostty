@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import GhosttyKit
 
 extension Ghostty {
     /// The manager that's responsible for updating shortcuts of Ghostty's app menu
@@ -26,6 +27,8 @@ extension Ghostty {
             if !updateMenuShortcut(config, action: action, menuItem: menu) {
                 menu.keyEquivalent = ""
                 menu.keyEquivalentModifierMask = []
+                menu.allowsAutomaticKeyEquivalentLocalization = true
+                menu.allowsAutomaticKeyEquivalentMirroring = true
             }
         }
 
@@ -34,16 +37,23 @@ extension Ghostty {
         /// bindings through the menu so they flash but also lets our surface override macOS built-ins
         /// like Cmd+H.
         func performGhosttyBindingMenuKeyEquivalent(with event: NSEvent) -> Bool {
-            // Convert this event into the same normalized lookup key we use when
-            // syncing menu shortcuts from configuration.
-            guard let key = MenuShortcutKey(event: event) else {
-                return false
+            // Physical bindings take precedence over Unicode bindings in the core.
+            let physicalKey = MenuShortcutKey(
+                physicalKeyCode: event.keyCode,
+                modifiers: event.modifierFlags)
+            if let result = performMenuItem(for: physicalKey) {
+                return result
             }
 
+            guard let key = MenuShortcutKey(event: event) else { return false }
+            return performMenuItem(for: key) ?? false
+        }
+
+        private func performMenuItem(for key: MenuShortcutKey) -> Bool? {
             // If we don't have an entry for this key combo, no Ghostty-owned
             // menu shortcut exists for this event.
             guard let weakItem = menuItemsByShortcut[key] else {
-                return false
+                return nil
             }
 
             // Weak references can be nil if a menu item was deallocated after sync.
@@ -81,16 +91,23 @@ private extension Ghostty.MenuShortcutManager {
     func updateMenuShortcut(_ config: Ghostty.Config, action: String?, menuItem menu: NSMenuItem) -> Bool {
         guard
             let action,
-            let shortcut = config.keyboardShortcut(for: action),
-            // Build a direct lookup for key-equivalent dispatch so we don't need to
-            // linearly walk the full menu hierarchy at event time.
-            let key = MenuShortcutKey(shortcut)
-        else {
+            let trigger = config.keybindTrigger(for: action),
+            let shortcut = Ghostty.keyboardShortcut(for: trigger)
+        else { return false }
+
+        let isPhysical = trigger.tag == GHOSTTY_TRIGGER_PHYSICAL
+        let physicalKeyCode = isPhysical ? Ghostty.Input.Key(cKey: trigger.key.physical)?.keyCode : nil
+        // Build a direct lookup for key-equivalent dispatch so we don't need to
+        // linearly walk the full menu hierarchy at event time.
+        guard let key = MenuShortcutKey(shortcut, physicalKeyCode: physicalKeyCode) else {
             return false
         }
 
         menu.keyEquivalent = key.keyEquivalent
         menu.keyEquivalentModifierMask = key.modifierFlags
+        // The key equivalent was already localized from the physical keycode.
+        menu.allowsAutomaticKeyEquivalentLocalization = !isPhysical
+        menu.allowsAutomaticKeyEquivalentMirroring = !isPhysical
 
         // Later registrations intentionally override earlier ones for the same key.
         menuItemsByShortcut[key] = .init(menu)
@@ -104,7 +121,7 @@ extension Ghostty.MenuShortcutManager {
         private static let shortcutModifiers: NSEvent.ModifierFlags = [.shift, .control, .option, .command]
 
         let keyEquivalent: String
-        // Make it Hashable
+        private let physicalKeyCode: UInt16?
         private let modifiersRawValue: UInt
 
         var modifierFlags: NSEvent.ModifierFlags {
@@ -123,7 +140,18 @@ extension Ghostty.MenuShortcutManager {
                 mods.insert(.shift)
             }
             self.keyEquivalent = normalized
+            self.physicalKeyCode = nil
             self.modifiersRawValue = mods.rawValue
+        }
+
+        init(
+            keyEquivalent: String = "",
+            physicalKeyCode: UInt16,
+            modifiers: NSEvent.ModifierFlags
+        ) {
+            self.keyEquivalent = keyEquivalent
+            self.physicalKeyCode = physicalKeyCode
+            self.modifiersRawValue = modifiers.intersection(Self.shortcutModifiers).rawValue
         }
 
         init?(event: NSEvent) {
@@ -142,12 +170,36 @@ extension Ghostty.MenuShortcutManager {
         }
 
         /// Create from a swiftUI `KeyboardShortcut`
-        init?(_ shortcut: KeyboardShortcut) {
+        init?(_ shortcut: KeyboardShortcut, physicalKeyCode: UInt16? = nil) {
             // Ghostty configured shortcuts are already normalized
             // in `Ghostty.keyboardShortcut(for:)`, see also gh-#12039
             let keyEquivalent = shortcut.key.character.description
             let modifierMask = NSEvent.ModifierFlags(swiftUIFlags: shortcut.modifiers)
-            self.init(keyEquivalent: keyEquivalent, modifiers: modifierMask)
+            if let physicalKeyCode {
+                self.init(
+                    keyEquivalent: keyEquivalent,
+                    physicalKeyCode: physicalKeyCode,
+                    modifiers: modifierMask)
+            } else {
+                self.init(keyEquivalent: keyEquivalent, modifiers: modifierMask)
+            }
+        }
+
+        static func == (lhs: Self, rhs: Self) -> Bool {
+            guard lhs.modifiersRawValue == rhs.modifiersRawValue else { return false }
+            return switch (lhs.physicalKeyCode, rhs.physicalKeyCode) {
+            case let (.some(lhs), .some(rhs)): lhs == rhs
+            case (nil, nil): lhs.keyEquivalent == rhs.keyEquivalent
+            default: false
+            }
+        }
+
+        func hash(into hasher: inout Hasher) {
+            hasher.combine(modifiersRawValue)
+            hasher.combine(physicalKeyCode)
+            if physicalKeyCode == nil {
+                hasher.combine(keyEquivalent)
+            }
         }
 
         var swiftUIShortcut: KeyboardShortcut? {

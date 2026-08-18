@@ -74,6 +74,15 @@ struct NormalizedMenuShortcutKeyTests {
         #expect(a != b)
     }
 
+    @Test func physicalKeysUseKeyCodeIdentity() {
+        let configured = Key(keyEquivalent: "`", physicalKeyCode: 0x32, modifiers: .command)
+        let event = Key(physicalKeyCode: 0x32, modifiers: .command)
+        let unicode = Key(keyEquivalent: "`", modifiers: .command)
+
+        #expect(configured == event)
+        #expect(configured != unicode)
+    }
+
     @Test func differentModifiersAreNotEqual() {
         let a = Key(keyEquivalent: "c", modifiers: .command)
         let b = Key(keyEquivalent: "c", modifiers: .option)
