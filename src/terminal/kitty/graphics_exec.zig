@@ -138,13 +138,21 @@ fn query(
         .placement_id = t.placement_id,
     };
 
-    // Attempt to load the image. If we cannot, then set an appropriate error.
+    // A query must attempt a complete load, then discard the result without
+    // changing image storage.
+    // https://sw.kovidgoyal.net/kitty/graphics-protocol/#querying-support-and-available-transmission-mediums
     const storage = &terminal.screens.active.kitty_images;
     var loading = LoadingImage.init(io, alloc, cmd, storage.image_limits) catch |err| {
         encodeError(&result, err);
         return result;
     };
-    loading.deinit(alloc);
+    defer loading.deinit(alloc);
+
+    var img = loading.complete(alloc) catch |err| {
+        encodeError(&result, err);
+        return result;
+    };
+    img.deinit(alloc);
 
     return result;
 }
@@ -479,6 +487,77 @@ fn encodeError(r: *Response, err: EncodeableError) void {
         error.DimensionsRequired => r.message = "EINVAL: dimensions required",
         error.DimensionsTooLarge => r.message = "EINVAL: dimensions too large",
     }
+}
+
+test "kittygfx query validates image data" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const io = testing.io;
+
+    var terminal = try Terminal.init(io, alloc, .{ .rows = 5, .cols = 5 });
+    defer terminal.deinit(alloc);
+
+    var cmd: Command = .{
+        .control = .{ .query = .{
+            .format = .rgb,
+            .width = 1,
+            .height = 1,
+            .image_id = 31,
+        } },
+        // A 1x1 RGB image requires three bytes.
+        .data = try alloc.dupe(u8, &.{ 0, 0 }),
+    };
+    defer cmd.deinit(alloc);
+
+    const resp = execute(io, alloc, &terminal, &cmd).?;
+    try testing.expect(!resp.ok());
+    try testing.expectEqual(@as(u32, 31), resp.id);
+    try testing.expectEqualStrings("EINVAL: invalid data", resp.message);
+    try testing.expectEqual(
+        @as(usize, 0),
+        terminal.screens.active.kitty_images.images.count(),
+    );
+}
+
+test "kittygfx valid query does not replace or store image" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const io = testing.io;
+
+    var terminal = try Terminal.init(io, alloc, .{ .rows = 5, .cols = 5 });
+    defer terminal.deinit(alloc);
+    const storage = &terminal.screens.active.kitty_images;
+
+    // Store a red pixel under the same ID used by the query.
+    {
+        const cmd = try command.Parser.parseString(
+            alloc,
+            "a=t,f=24,s=1,v=1,i=31;/wAA",
+        );
+        defer cmd.deinit(alloc);
+        try testing.expect(execute(io, alloc, &terminal, &cmd).?.ok());
+    }
+
+    // Successfully validate a black pixel without replacing the red one.
+    var cmd: Command = .{
+        .control = .{ .query = .{
+            .format = .rgb,
+            .width = 1,
+            .height = 1,
+            .image_id = 31,
+        } },
+        .data = try alloc.dupe(u8, &.{ 0, 0, 0 }),
+    };
+    defer cmd.deinit(alloc);
+
+    const resp = execute(io, alloc, &terminal, &cmd).?;
+    try testing.expect(resp.ok());
+    try testing.expectEqual(@as(usize, 1), storage.images.count());
+    try testing.expectEqualSlices(
+        u8,
+        &.{ 255, 0, 0 },
+        storage.imageById(31).?.data.bytes().?,
+    );
 }
 
 test "kittygfx image id and number are mutually exclusive for every action" {
