@@ -894,6 +894,33 @@ pub const ImageStorage = struct {
             return std.math.cast(u32, rounded) orelse std.math.maxInt(u32);
         }
 
+        pub const SourceRect = struct {
+            x: u32,
+            y: u32,
+            width: u32,
+            height: u32,
+        };
+
+        /// Returns the requested source rectangle intersected with the image.
+        /// A zero width or height requests the full corresponding image
+        /// dimension before intersection, as defined by the Kitty protocol.
+        pub fn sourceRect(self: Placement, image: Image) SourceRect {
+            const x = @min(self.source_x, image.width);
+            const y = @min(self.source_y, image.height);
+            return .{
+                .x = x,
+                .y = y,
+                .width = @min(
+                    if (self.source_width > 0) self.source_width else image.width,
+                    image.width - x,
+                ),
+                .height = @min(
+                    if (self.source_height > 0) self.source_height else image.height,
+                    image.height - y,
+                ),
+            };
+        }
+
         /// Returns the size of this placement's image in pixels,
         /// taking into account the source rectangle, specified
         /// rows/columns, and aspect ratio.
@@ -905,9 +932,9 @@ pub const ImageStorage = struct {
             width: u32,
             height: u32,
         } {
-            // Height / width of the image in px.
-            const width = if (self.source_width > 0) self.source_width else image.width;
-            const height = if (self.source_height > 0) self.source_height else image.height;
+            const source = self.sourceRect(image);
+            const width = source.width;
+            const height = source.height;
 
             // If we don't have any specified cols or rows then the placement
             // should be the native size of the image, and doesn't need to be
@@ -1778,6 +1805,50 @@ test "storage: aspect ratio calculation when only columns or rows specified" {
         try testing.expectEqual(@as(u32, 178), calc_size.width);
         try testing.expectEqual(@as(u32, 100), calc_size.height);
     }
+}
+
+test "storage: default source rectangle is intersected before sizing" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const io = testing.io;
+
+    var t = try terminal.Terminal.init(io, alloc, .{ .cols = 5, .rows = 5 });
+    defer t.deinit(alloc);
+
+    const placement: ImageStorage.Placement = .{
+        .location = .{ .virtual = {} },
+        .source_x = 3,
+        .source_y = 1,
+    };
+    const actual = placement.pixelSize(.{ .width = 4, .height = 3 }, &t);
+    try testing.expectEqual(@as(u32, 1), actual.width);
+    try testing.expectEqual(@as(u32, 2), actual.height);
+}
+
+test "storage: explicit source rectangle is intersected before sizing" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const io = testing.io;
+
+    var t = try terminal.Terminal.init(io, alloc, .{ .cols = 10, .rows = 10 });
+    defer t.deinit(alloc);
+    t.width_px = 100;
+    t.height_px = 100;
+
+    // The requested 8x8 rectangle intersects this 10x10 image as 2x3.
+    // With a two-column destination, the clipped 2:3 aspect ratio produces
+    // a 20x30 pixel destination.
+    const placement: ImageStorage.Placement = .{
+        .location = .{ .virtual = {} },
+        .source_x = 8,
+        .source_y = 7,
+        .source_width = 8,
+        .source_height = 8,
+        .columns = 2,
+    };
+    const actual = placement.pixelSize(.{ .width = 10, .height = 10 }, &t);
+    try testing.expectEqual(@as(u32, 20), actual.width);
+    try testing.expectEqual(@as(u32, 30), actual.height);
 }
 
 test "storage: placement geometry handles untrusted dimensions" {
