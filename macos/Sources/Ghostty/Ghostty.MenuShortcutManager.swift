@@ -103,7 +103,7 @@ private extension Ghostty.MenuShortcutManager {
             return false
         }
 
-        menu.keyEquivalent = key.keyEquivalent
+        menu.keyEquivalent = shortcut.key.character.description
         menu.keyEquivalentModifierMask = key.modifierFlags
         // The key equivalent was already localized from the physical keycode.
         menu.allowsAutomaticKeyEquivalentLocalization = !isPhysical
@@ -118,10 +118,14 @@ private extension Ghostty.MenuShortcutManager {
 extension Ghostty.MenuShortcutManager {
     /// Hashable key for a menu shortcut match, normalized for quick lookup.
     struct MenuShortcutKey: Hashable {
+        private enum Identity: Hashable {
+            case keyEquivalent(String)
+            case physicalKeyCode(UInt16)
+        }
+
         private static let shortcutModifiers: NSEvent.ModifierFlags = [.shift, .control, .option, .command]
 
-        let keyEquivalent: String
-        private let physicalKeyCode: UInt16?
+        private let identity: Identity
         private let modifiersRawValue: UInt
 
         var modifierFlags: NSEvent.ModifierFlags {
@@ -139,18 +143,12 @@ extension Ghostty.MenuShortcutManager {
                 // it's originally uppercased, then we need to add `shift` to the modifiers
                 mods.insert(.shift)
             }
-            self.keyEquivalent = normalized
-            self.physicalKeyCode = nil
+            self.identity = .keyEquivalent(normalized)
             self.modifiersRawValue = mods.rawValue
         }
 
-        init(
-            keyEquivalent: String = "",
-            physicalKeyCode: UInt16,
-            modifiers: NSEvent.ModifierFlags
-        ) {
-            self.keyEquivalent = keyEquivalent
-            self.physicalKeyCode = physicalKeyCode
+        init(physicalKeyCode: UInt16, modifiers: NSEvent.ModifierFlags) {
+            self.identity = .physicalKeyCode(physicalKeyCode)
             self.modifiersRawValue = modifiers.intersection(Self.shortcutModifiers).rawValue
         }
 
@@ -159,55 +157,16 @@ extension Ghostty.MenuShortcutManager {
             self.init(keyEquivalent: keyEquivalent, modifiers: event.modifierFlags)
         }
 
-        /// Create from a `NSMenuItem`
-        ///
-        /// - Important: This will check whether the `keyEquivalent` is uppercased by `.shift` modifier.
-        init?(_ menuItem: NSMenuItem) {
-            self.init(
-                keyEquivalent: menuItem.keyEquivalent,
-                modifiers: menuItem.keyEquivalentModifierMask,
-            )
-        }
-
-        /// Create from a swiftUI `KeyboardShortcut`
+        /// Create from a SwiftUI `KeyboardShortcut`.
         init?(_ shortcut: KeyboardShortcut, physicalKeyCode: UInt16? = nil) {
-            // Ghostty configured shortcuts are already normalized
-            // in `Ghostty.keyboardShortcut(for:)`, see also gh-#12039
-            let keyEquivalent = shortcut.key.character.description
-            let modifierMask = NSEvent.ModifierFlags(swiftUIFlags: shortcut.modifiers)
+            let modifiers = NSEvent.ModifierFlags(swiftUIFlags: shortcut.modifiers)
             if let physicalKeyCode {
-                self.init(
-                    keyEquivalent: keyEquivalent,
-                    physicalKeyCode: physicalKeyCode,
-                    modifiers: modifierMask)
+                self.init(physicalKeyCode: physicalKeyCode, modifiers: modifiers)
             } else {
-                self.init(keyEquivalent: keyEquivalent, modifiers: modifierMask)
+                self.init(
+                    keyEquivalent: shortcut.key.character.description,
+                    modifiers: modifiers)
             }
-        }
-
-        static func == (lhs: Self, rhs: Self) -> Bool {
-            guard lhs.modifiersRawValue == rhs.modifiersRawValue else { return false }
-            return switch (lhs.physicalKeyCode, rhs.physicalKeyCode) {
-            case let (.some(lhs), .some(rhs)): lhs == rhs
-            case (nil, nil): lhs.keyEquivalent == rhs.keyEquivalent
-            default: false
-            }
-        }
-
-        func hash(into hasher: inout Hasher) {
-            hasher.combine(modifiersRawValue)
-            hasher.combine(physicalKeyCode)
-            if physicalKeyCode == nil {
-                hasher.combine(keyEquivalent)
-            }
-        }
-
-        var swiftUIShortcut: KeyboardShortcut? {
-            guard let character = keyEquivalent.first else { return nil }
-            return KeyboardShortcut(
-                KeyEquivalent(character),
-                modifiers: .init(nsFlags: modifierFlags)
-            )
         }
     }
 }
