@@ -259,17 +259,25 @@ fn display(
     };
 
     // Add the placement
-    const p: ImageStorage.Placement = .{
-        .location = location,
-        .x_offset = d.x_offset,
-        .y_offset = d.y_offset,
-        .source_x = d.x,
-        .source_y = d.y,
-        .source_width = d.width,
-        .source_height = d.height,
-        .columns = d.columns,
-        .rows = d.rows,
-        .z = d.z,
+    const p: ImageStorage.Placement = placement: {
+        var p: ImageStorage.Placement = .{
+            .location = location,
+            .x_offset = d.x_offset,
+            .y_offset = d.y_offset,
+            .source_x = d.x,
+            .source_y = d.y,
+            .source_width = d.width,
+            .source_height = d.height,
+            .columns = d.columns,
+            .rows = d.rows,
+            .z = d.z,
+        };
+
+        const cell_offset = p.cellOffset(terminal);
+        if (terminal.width_px / terminal.cols > 0) p.x_offset = cell_offset.x;
+        if (terminal.height_px / terminal.rows > 0) p.y_offset = cell_offset.y;
+
+        break :placement p;
     };
     storage.addPlacement(
         io,
@@ -914,6 +922,36 @@ test "kittygfx delete then retransmit same id gets fresh generation" {
     const gen2 = storage.imageById(1).?.generation;
     try testing.expect(gen2 > gen1);
     try testing.expect(gen2 > gen_delete);
+}
+
+test "kittygfx display clamps cell offsets" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const io = testing.io;
+
+    var t = try Terminal.init(io, alloc, .{ .rows = 5, .cols = 5 });
+    defer t.deinit(alloc);
+    t.width_px = 50; // 10 px per col
+    t.height_px = 100; // 20 px per row
+
+    const cmd = try command.Parser.parseString(
+        alloc,
+        "a=T,t=d,f=24,i=1,s=1,v=1,c=2,r=1,X=99,Y=99,C=1;AAAA",
+    );
+    defer cmd.deinit(alloc);
+
+    const resp = execute(io, alloc, &t, &cmd).?;
+    try testing.expect(resp.ok());
+
+    const storage = &t.screens.active.kitty_images;
+    var it = storage.placements.iterator();
+    const placement = it.next().?.value_ptr;
+    try testing.expectEqual(@as(u32, 9), placement.x_offset);
+    try testing.expectEqual(@as(u32, 19), placement.y_offset);
+
+    const actual = placement.pixelSize(storage.imageById(1).?, &t);
+    try testing.expectEqual(@as(u32, 11), actual.width);
+    try testing.expectEqual(@as(u32, 1), actual.height);
 }
 
 test "kittygfx placement bounds cursor movement for untrusted dimensions" {
