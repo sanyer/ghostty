@@ -880,6 +880,38 @@ test "kittygfx delete aborts chunked image load" {
     try testing.expectEqual(@as(usize, 6), storage.imageById(1).?.data.len());
 }
 
+test "kittygfx uppercase id delete preserves image when placement does not match" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const io = testing.io;
+
+    var t = try Terminal.init(io, alloc, .{ .rows = 5, .cols = 5 });
+    defer t.deinit(alloc);
+    const storage = &t.screens.active.kitty_images;
+
+    // Store an unplaced 1x1 RGB image.
+    {
+        const cmd = try command.Parser.parseString(
+            alloc,
+            "a=t,f=24,s=1,v=1,i=1;AAAA",
+        );
+        defer cmd.deinit(alloc);
+        try testing.expect(execute(io, alloc, &t, &cmd).?.ok());
+    }
+
+    // Uppercase deletion may free data only if the named placement matched.
+    {
+        const cmd = try command.Parser.parseString(
+            alloc,
+            "a=d,d=I,i=1,p=7",
+        );
+        defer cmd.deinit(alloc);
+        try testing.expect(execute(io, alloc, &t, &cmd) == null);
+    }
+
+    try testing.expect(storage.imageById(1) != null);
+}
+
 test "kittygfx default format is rgba" {
     const testing = std.testing;
     const alloc = testing.allocator;
