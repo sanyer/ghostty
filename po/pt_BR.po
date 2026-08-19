@@ -542,7 +542,7 @@ msgstr "Redefinir tamanho da fonte"
 
 #: src/input/command.zig:238
 msgid "Reset the font size to the default."
-msgstr "Restaurar o tamanho da fonte para o padrão."
+msgstr "Redefinir o tamanho da fonte para o padrão."
 
 #: src/input/command.zig:243
 msgid "Clear Screen"
