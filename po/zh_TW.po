@@ -473,7 +473,7 @@ msgstr "搜尋選取範圍"
 
 #: src/input/command.zig:204
 msgid "Start a search for the current text selection."
-msgstr "為目前選取的文字開始搜尋。"
+msgstr "以目前選取的文字開始搜尋。"
 
 #: src/input/command.zig:209
 msgid "End Search"
@@ -1092,4 +1092,4 @@ msgstr "Ghostty"
 
 #: src/input/command.zig:709
 msgid "Put a little Ghostty in your terminal."
-msgstr "讓你的終端機裡有點 Ghostty。"
+msgstr "在你的終端機裡放一隻小小的 Ghostty。"
