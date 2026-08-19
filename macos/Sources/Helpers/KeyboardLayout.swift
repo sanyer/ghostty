@@ -15,43 +15,27 @@ class KeyboardLayout {
 
     /// Translate a physical keycode for use as a menu key equivalent.
     ///
-    /// Must be called on the main thread because Text Input Sources APIs are not thread-safe.
+    /// AppKit retranslates against the current input source without changing its dead key state.
     @MainActor static func character(
         for keyCode: UInt16,
         modifiers: NSEvent.ModifierFlags
     ) -> Character? {
         guard
-            let source = TISCopyCurrentKeyboardLayoutInputSource()?.takeRetainedValue(),
-            let dataPointer = TISGetInputSourceProperty(source, kTISPropertyUnicodeKeyLayoutData)
+            let event = NSEvent.keyEvent(
+                with: .keyDown,
+                location: .zero,
+                modifierFlags: [],
+                timestamp: 0,
+                windowNumber: 0,
+                context: nil,
+                characters: "",
+                charactersIgnoringModifiers: "",
+                isARepeat: false,
+                keyCode: keyCode),
+            let result = event.characters(byApplyingModifiers: modifiers.intersection(.command)),
+            result.count == 1
         else { return nil }
 
-        let data = unsafeBitCast(dataPointer, to: CFData.self)
-        guard let bytes = CFDataGetBytePtr(data) else { return nil }
-
-        // Command can select a distinct layout table. Other modifiers remain
-        // separate in the menu's modifier mask and must not affect this character.
-        let carbonModifiers = modifiers.contains(.command) ? UInt32(cmdKey) >> 8 : 0
-
-        var deadKeyState: UInt32 = 0
-        var characters = [UniChar](repeating: 0, count: 4)
-        var length = 0
-        let status = bytes.withMemoryRebound(to: UCKeyboardLayout.self, capacity: 1) { layout in
-            UCKeyTranslate(
-                layout,
-                keyCode,
-                UInt16(kUCKeyActionDisplay),
-                carbonModifiers,
-                UInt32(LMGetKbdType()),
-                UInt32(kUCKeyTranslateNoDeadKeysMask),
-                &deadKeyState,
-                characters.count,
-                &length,
-                &characters)
-        }
-        guard status == noErr else { return nil }
-
-        let result = String(utf16CodeUnits: characters, count: length)
-        guard result.count == 1 else { return nil }
         return result.first
     }
 }
