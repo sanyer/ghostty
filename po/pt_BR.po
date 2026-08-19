@@ -122,7 +122,7 @@ msgid ""
 msgstr ""
 "Este terminal está em modo somente leitura. Você ainda pode visualizar, "
 "selecionar e rolar o conteúdo, mas nenhum evento de entrada será enviado "
-"para a aplicação em execução."
+"para o aplicativo em execução."
 
 #: src/apprt/gtk/ui/1.2/surface.blp:112
 msgid "Read-only"
@@ -248,7 +248,7 @@ msgstr "Visualizar abas abertas"
 
 #: src/apprt/gtk/ui/1.5/window.blp:81 src/apprt/gtk/ui/1.5/window.blp:143
 msgid "Main Menu"
-msgstr "Menu Principal"
+msgstr "Menu principal"
 
 #: src/apprt/gtk/ui/1.5/window.blp:293
 msgid "Command Palette"
@@ -299,7 +299,7 @@ msgid ""
 "An application is attempting to write to the clipboard. The current "
 "clipboard contents are shown below."
 msgstr ""
-"Uma aplicação está tentando escrever na área de transferência. O conteúdo "
+"Um aplicativo está tentando escrever na área de transferência. O conteúdo "
 "atual da área de transferência está aparecendo abaixo."
 
 #: src/apprt/gtk/class/clipboard_confirmation_dialog.zig:202
@@ -307,7 +307,7 @@ msgid ""
 "An application is attempting to read from the clipboard. The current "
 "clipboard contents are shown below."
 msgstr ""
-"Uma aplicação está tentando ler da área de transferência. O conteúdo atual "
+"Um aplicativo está tentando ler da área de transferência. O conteúdo atual "
 "da área de transferência está sendo exibido abaixo."
 
 #: src/apprt/gtk/class/clipboard_confirmation_dialog.zig:205
@@ -370,7 +370,7 @@ msgstr "Comando falhou"
 
 #: src/apprt/gtk/class/title_dialog.zig:227
 msgid "Change Terminal Title"
-msgstr "Mudar título do Terminal"
+msgstr "Mudar título do terminal"
 
 #: src/apprt/gtk/class/title_dialog.zig:228
 msgid "Change Tab Title"
