@@ -967,7 +967,7 @@ msgstr "Redefinir tamanho da janela"
 
 #: src/input/command.zig:564
 msgid "Reset the window size to the default."
-msgstr "Restaurar o tamanho da janela para o padrão."
+msgstr "Redefinir o tamanho da janela para o padrão."
 
 #: src/input/command.zig:569
 msgid "Toggle Inspector"
