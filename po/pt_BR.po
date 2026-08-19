@@ -963,7 +963,7 @@ msgstr "Equalizar o tamanho de todas as divisões."
 
 #: src/input/command.zig:563
 msgid "Reset Window Size"
-msgstr "Restaurar tamanho da janela"
+msgstr "Redefinir tamanho da janela"
 
 #: src/input/command.zig:564
 msgid "Reset the window size to the default."
