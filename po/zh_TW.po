@@ -390,7 +390,7 @@ msgstr "重設終端機"
 
 #: src/input/command.zig:150
 msgid "Reset the terminal to a clean state."
-msgstr "將終端機重設為乾淨狀態。"
+msgstr "將終端機重設為初始狀態。"
 
 #: src/input/command.zig:155
 msgid "Copy to Clipboard"
@@ -399,7 +399,7 @@ msgstr "複製到剪貼簿"
 #: src/input/command.zig:156
 msgid ""
 "Copy the selected text to the clipboard in both plain and styled formats."
-msgstr "將選取的文字以純文字與樣式格式複製到剪貼簿。"
+msgstr "將選取的文字同時以純文字與 HTML 兩種格式複製到剪貼簿。"
 
 #: src/input/command.zig:159
 msgid "Copy Selection as Plain Text to Clipboard"
@@ -427,7 +427,7 @@ msgstr "將選取的文字以 HTML 複製到剪貼簿。"
 
 #: src/input/command.zig:173
 msgid "Copy URL to Clipboard"
-msgstr "將游標下的 URL 複製到剪貼簿"
+msgstr "將 URL 複製到剪貼簿"
 
 #: src/input/command.zig:174
 msgid "Copy the URL under the cursor to the clipboard."
@@ -1092,4 +1092,4 @@ msgstr "Ghostty"
 
 #: src/input/command.zig:709
 msgid "Put a little Ghostty in your terminal."
-msgstr "在你的終端機裡放一隻小小的 Ghostty。"
+msgstr "在您的終端機裡放一隻小小的 Ghostty。"
