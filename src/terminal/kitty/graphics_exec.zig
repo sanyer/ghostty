@@ -304,9 +304,11 @@ fn display(
         return result;
     };
 
-    // Apply cursor movement setting. This only applies to pin placements.
+    // Apply cursor movement setting. This only applies to pin placements:
+    // relative placements never move the cursor regardless of C=, just
+    // like kitty.
     switch (p.location) {
-        .virtual => {},
+        .virtual, .relative => {},
         .pin => |pin| switch (d.cursor_movement) {
             .none => {},
             .after => {
@@ -1320,11 +1322,11 @@ test "kittygfx placement moves cursor past a tall image" {
     }).?;
     const first_pin = switch (first.location) {
         .pin => |pin| pin,
-        .virtual => unreachable,
+        .virtual, .relative => unreachable,
     };
     const second_pin = switch (second.location) {
         .pin => |pin| pin,
-        .virtual => unreachable,
+        .virtual, .relative => unreachable,
     };
     const first_y = t.screens.active.pages.pointFromPin(
         .screen,

@@ -319,6 +319,10 @@ pub const State = struct {
                     // placement itself.
                     continue;
                 },
+
+                // Nothing creates relative placements yet; rendering
+                // support comes with the protocol wiring.
+                .relative => continue,
             }
 
             // Get the image for the placement

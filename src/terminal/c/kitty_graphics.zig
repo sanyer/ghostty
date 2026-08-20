@@ -602,7 +602,7 @@ fn computeViewportPos(
     // screen position — they are rendered inline by the text layout.
     const pin = switch (p.location) {
         .pin => |pin| pin,
-        .virtual => return .{ .col = 0, .row = 0, .visible = false },
+        .virtual, .relative => return .{ .col = 0, .row = 0, .visible = false },
     };
     if (pin.garbage) return .{ .col = 0, .row = 0, .visible = false };
 
@@ -1632,7 +1632,7 @@ test "placement_render_info returns all fields" {
     const entry = iter.?.entry.?;
     const pin = switch (entry.value_ptr.location) {
         .pin => |pin| pin,
-        .virtual => unreachable,
+        .virtual, .relative => unreachable,
     };
     pin.garbage = true;
 
