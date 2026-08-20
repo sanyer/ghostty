@@ -622,6 +622,43 @@ pub const ImageStorage = struct {
         self.placements.removeByPtr(key);
     }
 
+    /// Returns the placement that a unicode placeholder cell referencing
+    /// this image/placement ID pair targets, or null if there is none. A
+    /// zero placement ID targets one of the image's virtual placements,
+    /// chosen by PlacementId.preferredOver so the choice is stable (an
+    /// image rarely has more than one).
+    pub fn placeholderTarget(
+        self: *const ImageStorage,
+        image_id: u32,
+        placement_id: u32,
+    ) ?struct { key: PlacementKey, placement: Placement } {
+        if (placement_id > 0) {
+            const key: PlacementKey = .{
+                .image_id = image_id,
+                .placement_id = .{ .tag = .external, .id = placement_id },
+            };
+            const p = self.placements.get(key) orelse return null;
+            return .{ .key = key, .placement = p };
+        }
+
+        var best: ?PlacementKey = null;
+        var it = self.placements.iterator();
+        while (it.next()) |entry| {
+            if (entry.key_ptr.image_id != image_id) continue;
+            if (entry.value_ptr.location != .virtual) continue;
+            const b = best orelse {
+                best = entry.key_ptr.*;
+                continue;
+            };
+            if (entry.key_ptr.placement_id.preferredOver(b.placement_id)) {
+                best = entry.key_ptr.*;
+            }
+        }
+
+        const key = best orelse return null;
+        return .{ .key = key, .placement = self.placements.get(key).? };
+    }
+
     /// Get an image by its ID. If the image doesn't exist, null is returned.
     pub fn imageById(self: *const ImageStorage, image_id: u32) ?Image {
         return self.images.get(image_id);
@@ -1108,10 +1145,24 @@ pub const ImageStorage = struct {
     /// Likewise, if a placement ID isn't specified it is assumed to be 0.
     pub const PlacementKey = struct {
         image_id: u32,
-        placement_id: packed struct {
-            tag: enum(u1) { internal, external },
-            id: u32,
-        },
+        placement_id: PlacementId,
+    };
+
+    /// Internal placement IDs are assigned by us for placements created
+    /// without an explicit ID (p=0); external IDs are client-specified.
+    /// The two are separate namespaces, hence the tag.
+    pub const PlacementId = packed struct {
+        tag: enum(u1) { internal, external },
+        id: u32,
+
+        /// Deterministic preference order used when an operation must
+        /// pick a single placement out of several (kitty uses creation
+        /// order, which our map doesn't track): external IDs win over
+        /// internal ones, and lower IDs win within a tag.
+        pub fn preferredOver(self: PlacementId, other: PlacementId) bool {
+            if (self.tag != other.tag) return self.tag == .external;
+            return self.id < other.id;
+        }
     };
 
     pub const Placement = struct {
@@ -3570,4 +3621,56 @@ test "storage: scroll margins multi-line scroll up with scrollback" {
     // Another two rows scrolls it out of the region: deleted.
     try t.scrollUp(2);
     try testing.expectEqual(@as(usize, 0), storage.placements.count());
+}
+
+test "storage: placeholderTarget lookup" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+    const io = testing.io;
+    var t = try terminal.Terminal.init(io, alloc, .{ .rows = 5, .cols = 5 });
+    defer t.deinit(alloc);
+
+    var s: ImageStorage = .{};
+    defer s.deinit(alloc, t.screens.active);
+    try s.addImage(io, alloc, t.screens.active, .{ .id = 1 });
+    try s.addPlacement(io, alloc, t.screens.active, 1, 5, .{
+        .location = .{ .virtual = {} },
+    });
+
+    // Exact external ID match.
+    {
+        const target = s.placeholderTarget(1, 5).?;
+        const expected: ImageStorage.PlacementKey = .{
+            .image_id = 1,
+            .placement_id = .{ .tag = .external, .id = 5 },
+        };
+        try testing.expectEqual(expected, target.key);
+        try testing.expect(target.placement.location == .virtual);
+    }
+
+    // Zero placement ID falls back to the image's virtual placement.
+    {
+        const target = s.placeholderTarget(1, 0).?;
+        const expected: ImageStorage.PlacementKey = .{
+            .image_id = 1,
+            .placement_id = .{ .tag = .external, .id = 5 },
+        };
+        try testing.expectEqual(expected, target.key);
+    }
+
+    try testing.expect(s.placeholderTarget(1, 9) == null);
+    try testing.expect(s.placeholderTarget(2, 0) == null);
+
+    // With multiple virtual placements, the zero-ID fallback picks
+    // deterministically by PlacementId.preferredOver: lowest external.
+    try s.addPlacement(io, alloc, t.screens.active, 1, 3, .{
+        .location = .{ .virtual = {} },
+    });
+    {
+        const expected: ImageStorage.PlacementKey = .{
+            .image_id = 1,
+            .placement_id = .{ .tag = .external, .id = 3 },
+        };
+        try testing.expectEqual(expected, s.placeholderTarget(1, 0).?.key);
+    }
 }
