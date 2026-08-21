@@ -37,6 +37,7 @@
 const oscpkg = @import("../osc.zig");
 const protocol = @import("../osc/parsers/kitty_clipboard_protocol.zig");
 const command = @import("clipboard_command.zig");
+const response = @import("clipboard_response.zig");
 
 pub const OSC = protocol.OSC;
 pub const Operation = protocol.Operation;
@@ -49,6 +50,12 @@ pub const max_id_len = command.max_id_len;
 pub const max_pw_len = command.max_pw_len;
 pub const max_mime_len = command.max_mime_len;
 pub const max_name_len = command.max_name_len;
+
+pub const Response = response.Response;
+pub const ReadSuccess = response.ReadSuccess;
+pub const read_chunk_size = response.read_chunk_size;
+pub const max_read_mimes = response.max_read_mimes;
+pub const targets_mime = response.targets_mime;
 
 test {
     @import("std").testing.refAllDecls(@This());
