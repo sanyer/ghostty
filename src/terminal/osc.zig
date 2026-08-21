@@ -159,12 +159,12 @@ pub const Command = union(Key) {
     /// Kitty drag and drop protocol (OSC 72)
     kitty_dnd_protocol: KittyDndProtocol,
 
-    /// Kitty desktop notifications (OSC 99)
-    kitty_desktop_notification: KittyDesktopNotification,
-
     /// OSC 3008. Hierarchical context signalling (UAPI spec).
     /// https://uapi-group.org/specifications/specs/osc_context/
     context_signal: parsers.context_signal.Command,
+
+    /// Kitty desktop notifications (OSC 99)
+    kitty_desktop_notification: KittyDesktopNotification,
 
     pub const SemanticPrompt = parsers.semantic_prompt.Command;
 
@@ -203,8 +203,8 @@ pub const Command = union(Key) {
             "kitty_text_sizing",
             "kitty_clipboard_protocol",
             "kitty_dnd_protocol",
-            "kitty_desktop_notification",
             "context_signal",
+            "kitty_desktop_notification",
         },
     );
 
@@ -800,7 +800,7 @@ pub const Parser = struct {
 
             .@"99",
             => switch (c) {
-                // OSC 99 can be up to 4096 bytes fully encoded.
+                // OSC 99 encoded payloads can exceed the fixed buffer.
                 ';' => self.captureTrailing(.allocating),
                 else => self.state = .invalid,
             },
@@ -911,7 +911,7 @@ test {
 
 test "Parser allocating captures have a hard limit" {
     const testing = std.testing;
-    const prefixes = [_][]const u8{ "52;", "66;", "72;", "5522;" };
+    const prefixes = [_][]const u8{ "52;", "66;", "72;", "99;", "5522;" };
     const limit = Parser.MAX_BUF + 1;
 
     for (prefixes) |prefix| {

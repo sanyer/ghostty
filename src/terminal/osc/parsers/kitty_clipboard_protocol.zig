@@ -10,7 +10,7 @@ const assert = @import("../../../quirks.zig").inlineAssert;
 const Parser = @import("../../osc.zig").Parser;
 const Command = @import("../../osc.zig").Command;
 const Terminator = @import("../../osc.zig").Terminator;
-const Iterator = @import("../lib.zig").Iterator;
+const kitty_metadata = @import("../kitty_metadata.zig");
 const encoding = @import("../encoding.zig");
 
 const log = std.log.scoped(.kitty_clipboard_protocol);
@@ -97,7 +97,7 @@ pub const Option = enum {
         comptime key: Option,
         metadata: []const u8,
     ) ?key.Type() {
-        var it: Iterator(Option, isValidMetadataValue, key) = .init(metadata);
+        var it: kitty_metadata.ValueIterator(@tagName(key), null) = .init(metadata);
         const value = it.next() orelse return null;
 
         // return the parsed value
@@ -125,10 +125,6 @@ fn isValidIdentifier(str: []const u8) bool {
 fn parseIdentifier(str: []const u8) ?[]const u8 {
     if (isValidIdentifier(str)) return str;
     return null;
-}
-
-fn isValidMetadataValue(_: []const u8) bool {
-    return true;
 }
 
 pub fn parse(parser: *Parser, terminator_ch: ?u8) ?*Command {

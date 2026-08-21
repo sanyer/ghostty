@@ -2,19 +2,19 @@
 //! Specification: https://sw.kovidgoyal.net/kitty/desktop-notifications/
 
 const std = @import("std");
-const build_options = @import("terminal_options");
 
 const assert = @import("../../../quirks.zig").inlineAssert;
 
 const Parser = @import("../../osc.zig").Parser;
 const Command = @import("../../osc.zig").Command;
 const Terminator = @import("../../osc.zig").Terminator;
-const Iterator = @import("../lib.zig").Iterator;
+const kitty_metadata = @import("../kitty_metadata.zig");
 const encoding = @import("../encoding.zig");
-const lib = @import("../../../lib/main.zig");
-const lib_target: lib.Target = if (build_options.c_abi) .c else .zig;
 
 const log = std.log.scoped(.kitty_desktop_notification);
+
+pub const MAX_PLAIN_PAYLOAD_BYTES = 2048;
+pub const MAX_ENCODED_PAYLOAD_BYTES = 4096;
 
 pub const OSC = struct {
     /// The raw metadata that was received. It can be parsed by using the `readOption` method.
@@ -137,11 +137,17 @@ pub const Option = enum {
             .f => ?[]const u8,
             .g => ?[]const u8,
             .i => ?[]const u8,
-            .n => Iterator(Option, isValidMetadataValue, .n),
+            .n => kitty_metadata.ValueIterator(
+                @tagName(key),
+                valid_metadata_value_characters,
+            ),
             .o => Occasion,
             .p => Payload,
             .s => []const u8,
-            .t => Iterator(Option, isValidMetadataValue, .t),
+            .t => kitty_metadata.ValueIterator(
+                @tagName(key),
+                valid_metadata_value_characters,
+            ),
             .u => Urgency,
             .w => i32,
         };
@@ -168,13 +174,16 @@ pub const Option = enum {
 
     /// Read the option value from the raw metadata string.
     ///
-    /// Any errors in the raw string will return null since the OSC 99
-    /// specification says to ignore unknown or malformed options.
+    /// Unknown and malformed values are ignored. Optional values return null;
+    /// all other values return the protocol default.
     pub fn read(
         comptime key: Option,
         metadata: []const u8,
     ) key.Type() {
-        var it: Iterator(Option, isValidMetadataValue, key) = switch (key) {
+        var it: kitty_metadata.ValueIterator(
+            @tagName(key),
+            valid_metadata_value_characters,
+        ) = switch (key) {
             .t, .n => return .init(metadata),
             else => .init(metadata),
         };
@@ -222,7 +231,7 @@ fn parseBool(str: []const u8) ?bool {
 /// This is similar to the packed struct parser used in the configs. The
 /// differences are that a literal `true` or `false` value does not turn on/off
 /// all the values, and the negation prefix is `-` not `no-`.
-pub fn parsePackedStruct(comptime T: type, str: []const u8) T {
+fn parsePackedStruct(comptime T: type, str: []const u8) T {
     const info = @typeInfo(T).@"struct";
     comptime assert(info.layout == .@"packed");
 
@@ -262,14 +271,10 @@ pub fn parsePackedStruct(comptime T: type, str: []const u8) T {
 /// against the spec but is needed since Base64 encoded values (with padding)
 /// are valid for some options. Including `?` is technically against the spec
 /// but is needed since it is a valid value for the `p` option.
-const valid_metadata_value_characters: []const u8 = valid_identifier_characters ++ "/.,(){}[]*&^%$#@!`~=?";
-
-fn isValidMetadataValue(str: []const u8) bool {
-    return std.mem.indexOfNone(u8, str, valid_metadata_value_characters) == null;
-}
+const valid_metadata_value_characters: []const u8 = valid_identifier_characters ++ "/,(){}[]*&^%$#@!`~=?";
 
 /// Characters that are valid in identifiers.
-const valid_identifier_characters: []const u8 = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_+";
+const valid_identifier_characters: []const u8 = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_+.";
 
 fn isValidIdentifier(str: []const u8) bool {
     return std.mem.indexOfNone(u8, str, valid_identifier_characters) == null;
@@ -299,7 +304,20 @@ pub fn parse(parser: *Parser, terminator_ch: ?u8) ?*Command {
     const metadata = data[0..payload_start];
     const payload = data[payload_start + 1 .. data.len];
 
-    // Payload has to be a URL-safe UTF-8 string.
+    const max_payload_bytes: usize = if (Option.e.read(metadata))
+        MAX_ENCODED_PAYLOAD_BYTES
+    else
+        MAX_PLAIN_PAYLOAD_BYTES;
+    if (payload.len > max_payload_bytes) {
+        log.warn(
+            "payload is too large: size={d} max={d}",
+            .{ payload.len, max_payload_bytes },
+        );
+        parser.state = .invalid;
+        return null;
+    }
+
+    // Payload has to be an escape-code-safe UTF-8 string.
     if (!encoding.isSafeUtf8(payload)) {
         log.warn("payload is not escape code safe UTF-8", .{});
         parser.state = .invalid;
@@ -386,18 +404,58 @@ test "OSC 99: empty metadata with payload" {
     try testing.expectEqual(-1, cmd.kitty_desktop_notification.readOption(.w));
 }
 
+test "OSC 99: payload size limits" {
+    const testing = std.testing;
+    const cases = [_]struct {
+        metadata: []const u8,
+        payload_size: usize,
+        valid: bool,
+    }{
+        .{ .metadata = "", .payload_size = MAX_PLAIN_PAYLOAD_BYTES, .valid = true },
+        .{ .metadata = "", .payload_size = MAX_PLAIN_PAYLOAD_BYTES + 1, .valid = false },
+        .{ .metadata = "e=1", .payload_size = MAX_ENCODED_PAYLOAD_BYTES, .valid = true },
+        .{ .metadata = "e=1", .payload_size = MAX_ENCODED_PAYLOAD_BYTES + 1, .valid = false },
+    };
+
+    for (cases) |case| {
+        var p: Parser = .init(testing.allocator);
+        defer p.deinit();
+
+        for ("99;") |ch| p.next(ch);
+        for (case.metadata) |ch| p.next(ch);
+        p.next(';');
+        for (0..case.payload_size) |_| p.next('a');
+
+        try testing.expectEqual(case.valid, p.end('\x1b') != null);
+    }
+}
+
+test "OSC 99: unknown prefix does not hide dotted identifier" {
+    const testing = std.testing;
+
+    var p: Parser = .init(null);
+    const input = "99;invalid=wrong:i=org.ghostty;payload";
+    for (input) |ch| p.next(ch);
+
+    const cmd = p.end('\x1b').?.*;
+    try testing.expectEqualStrings(
+        "org.ghostty",
+        cmd.kitty_desktop_notification.readOption(.i).?,
+    );
+}
+
 test "OSC 99: single parameter i" {
     const testing = std.testing;
 
     var p: Parser = .init(null);
 
-    const input = "99;i=bobr;kurwa";
+    const input = "99;i=bobr;payload";
     for (input) |ch| p.next(ch);
 
     const cmd = p.end('\x1b').?.*;
     try testing.expect(cmd == .kitty_desktop_notification);
     try testing.expectEqualStrings("bobr", cmd.kitty_desktop_notification.readOption(.i).?);
-    try testing.expectEqualStrings("kurwa", cmd.kitty_desktop_notification.payload);
+    try testing.expectEqualStrings("payload", cmd.kitty_desktop_notification.payload);
 }
 
 test "OSC 99: repeated parameter i" {
@@ -405,13 +463,13 @@ test "OSC 99: repeated parameter i" {
 
     var p: Parser = .init(null);
 
-    const input = "99;i=bobr:i=foobar;kurwa";
+    const input = "99;i=bobr:i=foobar;payload";
     for (input) |ch| p.next(ch);
 
     const cmd = p.end('\x1b').?.*;
     try testing.expect(cmd == .kitty_desktop_notification);
     try testing.expectEqualStrings("bobr", cmd.kitty_desktop_notification.readOption(.i).?);
-    try testing.expectEqualStrings("kurwa", cmd.kitty_desktop_notification.payload);
+    try testing.expectEqualStrings("payload", cmd.kitty_desktop_notification.payload);
 }
 
 test "OSC 99: multiple types" {
@@ -419,16 +477,16 @@ test "OSC 99: multiple types" {
 
     var p: Parser = .init(null);
 
-    const input = "99;t=bobr: t = kurwa : t = ghostty ;foobar";
+    const input = "99;t=mail: t = chat : t = alert ;notification";
     for (input) |ch| p.next(ch);
 
     const cmd = p.end('\x1b').?.*;
     try testing.expect(cmd == .kitty_desktop_notification);
-    try testing.expectEqualStrings("foobar", cmd.kitty_desktop_notification.payload);
+    try testing.expectEqualStrings("notification", cmd.kitty_desktop_notification.payload);
     var it = cmd.kitty_desktop_notification.readOption(.t);
-    try testing.expectEqualStrings("bobr", it.next().?);
-    try testing.expectEqualStrings("kurwa", it.next().?);
-    try testing.expectEqualStrings("ghostty", it.next().?);
+    try testing.expectEqualStrings("mail", it.next().?);
+    try testing.expectEqualStrings("chat", it.next().?);
+    try testing.expectEqualStrings("alert", it.next().?);
     try testing.expect(it.next() == null);
 }
 
