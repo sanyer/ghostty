@@ -332,10 +332,9 @@ const entries: []const ModeEntry = &.{
     // one-time password instead of pasting the text.
     // See https://sw.kovidgoyal.net/kitty/clipboard/
     //
-    // Disabled until the apprt paste integration lands; until then the
-    // mode reports as unrecognized so applications correctly detect
-    // paste events as unsupported.
-    .{ .name = "paste_events", .value = 5522, .disabled = true },
+    // Forcibly disabled for now since the functionality isn't exposed
+    // yet to libghostty or any GUI apps.
+    .{ .name = "kitty_paste_events", .value = 5522, .disabled = true },
 };
 
 test {
