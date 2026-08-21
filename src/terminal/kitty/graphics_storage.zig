@@ -1160,7 +1160,7 @@ pub const ImageStorage = struct {
         // per-branch deleteIfUnused calls above ran while the orphans
         // still counted as placements).
         const delete_unused: bool = switch (cmd) {
-            .all, .intersect_cursor, .animation_frames => |v| v,
+            .all, .intersect_cursor => |v| v,
             inline else => |v| v.delete,
         };
         _ = self.removeOrphans(
