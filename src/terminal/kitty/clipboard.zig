@@ -16,11 +16,7 @@
 //!   * `id` is sanitized by stripping characters outside [a-zA-Z0-9-_+.]
 //!     and truncating to 512 bytes, then echoed verbatim in every
 //!     response packet (omitted when empty).
-//!   * Write data chunks are decoded with a streaming base64 decoder that
-//!     persists across packets of the same MIME type; a '=' padding
-//!     mid-stream finishes the current group and resets the decoder, so
-//!     both per-chunk-padded and continuous unpadded streams work. A
-//!     chunk with invalid base64 is dropped (decoder reset) and the
+//!   * A write data chunk with invalid base64 is dropped and the
 //!     transaction continues; it is not a protocol error.
 //!   * A `type=write` silently replaces any in-flight transaction. A
 //!     commit (`type=wdata` without a MIME type) with no in-flight
@@ -37,6 +33,7 @@
 const oscpkg = @import("../osc.zig");
 const protocol = @import("../osc/parsers/kitty_clipboard_protocol.zig");
 const command = @import("clipboard_command.zig");
+const write = @import("clipboard_write.zig");
 const response = @import("clipboard_response.zig");
 
 pub const OSC = protocol.OSC;
@@ -50,6 +47,12 @@ pub const max_id_len = command.max_id_len;
 pub const max_pw_len = command.max_pw_len;
 pub const max_mime_len = command.max_mime_len;
 pub const max_name_len = command.max_name_len;
+
+pub const Content = write.Content;
+pub const WriteState = write.WriteState;
+pub const max_write_size = write.max_write_size;
+pub const max_write_mimes = write.max_write_mimes;
+pub const max_write_aliases = write.max_write_aliases;
 
 pub const Response = response.Response;
 pub const ReadSuccess = response.ReadSuccess;
