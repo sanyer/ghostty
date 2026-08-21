@@ -137,6 +137,15 @@ fn initVt(
     // We need uucode for grapheme break support
     vt.addImport("uucode", deps.uucode_mod);
 
+    // We need for Kitty graphics. If Kitty graphics is disabled then
+    // z2d isn't referenced and it produces no code, so its safe.
+    if (b.lazyDependency("z2d", .{
+        .target = cfg.target,
+        .optimize = cfg.optimize,
+    })) |dep| {
+        vt.addImport("z2d", dep.module("z2d"));
+    }
+
     // If SIMD is enabled, add all our SIMD dependencies.
     if (cfg.simd) {
         try SharedDeps.addSimd(b, vt, simd_libs);
