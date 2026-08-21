@@ -2570,6 +2570,7 @@ pub fn Stream(comptime H: type) type {
                 .conemu_run_process,
                 .kitty_text_sizing,
                 .kitty_dnd_protocol,
+                .kitty_desktop_notification,
                 .context_signal,
                 => {
                     log.debug("unimplemented OSC callback: {}", .{cmd});
