@@ -60,6 +60,7 @@
 //!     initiated events always use ST.
 
 const dnd_command = @import("dnd_command.zig");
+const dnd_response = @import("dnd_response.zig");
 
 pub const EventType = dnd_command.EventType;
 pub const Metadata = dnd_command.Metadata;
@@ -68,6 +69,12 @@ pub const Operations = dnd_command.Operations;
 pub const Request = dnd_command.Request;
 pub const Chunking = dnd_command.Chunking;
 
+pub const Errno = dnd_response.Errno;
+pub const RequestKeys = dnd_response.RequestKeys;
+pub const encode = dnd_response.encode;
+pub const encodeError = dnd_response.encodeError;
+
 test {
     _ = dnd_command;
+    _ = dnd_response;
 }
