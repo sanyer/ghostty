@@ -783,7 +783,7 @@ pub const AnimationFrameLoading = struct {
     /// leaves the gap unchanged.
     gap_ms: i32 = 0, // z
 
-    composition_mode: CompositionMode = .alpha_blend, // X (or C, see parse)
+    composition_mode: CompositionMode = .alpha_blend, // X
     background: Background = .{}, // Y
 
     /// The canvas background color as a 32-bit RGBA value where R is
@@ -825,15 +825,9 @@ pub const AnimationFrameLoading = struct {
             result.gap_ms = @bitCast(v);
         }
 
-        // The published spec assigns the composition mode to the X
-        // key and Kitty honored that through 0.44; Kitty 0.45 moved
-        // it to the C key (a doc/implementation regression). We accept
-        // either, tested only against 1 like Kitty.
+        // Tested only against 1 like Kitty.
         if (kv.get('X')) |v| {
             result.composition_mode = if (v == 1) .overwrite else .alpha_blend;
-        }
-        if (kv.get('C')) |v| {
-            if (v == 1) result.composition_mode = .overwrite;
         }
 
         if (kv.get('Y')) |v| {

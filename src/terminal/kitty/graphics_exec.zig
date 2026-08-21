@@ -2852,19 +2852,8 @@ test "kittygfx animation: create from base frame with overwrite" {
         try testing.expect(resp.ok());
     }
 
-    // Kitty >= 0.45 uses C for the same flag; accept it too.
-    {
-        const cmd = try command.Parser.parseString(
-            alloc,
-            "a=f,i=1,f=32,s=1,v=1,c=1,C=1;AAD/gA==",
-        );
-        defer cmd.deinit(alloc);
-        try testing.expect(execute(io, alloc, &t, &cmd).?.ok());
-    }
-
     const anim = storage.imagePtrByIdOrNumber(1, 0).?.animation.?;
     try testing.expectEqualSlices(u8, &.{ 0, 0, 255, 128 }, anim.frames.items[0].data);
-    try testing.expectEqualSlices(u8, &.{ 0, 0, 255, 128 }, anim.frames.items[1].data);
 }
 
 test "kittygfx animation: alpha blend composes over base frame" {
