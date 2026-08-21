@@ -35,6 +35,7 @@ const protocol = @import("../osc/parsers/kitty_clipboard_protocol.zig");
 const command = @import("clipboard_command.zig");
 const write = @import("clipboard_write.zig");
 const response = @import("clipboard_response.zig");
+const grants = @import("clipboard_grants.zig");
 
 pub const OSC = protocol.OSC;
 pub const Operation = protocol.Operation;
@@ -59,6 +60,10 @@ pub const ReadSuccess = response.ReadSuccess;
 pub const read_chunk_size = response.read_chunk_size;
 pub const max_read_mimes = response.max_read_mimes;
 pub const targets_mime = response.targets_mime;
+
+pub const Grants = grants.Grants;
+pub const otp_len = grants.otp_len;
+pub const generateOtp = grants.generateOtp;
 
 test {
     @import("std").testing.refAllDecls(@This());
