@@ -327,6 +327,15 @@ const entries: []const ModeEntry = &.{
     .{ .name = "report_color_scheme", .value = 2031 },
     .{ .name = "report_visibility", .value = 2033, .default_configurable = false },
     .{ .name = "in_band_size_reports", .value = 2048 },
+    // Kitty clipboard protocol paste events. When set, a user-initiated
+    // paste sends an unsolicited OSC 5522 targets listing with a
+    // one-time password instead of pasting the text.
+    // See https://sw.kovidgoyal.net/kitty/clipboard/
+    //
+    // Disabled until the apprt paste integration lands; until then the
+    // mode reports as unrecognized so applications correctly detect
+    // paste events as unsupported.
+    .{ .name = "paste_events", .value = 5522, .disabled = true },
 };
 
 test {
