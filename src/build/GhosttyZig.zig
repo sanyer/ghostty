@@ -137,13 +137,18 @@ fn initVt(
     // We need uucode for grapheme break support
     vt.addImport("uucode", deps.uucode_mod);
 
-    // We need for Kitty graphics. If Kitty graphics is disabled then
-    // z2d isn't referenced and it produces no code, so its safe.
-    if (b.lazyDependency("z2d", .{
-        .target = cfg.target,
-        .optimize = cfg.optimize,
-    })) |dep| {
-        vt.addImport("z2d", dep.module("z2d"));
+    // We need wuffs for Kitty graphics pixel operations (format
+    // conversion and alpha blending). Unlike pure Zig dependencies
+    // its C code is compiled whenever the module is in the build
+    // graph regardless of analysis, so only wire it in when Kitty
+    // graphics is actually enabled.
+    if (vt_options.kittyGraphics(cfg.target.result)) {
+        if (b.lazyDependency("wuffs", .{
+            .target = cfg.target,
+            .optimize = cfg.optimize,
+        })) |dep| {
+            vt.addImport("wuffs", dep.module("wuffs"));
+        }
     }
 
     // If SIMD is enabled, add all our SIMD dependencies.
