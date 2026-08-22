@@ -1,35 +1,12 @@
 //! Kitty drag and drop protocol (OSC 72).
 //!
 //! Specification: https://sw.kovidgoyal.net/kitty/dnd-protocol/
-//! Reference implementation: kitty/dnd.c and kitty/screen.c in
-//! https://github.com/kovidgoyal/kitty (introduced in kitty 0.47).
 //!
 //! The protocol lets a program running in the terminal participate in
 //! native OS drag and drop. A client registers to accept drops (t=a);
 //! the terminal then forwards native drag movement (t=m) and drops
 //! (t=M) to it and serves the dropped data on request (t=r), instead
 //! of the traditional behavior of pasting dropped paths or text.
-//!
-//! The implementation is split into:
-//!
-//!   * dnd_command.zig: metadata grammar and typed command decoding,
-//!     including chunk reassembly. The grammar mirrors kitty's
-//!     generated parser exactly.
-//!   * dnd_response.zig: wire encoding for everything the terminal
-//!     sends, mirroring kitty's send_payload_to_child chunking.
-//!   * dnd_drop.zig: the per-terminal protocol state machine, driven
-//!     by client OSCs on one side and native drag events from the
-//!     embedder on the other. It is allocated when a client registers
-//!     to accept drops and freed when it unregisters, so terminals
-//!     that never see the protocol pay nothing for it.
-//!
-//! The wire behavior was validated against kitty's implementation
-//! (kitty_tests/dnd.py is the oracle), including its deviations from
-//! the published spec: the MIME list payload is sent on every move
-//! event with a trailing space after each entry, a missing `t` key
-//! ignores the command rather than defaulting to `a`, empty payloads
-//! omit the `;` and `m=` entirely, and registration survives a
-//! terminal reset (RIS clears only the chunk-reassembly flag).
 //!
 //! ## Divergences
 //!
