@@ -5,6 +5,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const clipboard_command = @import("clipboard_command.zig");
+const sys = @import("../sys.zig");
 
 const max_pw_len = clipboard_command.max_pw_len;
 
@@ -113,13 +114,14 @@ pub const otp_alphabet = "23456789abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVW
 /// Generate a one-time password for a paste event.
 ///
 /// The password is a secret: a program that learns it can read the
-/// clipboard without a prompt.
+/// clipboard without a prompt. Entropy comes from `sys.random_secure`
+/// if set, otherwise from the Io; see `sys.randomSecure`.
 pub fn generateOtp(io: std.Io) std.Io.RandomSecureError![otp_len]u8 {
     var result: [otp_len]u8 = undefined;
     var len: usize = 0;
     while (len < result.len) {
         var raw: [2 * otp_len]u8 = undefined;
-        try io.randomSecure(&raw);
+        try sys.randomSecure(io, &raw);
         const limit = (std.math.maxInt(u8) + 1) / otp_alphabet.len * otp_alphabet.len;
         for (raw) |byte| {
             if (byte >= limit) continue;
@@ -215,4 +217,22 @@ test "generateOtp: length and alphabet with a real Io" {
 test "generateOtp: no entropy is an error, never a weak password" {
     const testing = std.testing;
     try testing.expectError(error.EntropyUnavailable, generateOtp(std.Io.failing));
+}
+
+test "generateOtp: sys override supplies entropy without an Io source" {
+    const testing = std.testing;
+    const S = struct {
+        var counter: u8 = 0;
+        fn fill(buffer: []u8) sys.RandomSecureError!void {
+            for (buffer) |*b| {
+                b.* = counter;
+                counter +%= 1;
+            }
+        }
+    };
+    sys.random_secure = &S.fill;
+    defer sys.random_secure = null;
+
+    const otp = try generateOtp(std.Io.failing);
+    for (otp) |c| try testing.expect(std.mem.indexOfScalar(u8, otp_alphabet, c) != null);
 }
