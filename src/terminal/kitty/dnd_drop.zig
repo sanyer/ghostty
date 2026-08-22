@@ -248,7 +248,7 @@ fn refuseDragOut(
 
 /// A protocol state change an embedder may need to act on, returned by
 /// `handleCommand` and delivered through the stream handler's
-/// `dnd_event` effect. This is a flat enum so it can cross a C API
+/// `drag_and_drop` effect. This is a flat enum so it can cross a C API
 /// unchanged; any details are read back from `Terminal.kitty_dnd`.
 pub const Event = enum {
     /// The client registered (t=a), re-registered, or unregistered
