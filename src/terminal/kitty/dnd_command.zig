@@ -240,7 +240,8 @@ pub const Request = union(enum) {
     }
 };
 
-/// Chunk reassembly state, mirroring kitty's per-screen dnd_chunking.
+/// Chunk reassembly state.
+///
 /// While a chunked command is in progress, the metadata of the first
 /// chunk is reused for all subsequent chunks; only the `more` flag is
 /// taken from each continuation.

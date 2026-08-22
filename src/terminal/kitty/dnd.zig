@@ -19,7 +19,9 @@
 //!     sends, mirroring kitty's send_payload_to_child chunking.
 //!   * dnd_drop.zig: the per-terminal protocol state machine, driven
 //!     by client OSCs on one side and native drag events from the
-//!     embedder on the other.
+//!     embedder on the other. It is allocated when a client registers
+//!     to accept drops and freed when it unregisters, so terminals
+//!     that never see the protocol pay nothing for it.
 //!
 //! The wire behavior was validated against kitty's implementation
 //! (kitty_tests/dnd.py is the oracle), including its deviations from
@@ -29,9 +31,9 @@
 //! omit the `;` and `m=` entirely, and registration survives a
 //! terminal reset (RIS clears only the chunk-reassembly flag).
 //!
-//! ## Divergences from kitty
+//! ## Divergences
 //!
-//! All are bounded-scope decisions, not accidents:
+//! These will be fixed in the future:
 //!
 //!   * Dropped data is captured eagerly at drop time from a curated
 //!     set of representations the embedder can serve (typically
@@ -41,26 +43,27 @@
 //!     x=y=Y=0) only frees the held data, and kitty's 128-entry
 //!     request queue and EMFILE overflow handling are unnecessary
 //!     because requests are served synchronously in order.
-//!   * The MIME list a client registers with (the t=a payload) is
-//!     accepted but not forwarded to the OS, so exotic pasteboard
-//!     types on macOS are not offered to clients.
 //!   * Every client is treated as local: machine IDs (t=a:x=1) are
 //!     accepted and ignored, responses never carry the X=1 remote
 //!     marker, and remote file transfer requests (t=r with y or Y
 //!     keys) are answered with EINVAL. A remote client (e.g. over
 //!     ssh) can still receive text drops; only file-content transfer
 //!     is unavailable.
-//!   * The terminal never initiates drags (drag out): enabling offers
-//!     (t=o:x=1) is tracked so the state is queryable, but the
-//!     terminal never sends a drag start request, so a conforming
-//!     client never offers a drag. Direct offers (t=o:x=0) and drag
-//!     data/start commands (t=p, t=P) are refused with EPERM.
+//!   * The terminal never initiates drags (drag out): enabling and
+//!     disabling offers (t=o:x=1, t=o:x=2) are accepted and ignored,
+//!     and since the terminal never sends a drag start request a
+//!     conforming client never offers a drag. Direct offers (t=o:x=0)
+//!     and drag data/start commands (t=p, t=P) are refused with EPERM.
+//!
+//! These are on purpose forever:
+//!
 //!   * Responses echo the requesting command's terminator (ST or BEL)
 //!     per ghostty convention; kitty always uses ST. Terminal-
 //!     initiated events always use ST.
 
 const dnd_command = @import("dnd_command.zig");
 const dnd_response = @import("dnd_response.zig");
+const dnd_drop = @import("dnd_drop.zig");
 
 pub const EventType = dnd_command.EventType;
 pub const Metadata = dnd_command.Metadata;
@@ -74,7 +77,16 @@ pub const RequestKeys = dnd_response.RequestKeys;
 pub const encode = dnd_response.encode;
 pub const encodeError = dnd_response.encodeError;
 
+pub const State = dnd_drop.State;
+pub const Item = dnd_drop.State.Item;
+pub const MoveEvent = dnd_drop.State.MoveEvent;
+pub const max_mime_list_bytes = dnd_drop.max_mime_list_bytes;
+pub const handleCommand = dnd_drop.handleCommand;
+pub const Event = dnd_drop.Event;
+
 test {
     _ = dnd_command;
     _ = dnd_response;
+    _ = dnd_drop;
+    _ = @import("dnd_test.zig");
 }
