@@ -98,6 +98,7 @@ pub const UnknownSequence = terminal.UnknownSequence;
 
 pub const Paste = terminal.Paste;
 pub const PasteSource = terminal.PasteSource;
+pub const PasteError = terminal.PasteError;
 pub const Cursor = Screen.Cursor;
 pub const CursorStyle = Screen.CursorStyle;
 pub const CursorStyleReq = terminal.CursorStyle;
@@ -132,8 +133,11 @@ pub const input = struct {
     // Paste-related APIs
     pub const PasteError = paste.Error;
     pub const PasteOptions = paste.Options;
+    pub const max_paste_frame_size = paste.max_frame_size;
     pub const isSafePaste = paste.isSafe;
+    pub const isSafePasteWith = paste.isSafeWith;
     pub const encodePaste = paste.encode;
+    pub const encodePasteWriter = paste.encodeWriter;
 
     // Key encoding
     pub const Key = key.Key;

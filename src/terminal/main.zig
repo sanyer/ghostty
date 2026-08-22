@@ -63,6 +63,7 @@ pub const StreamAction = stream.Action;
 pub const UnknownSequence = stream_terminal.Handler.UnknownSequence;
 pub const Paste = paste.Request;
 pub const PasteSource = paste.Source;
+pub const PasteError = stream_terminal.Handler.PasteError;
 pub const Cursor = Screen.Cursor;
 pub const CursorStyle = Screen.CursorStyle;
 pub const CursorStyleReq = ansi.CursorStyle;
