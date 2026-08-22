@@ -241,10 +241,11 @@ pub const ModeConfig = extern struct {
 /// C callback state for terminal effects. Most trampolines are always
 /// installed on the stream handler; they check these fields and no-op when
 /// the corresponding callback is null. The unknown-sequence and
-/// clipboard-write trampolines are installed dynamically to preserve
-/// their null fast paths (for clipboard_write, a null Zig-level effect
-/// makes Kitty clipboard writes fail up front instead of spooling a
-/// transaction that can never commit).
+/// clipboard trampolines are installed dynamically to preserve their
+/// null fast paths (for clipboard_write, a null Zig-level effect makes
+/// Kitty clipboard writes fail up front instead of spooling a
+/// transaction that can never commit; for clipboard_read it keeps
+/// reads denied).
 const Effects = struct {
     userdata: ?*anyopaque = null,
     write_pty: ?WritePtyFn = null,
@@ -4845,13 +4846,77 @@ test "kitty clipboard write via C effects" {
         S.responses[0..S.responses_len],
     );
 
-    // Reads are always denied.
+    // Without a read callback reads are denied.
     S.responses_len = 0;
     const read = "\x1B]5522;type=read:id=r1;dGV4dC9wbGFpbg==\x1B\\";
     vt_write(t, read, read.len);
     try testing.expectEqual(@as(usize, 1), S.write_count);
     try testing.expectEqualStrings(
         "\x1B]5522;type=read:status=EPERM:id=r1\x1B\\",
+        S.responses[0..S.responses_len],
+    );
+
+    // With a read callback the request is served through it.
+    const R = struct {
+        var count: usize = 0;
+        var last_mimes_len: usize = 0;
+        var last_mime_is_text: bool = false;
+        var last_list: bool = true;
+        var last_name_len: usize = 0;
+        var last_granted: bool = true;
+        var last_can_remember: bool = true;
+
+        fn clipboardRead(
+            _: Terminal,
+            _: ?*anyopaque,
+            request: *const ClipboardRead,
+        ) callconv(lib.calling_conv) void {
+            count += 1;
+            last_mimes_len = request.mimes_len;
+            last_mime_is_text = request.mimes_len > 0 and std.mem.eql(
+                u8,
+                request.mimes.?[0].ptr[0..request.mimes.?[0].len],
+                "text/plain",
+            );
+            last_list = request.list;
+            last_name_len = request.name.len;
+            last_granted = request.granted;
+            last_can_remember = request.can_remember;
+
+            const mime: []const u8 = "text/plain";
+            const data: []const u8 = "hello";
+            const contents = [_]ClipboardContent{.{
+                .mime = .init(mime),
+                .data = .init(data),
+            }};
+            request.reply(request, &.{
+                .size = @sizeOf(ClipboardReadReply),
+                .result = .success,
+                .contents = &contents,
+                .contents_len = contents.len,
+                .available = null,
+                .available_len = 0,
+                .remember = false,
+            });
+        }
+    };
+    try testing.expectEqual(Result.success, set(t, .clipboard_read, @ptrCast(&R.clipboardRead)));
+    S.responses_len = 0;
+    // name="app" without a password: forwarded for prompts, not
+    // rememberable.
+    const read2 = "\x1B]5522;type=read:id=r2:name=YXBw;dGV4dC9wbGFpbg==\x1B\\";
+    vt_write(t, read2, read2.len);
+    try testing.expectEqual(@as(usize, 1), R.count);
+    try testing.expectEqual(@as(usize, 1), R.last_mimes_len);
+    try testing.expect(R.last_mime_is_text);
+    try testing.expect(!R.last_list);
+    try testing.expectEqual(@as(usize, 3), R.last_name_len);
+    try testing.expect(!R.last_granted);
+    try testing.expect(!R.last_can_remember);
+    try testing.expectEqualStrings(
+        "\x1B]5522;type=read:status=OK:id=r2\x1B\\" ++
+            "\x1B]5522;type=read:status=DATA:id=r2:mime=dGV4dC9wbGFpbg==;aGVsbG8=\x1B\\" ++
+            "\x1B]5522;type=read:status=DONE:id=r2\x1B\\",
         S.responses[0..S.responses_len],
     );
 

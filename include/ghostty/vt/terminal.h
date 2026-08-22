@@ -584,8 +584,9 @@ typedef enum {
  * duration of the reply call and may be freed as soon as it returns.
  *
  * Any result other than GHOSTTY_CLIPBOARD_READ_RESULT_SUCCESS answers the
- * program with an empty clipboard; the other fields are ignored in that
- * case. On success, `contents` should carry one representation per
+ * program with an empty clipboard (OSC 52) or the matching protocol status
+ * (OSC 5522: EPERM, ENOSYS, EBUSY, EIO); the other fields are ignored in
+ * that case. On success, `contents` should carry one representation per
  * requested MIME type (GhosttyClipboardRead::mimes) that the clipboard
  * has; unrequested representations are ignored. Protocols that carry a
  * single text value (OSC 52) use the first entry with a text MIME type
@@ -649,7 +650,7 @@ typedef void (*GhosttyClipboardReadReplyFn)(
  * GhosttyClipboardReadReply. This must happen before the callback returns;
  * the request is invalid afterwards. Calling `reply` more than once is
  * ignored. Returning without replying answers the program with an empty
- * clipboard.
+ * clipboard (OSC 52) or EPERM (OSC 5522).
  *
  * @ingroup terminal
  */
@@ -707,14 +708,21 @@ struct GhosttyClipboardRead {
  * Callback function type for clipboard_read.
  *
  * Called synchronously when the running program requests clipboard contents
- * via OSC 52 with a "?" payload. Answering lets the program read the user's
- * clipboard, so the embedder is expected to mediate consent. Because the
- * read is synchronous, an embedder that needs to ask the user must block
- * (for example by running a modal prompt) until it has an answer; the VT
- * stream waits until the callback returns.
+ * via OSC 52 with a "?" payload or a Kitty clipboard (OSC 5522) read.
+ * Answering lets the program read the user's clipboard, so the embedder is
+ * expected to mediate consent. Because the read is synchronous, an embedder
+ * that needs to ask the user must block (for example by running a modal
+ * prompt) until it has an answer; the VT stream waits until the callback
+ * returns.
  *
  * Answer by calling `read->reply(read, &reply)` before returning. See
  * GhosttyClipboardRead for the full contract.
+ *
+ * OSC 5522 requests carry the program's MIME list, name, and password grant
+ * state; a reply that sets `remember` records a session grant so later
+ * requests with the same password arrive with `granted` set. Kitty itself
+ * serves a request for only the targets listing (`list` with no `mimes`)
+ * without prompting.
  *
  * @param terminal The terminal handle
  * @param userdata The userdata pointer set via GHOSTTY_TERMINAL_OPT_USERDATA
@@ -1424,9 +1432,10 @@ typedef enum GHOSTTY_ENUM_TYPED {
 
   /**
    * Callback invoked when the running program requests clipboard contents
-   * via OSC 52 with a "?" payload. The read is synchronous and must be
-   * answered before the callback returns. Set to NULL to ignore clipboard
-   * read requests (the default).
+   * via OSC 52 with a "?" payload or a Kitty clipboard (OSC 5522) read. The
+   * read is synchronous and must be answered before the callback returns.
+   * Set to NULL (the default) to ignore OSC 52 read requests and refuse
+   * OSC 5522 reads with EPERM.
    *
    * Input type: GhosttyTerminalClipboardReadFn
    */
