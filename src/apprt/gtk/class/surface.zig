@@ -4173,9 +4173,7 @@ const Clipboard = struct {
         const surface = self.private().core_surface orelse return;
         surface.completeClipboardRequest(
             .paste,
-            &.{.{ .mime = "text/plain", .data = text }},
-            &.{},
-            false,
+            .{ .contents = &.{.{ .mime = "text/plain", .data = text }} },
         ) catch |err| switch (err) {
             error.UnsafePaste,
             error.UnauthorizedPaste,
@@ -4280,12 +4278,10 @@ const Clipboard = struct {
             ?[:0]const u8,
         ) orelse return;
 
-        surface.completeClipboardRequest(
-            req.*,
-            &.{.{ .mime = "text/plain", .data = text }},
-            &.{},
-            true,
-        ) catch |err| {
+        surface.completeClipboardRequest(req.*, .{
+            .contents = &.{.{ .mime = "text/plain", .data = text }},
+            .confirmed = true,
+        }) catch |err| {
             log.warn("failed to complete clipboard request: {}", .{err});
         };
     }
@@ -4341,9 +4337,7 @@ const Clipboard = struct {
         const surface = self.private().core_surface orelse return;
         surface.completeClipboardRequest(
             req.state,
-            &.{.{ .mime = "text/plain", .data = str }},
-            &.{},
-            false,
+            .{ .contents = &.{.{ .mime = "text/plain", .data = str }} },
         ) catch |err| switch (err) {
             error.UnsafePaste,
             error.UnauthorizedPaste,

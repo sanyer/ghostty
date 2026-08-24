@@ -2,7 +2,7 @@ import SwiftUI
 
 /// This delegate is notified of the completion result of the clipboard confirmation dialog.
 protocol ClipboardConfirmationViewDelegate: AnyObject {
-    func clipboardConfirmationComplete(_ action: ClipboardConfirmationView.Action)
+    func clipboardConfirmationComplete(_ action: ClipboardConfirmationView.Action, remember: Bool)
 }
 
 /// The SwiftUI view for showing a clipboard confirmation dialog.
@@ -31,8 +31,19 @@ struct ClipboardConfirmationView: View {
     /// The type of the clipboard request
     let request: Ghostty.ClipboardRequest
 
+    /// The human friendly name of the requesting program, when the
+    /// protocol carries one.
+    var programName: String?
+
+    /// True when the user's decision may be remembered as a session
+    /// grant, showing the remember toggle.
+    var canRemember: Bool = false
+
     /// Optional delegate to get results. If this is nil, then this view will never close on its own.
     weak var delegate: ClipboardConfirmationViewDelegate?
+
+    /// Whether the user's decision should be remembered for the session.
+    @State private var remember: Bool = false
 
     /// Used to track if we should rehide on disappear
     @State private var cursorHiddenCount: UInt = 0
@@ -46,7 +57,7 @@ struct ClipboardConfirmationView: View {
                     .padding()
                     .frame(alignment: .center)
 
-                Text(request.text())
+                Text(request.text(name: programName))
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding()
             }
@@ -54,6 +65,11 @@ struct ClipboardConfirmationView: View {
             TextEditor(text: .constant(contents))
                 .focusable(false)
                 .font(.system(.body, design: .monospaced))
+
+            if canRemember {
+                Toggle("Remember this choice for the session", isOn: $remember)
+                    .padding(.top, 4)
+            }
 
             HStack {
                 Spacer()
@@ -87,10 +103,10 @@ struct ClipboardConfirmationView: View {
     }
 
     private func onCancel() {
-        delegate?.clipboardConfirmationComplete(.cancel)
+        delegate?.clipboardConfirmationComplete(.cancel, remember: false)
     }
 
     private func onPaste() {
-        delegate?.clipboardConfirmationComplete(.confirm)
+        delegate?.clipboardConfirmationComplete(.confirm, remember: remember)
     }
 }

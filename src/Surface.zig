@@ -5847,68 +5847,110 @@ fn writeScreenFile(
     retain_tmp_dir = true;
 }
 
+/// The payload for completing a clipboard request with
+/// completeClipboardRequest.
+pub const CompleteClipboard = struct {
+    /// The representations the apprt could serve for the request's MIME
+    /// types. These are immediately copied as needed so they only need
+    /// to live for the duration of the completion call. Requesters that
+    /// only carry text (paste, OSC 52) use the first text-like
+    /// representation.
+    contents: []const terminal.clipboard.Content = &.{},
+
+    /// The listing of MIME types available on the clipboard, only
+    /// gathered when the request asked for it.
+    available: []const []const u8 = &.{},
+
+    /// True if any clipboard confirmation prompt was already answered
+    /// by the user, skipping further prompts:
+    ///
+    ///   - For "regular" pasting this means that unsafe pastes are
+    ///     allowed. Unsafe data is defined as data that contains
+    ///     newlines, though this definition may change later to detect
+    ///     other scenarios.
+    ///
+    ///   - For OSC 52 and Kitty clipboard protocol reads and writes no
+    ///     prompt is shown to the user when this is true.
+    confirmed: bool = false,
+
+    /// True if the user asked to remember their decision. This is only
+    /// honored by request types that support session grants (Kitty
+    /// clipboard protocol requests carrying a password).
+    remember: bool = false,
+};
+
 /// Call this to complete a clipboard request sent to apprt. This should
-/// only be called once for each request. All contents are immediately
-/// copied so it is safe to free them after this call.
+/// only be called once for each request.
 ///
-/// The contents are the representations the apprt could serve for the
-/// request's MIME types and `available` is the listing of MIME types on
-/// the clipboard (only gathered when the request asked for it).
-/// Requesters that only carry text (paste, OSC 52) use the first
-/// text-like representation.
-///
-/// If `confirmed` is true then any clipboard confirmation prompts are skipped:
-///
-///   - For "regular" pasting this means that unsafe pastes are allowed. Unsafe
-///     data is defined as data that contains newlines, though this definition
-///     may change later to detect other scenarios.
-///
-///   - For OSC 52 and Kitty clipboard protocol reads and writes no prompt
-///     is shown to the user if `confirmed` is true.
-///
-/// If `confirmed` is false then this may return either an UnsafePaste or
-/// UnauthorizedPaste error, depending on the type of clipboard request.
+/// If `complete.confirmed` is false then this may return either an
+/// UnsafePaste or UnauthorizedPaste error, depending on the type of
+/// clipboard request. The request state remains alive in that case so
+/// the apprt can run its confirmation flow.
 pub fn completeClipboardRequest(
     self: *Surface,
     req: apprt.ClipboardRequest,
-    contents: []const terminal.clipboard.Content,
-    available: []const []const u8,
-    confirmed: bool,
+    complete: CompleteClipboard,
 ) !void {
     switch (req) {
         .paste => try self.completeClipboardPaste(
-            clipboardTextContent(contents) orelse "",
-            confirmed,
+            clipboardTextContent(complete.contents) orelse "",
+            complete.confirmed,
         ),
 
         .osc_52_read => |clipboard| try self.completeClipboardReadOSC52(
-            clipboardTextContent(contents) orelse "",
+            clipboardTextContent(complete.contents) orelse "",
             clipboard,
-            confirmed,
+            complete.confirmed,
         ),
 
         .osc_52_write => |clipboard| {
             // The write API wants sentinel-terminated data; the write
             // text round-tripped through the apprt confirmation flow as
             // a plain representation.
-            const data = try self.alloc.dupeZ(u8, clipboardTextContent(contents) orelse "");
+            const data = try self.alloc.dupeZ(
+                u8,
+                clipboardTextContent(complete.contents) orelse "",
+            );
             defer self.alloc.free(data);
             try self.rt_surface.setClipboard(clipboard, &.{.{
                 .mime = "text/plain",
                 .data = data,
-            }}, !confirmed);
+            }}, !complete.confirmed);
         },
 
         .kitty_read => |kitty| {
             // If we need confirmation we return an error without
             // consuming the request state; the apprt keeps it alive
-            // for the confirmation flow.
-            if (self.config.clipboard_read == .ask and !confirmed) {
+            // for the confirmation flow. A session grant carried by
+            // the request skips the prompt.
+            if (self.config.clipboard_read == .ask and
+                !complete.confirmed and
+                !kitty.granted)
+            {
                 return error.UnauthorizedPaste;
             }
 
+            // Past the confirmation check the request is consumed:
+            // every path from here, including errors, must destroy it.
             defer kitty.destroy();
-            try self.completeKittyClipboardRead(kitty, contents, available);
+
+            // Record a session grant when the user asked to remember
+            // their decision and the request carried a usable
+            // password. The grants live with the terminal state on
+            // the IO thread.
+            if (complete.remember and kitty.pw.len > 0) {
+                const pw = try self.alloc.dupe(u8, kitty.pw);
+                self.queueIo(.{ .kitty_clipboard_grant = .{
+                    .alloc = self.alloc,
+                    .pw = pw,
+                } }, .unlocked);
+            }
+
+            try self.completeKittyClipboardRead(
+                kitty,
+                complete.contents,
+                complete.available,
+            );
         },
     }
 }

@@ -68,13 +68,10 @@ extension Ghostty {
                         mimes: mimes,
                         mimesLen: mimesLen,
                         list: list) },
-                confirm_read_clipboard_cb: { userdata, contents, contentsLen, available, availableLen, state, request in
+                confirm_read_clipboard_cb: { userdata, confirm, state, request in
                     App.confirmReadClipboard(
                         userdata,
-                        contents: contents,
-                        contentsLen: contentsLen,
-                        available: available,
-                        availableLen: availableLen,
+                        confirm: confirm,
                         state: state,
                         request: request) },
                 write_clipboard_cb: { userdata, loc, content, len, confirm in
@@ -352,38 +349,37 @@ extension Ghostty {
 
         static func confirmReadClipboard(
             _ userdata: UnsafeMutableRawPointer?,
-            contents: UnsafePointer<ghostty_clipboard_content_s>?,
-            contentsLen: Int,
-            available: UnsafePointer<UnsafePointer<CChar>?>?,
-            availableLen: Int,
+            confirm: UnsafePointer<ghostty_clipboard_confirm_s>?,
             state: UnsafeMutableRawPointer?,
             request: ghostty_clipboard_request_e
         ) {
             let surfaceView = self.surfaceUserdata(from: userdata)
             guard let surface = surfaceView.surface else { return }
-            guard let kind = Ghostty.ClipboardRequest.from(request: request) else {
+            guard let confirm,
+                  let kind = Ghostty.ClipboardRequest.from(request: request) else {
                 ghostty_surface_deny_clipboard_request(surface, state)
                 return
             }
+            let c = confirm.pointee
 
             // Copy the borrowed C representations: the confirmation is
             // asynchronous and completes with exactly what the user
             // approved, so the clipboard is never re-read.
             var reps: [Ghostty.ClipboardContent] = []
-            if let contents {
-                for i in 0..<contentsLen {
-                    let c = contents[i]
-                    let data: Data = if c.len > 0 {
-                        Data(bytes: c.data, count: c.len)
+            if let contents = c.contents {
+                for i in 0..<c.contents_len {
+                    let content = contents[i]
+                    let data: Data = if content.len > 0 {
+                        Data(bytes: content.data, count: content.len)
                     } else {
                         Data()
                     }
-                    reps.append(.init(mime: String(cString: c.mime), data: data))
+                    reps.append(.init(mime: String(cString: content.mime), data: data))
                 }
             }
             var avail: [String] = []
-            if let available {
-                for i in 0..<availableLen {
+            if let available = c.available {
+                for i in 0..<c.available_len {
                     guard let ptr = available[i] else { continue }
                     avail.append(String(cString: ptr))
                 }
@@ -401,8 +397,10 @@ extension Ghostty {
             let request = Ghostty.ClipboardConfirmationRequest(
                 surface: surfaceView,
                 contents: display,
-                kind: kind
-            ) { surfaceView, confirmed in
+                kind: kind,
+                programName: c.name.map { String(cString: $0) },
+                canRemember: c.can_remember
+            ) { surfaceView, confirmed, remember in
                 guard let surface = surfaceView.surface else { return }
                 if confirmed {
                     completeClipboardRequest(
@@ -410,7 +408,8 @@ extension Ghostty {
                         contents: reps,
                         available: avail,
                         state: state,
-                        confirmed: true)
+                        confirmed: true,
+                        remember: remember)
                 } else {
                     ghostty_surface_deny_clipboard_request(surface, state)
                 }
@@ -423,7 +422,8 @@ extension Ghostty {
             contents: [Ghostty.ClipboardContent],
             available: [String],
             state: UnsafeMutableRawPointer?,
-            confirmed: Bool = false
+            confirmed: Bool = false,
+            remember: Bool = false
         ) {
             // Copy everything into C memory for the duration of the call.
             var cStrings: [UnsafeMutablePointer<CChar>] = []
@@ -461,14 +461,14 @@ extension Ghostty {
 
             cContents.withUnsafeBufferPointer { contentsBuf in
                 cAvailable.withUnsafeBufferPointer { availableBuf in
-                    ghostty_surface_complete_clipboard_request(
-                        surface,
-                        contentsBuf.baseAddress,
-                        contentsBuf.count,
-                        availableBuf.baseAddress,
-                        availableBuf.count,
-                        state,
-                        confirmed)
+                    var complete = ghostty_clipboard_complete_s(
+                        contents: contentsBuf.baseAddress,
+                        contents_len: contentsBuf.count,
+                        available: availableBuf.baseAddress,
+                        available_len: availableBuf.count,
+                        confirmed: confirmed,
+                        remember: remember)
+                    ghostty_surface_complete_clipboard_request(surface, &complete, state)
                 }
             }
         }
@@ -521,7 +521,7 @@ extension Ghostty {
                 surface: surfaceView,
                 contents: textPlainString,
                 kind: .osc_52_write
-            ) { _, confirmed in
+            ) { _, confirmed, _ in
                 guard confirmed else { return }
                 pasteboard.declareTypes([.string], owner: nil)
                 pasteboard.setString(textPlainString, forType: .string)

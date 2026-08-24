@@ -68,6 +68,10 @@ pub const StreamHandler = struct {
     /// The tmux control mode viewer state.
     tmux_viewer: if (tmux_enabled) ?*terminal.tmux.Viewer else void = if (tmux_enabled) null else {},
 
+    /// Session password grants for the Kitty clipboard protocol.
+    /// Requests carrying a granted password skip the permission prompt.
+    kitty_clipboard_grants: terminal.kitty.clipboard.Grants = .{},
+
     /// This is set to true when a message was written to the termio
     /// mailbox. This can be used by callers to determine if they need
     /// to wake up the termio thread.
@@ -85,6 +89,7 @@ pub const StreamHandler = struct {
     pub fn deinit(self: *StreamHandler) void {
         self.apc.deinit();
         self.dcs.deinit();
+        self.kitty_clipboard_grants.deinit(self.alloc);
         if (comptime tmux_enabled) tmux: {
             const viewer = self.tmux_viewer orelse break :tmux;
             viewer.deinit();
@@ -869,11 +874,21 @@ pub const StreamHandler = struct {
         self.terminal.fullReset();
         try self.setMouseShape(.text);
 
+        // Full reset clears Kitty clipboard session grants.
+        self.kitty_clipboard_grants.deinit(self.alloc);
+        self.kitty_clipboard_grants = .{};
+
         // Reset resets our palette so we report it for mode 2031.
         self.messageWriter(.{ .color_scheme_report = .{ .force = false } });
 
         // Clear the progress bar
         self.progressReport(.{ .state = .remove });
+    }
+
+    /// Record a Kitty clipboard protocol session grant so future
+    /// requests with this password skip the permission prompt.
+    pub fn kittyClipboardGrant(self: *StreamHandler, pw: []const u8) !void {
+        try self.kitty_clipboard_grants.grant(self.alloc, pw, .read, false);
     }
 
     pub fn queryKittyKeyboard(self: *StreamHandler) !void {
@@ -1085,9 +1100,11 @@ pub const StreamHandler = struct {
             mimes_len += 1;
         }
 
-        // Note: session grants (the pw/name metadata) aren't
-        // implemented in the GUI clipboard path yet, so every request
-        // goes through the configured clipboard-read policy.
+        // Per the spec a password without a name is no password. A
+        // stored session grant for it lets the surface skip its
+        // permission prompt.
+        const pw: []const u8 = if (meta.name.len > 0) meta.pw else "";
+        const granted = self.kitty_clipboard_grants.use(self.alloc, pw, .read);
 
         const req = try alloc.create(apprt.ClipboardRequest.KittyRead);
         const mimes = try alloc.alloc([:0]const u8, mimes_len);
@@ -1095,6 +1112,8 @@ pub const StreamHandler = struct {
             dst.* = try alloc.dupeZ(u8, src);
         }
         const id = try alloc.dupe(u8, meta.id);
+        const pw_owned = try alloc.dupe(u8, pw);
+        const name_owned = try alloc.dupeZ(u8, meta.name);
         req.* = .{
             // The arena must be copied in last so it tracks every
             // allocation above.
@@ -1106,6 +1125,9 @@ pub const StreamHandler = struct {
             .mimes = mimes,
             .list = list,
             .id = id,
+            .pw = pw_owned,
+            .name = name_owned,
+            .granted = granted,
             .terminator = terminator,
         };
 

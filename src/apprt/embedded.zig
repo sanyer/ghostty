@@ -77,14 +77,11 @@ pub const App = struct {
         /// This may be called after a read clipboard call to request
         /// confirmation that the clipboard value is safe to read. The
         /// embedder must call complete_clipboard_request (usually with
-        /// these same contents, which are only borrowed for this call) or
-        /// deny_clipboard_request with the given request.
+        /// the confirmation's contents, which are only borrowed for
+        /// this call) or deny_clipboard_request with the given request.
         confirm_read_clipboard: *const fn (
             SurfaceUD,
-            ?[*]const CAPI.ClipboardContent,
-            usize,
-            ?[*]const [*:0]const u8,
-            usize,
+            *const CAPI.ClipboardConfirm,
             *apprt.ClipboardRequest,
             apprt.ClipboardRequestType,
         ) callconv(.c) void,
@@ -767,12 +764,8 @@ pub const Surface = struct {
 
     fn completeClipboardRequest(
         self: *Surface,
-        contents_: ?[*]const CAPI.ClipboardContent,
-        contents_len: usize,
-        available_: ?[*]const [*:0]const u8,
-        available_len: usize,
+        complete: *const CAPI.ClipboardComplete,
         state: *apprt.ClipboardRequest,
-        confirmed: bool,
     ) void {
         const alloc = self.app.core_app.alloc;
 
@@ -782,7 +775,7 @@ pub const Surface = struct {
         const conv_alloc = stack.get();
 
         const raw_contents: []const CAPI.ClipboardContent =
-            if (contents_) |v| v[0..contents_len] else &.{};
+            if (complete.contents) |v| v[0..complete.contents_len] else &.{};
         const contents = conv_alloc.alloc(
             terminal.clipboard.Content,
             raw_contents.len,
@@ -798,7 +791,7 @@ pub const Surface = struct {
         };
 
         const raw_available: []const [*:0]const u8 =
-            if (available_) |v| v[0..available_len] else &.{};
+            if (complete.available) |v| v[0..complete.available_len] else &.{};
         const available = conv_alloc.alloc(
             []const u8,
             raw_available.len,
@@ -814,21 +807,35 @@ pub const Surface = struct {
 
         // Attempt to complete the request, but we may request
         // confirmation.
-        self.core_surface.completeClipboardRequest(
-            state.*,
-            contents,
-            available,
-            confirmed,
-        ) catch |err| switch (err) {
+        self.core_surface.completeClipboardRequest(state.*, .{
+            .contents = contents,
+            .available = available,
+            .confirmed = complete.confirmed,
+            .remember = complete.remember,
+        }) catch |err| switch (err) {
             error.UnsafePaste,
             error.UnauthorizedPaste,
             => {
+                // Session grant information for the permission prompt,
+                // carried only by Kitty clipboard protocol requests.
+                const name: ?[*:0]const u8, const can_remember: bool = switch (state.*) {
+                    .kitty_read => |kitty| .{
+                        if (kitty.name.len > 0) kitty.name.ptr else null,
+                        kitty.pw.len > 0,
+                    },
+                    else => .{ null, false },
+                };
+
                 self.app.opts.confirm_read_clipboard(
                     self.userdata,
-                    contents_,
-                    contents_len,
-                    available_,
-                    available_len,
+                    &.{
+                        .contents = complete.contents,
+                        .contents_len = complete.contents_len,
+                        .available = complete.available,
+                        .available_len = complete.available_len,
+                        .name = name,
+                        .can_remember = can_remember,
+                    },
                     state,
                     state.*,
                 );
@@ -1410,6 +1417,41 @@ pub const CAPI = struct {
         mime: [*:0]const u8,
         data: [*]const u8,
         len: usize,
+    };
+
+    // ghostty_clipboard_complete_s
+    //
+    // The payload for completing a clipboard read request. See
+    // Surface.CompleteClipboard for the field documentation.
+    const ClipboardComplete = extern struct {
+        contents: ?[*]const ClipboardContent,
+        contents_len: usize,
+        available: ?[*]const [*:0]const u8,
+        available_len: usize,
+        confirmed: bool,
+        remember: bool,
+    };
+
+    // ghostty_clipboard_confirm_s
+    //
+    // The payload of a clipboard read confirmation request: the
+    // would-be completion contents plus the information shown in the
+    // permission prompt. All memory is borrowed for the duration of
+    // the confirm_read_clipboard callback.
+    const ClipboardConfirm = extern struct {
+        contents: ?[*]const ClipboardContent,
+        contents_len: usize,
+        available: ?[*]const [*:0]const u8,
+        available_len: usize,
+
+        /// The human friendly name of the requesting program for the
+        /// prompt, null when the protocol doesn't carry one.
+        name: ?[*:0]const u8,
+
+        /// True when the user's decision may be remembered as a
+        /// session grant, reported back through the completion's
+        /// remember field.
+        can_remember: bool,
     };
 
     // ghostty_text_s
@@ -2112,21 +2154,10 @@ pub const CAPI = struct {
     /// instead.
     export fn ghostty_surface_complete_clipboard_request(
         ptr: *Surface,
-        contents: ?[*]const ClipboardContent,
-        contents_len: usize,
-        available: ?[*]const [*:0]const u8,
-        available_len: usize,
+        complete: *const ClipboardComplete,
         state: *apprt.ClipboardRequest,
-        confirmed: bool,
     ) void {
-        ptr.completeClipboardRequest(
-            contents,
-            contents_len,
-            available,
-            available_len,
-            state,
-            confirmed,
-        );
+        ptr.completeClipboardRequest(complete, state);
     }
 
     /// Deny a clipboard read request started via the read callback,

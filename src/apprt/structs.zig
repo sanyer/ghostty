@@ -131,6 +131,20 @@ pub const ClipboardRequest = union(ClipboardRequestType) {
         /// The sanitized request id, echoed in every response packet.
         id: []const u8,
 
+        /// The effective session password, empty when the request had
+        /// none. A non-empty password means the user's decision may be
+        /// remembered as a session grant.
+        pw: []const u8,
+
+        /// The human friendly name of the requesting program, shown in
+        /// permission prompts. Empty when absent. Sentinel-terminated
+        /// so it can cross a C apprt boundary without copies.
+        name: [:0]const u8,
+
+        /// True when a stored session grant already covers this
+        /// request, so any permission prompt is skipped.
+        granted: bool,
+
         /// The response terminator, matching the request's.
         terminator: terminal.osc.Terminator,
 

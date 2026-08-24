@@ -17,8 +17,11 @@ extension Ghostty {
         /// the Kitty clipboard protocol (OSC 5522).
         case kitty_read
 
-        /// The text to show in the clipboard confirmation prompt for this request.
-        func text() -> String {
+        /// The text to show in the clipboard confirmation prompt for this
+        /// request. The name is the requesting program's human friendly
+        /// name, when the protocol carries one.
+        func text(name: String? = nil) -> String {
+            let program = name.map { "\"\($0)\"" } ?? "An application"
             switch self {
             case .paste:
                 return """
@@ -26,12 +29,12 @@ extension Ghostty {
                 """
             case .osc_52_read, .kitty_read:
                 return """
-                An application is attempting to read from the clipboard.
+                \(program) is attempting to read from the clipboard.
                 The current clipboard contents are shown below.
                 """
             case .osc_52_write:
                 return """
-                An application is attempting to write to the clipboard.
+                \(program) is attempting to write to the clipboard.
                 The content to write is shown below.
                 """
             }
@@ -70,18 +73,31 @@ extension Ghostty {
 
         let kind: ClipboardRequest
 
-        /// Called exactly once with whether the user confirmed the request.
-        private var completion: ((SurfaceView, Bool) -> Void)?
+        /// The human friendly name of the requesting program to show in
+        /// the prompt, when the protocol carries one.
+        let programName: String?
+
+        /// True when the user's decision may be remembered as a session
+        /// grant, showing a remember option in the prompt.
+        let canRemember: Bool
+
+        /// Called exactly once with whether the user confirmed the
+        /// request and whether their decision should be remembered.
+        private var completion: ((SurfaceView, Bool, Bool) -> Void)?
 
         init(
             surface: SurfaceView,
             contents: String,
             kind: ClipboardRequest,
-            completion: @escaping (SurfaceView, Bool) -> Void
+            programName: String? = nil,
+            canRemember: Bool = false,
+            completion: @escaping (SurfaceView, Bool, Bool) -> Void
         ) {
             self.surface = surface
             self.contents = contents
             self.kind = kind
+            self.programName = programName
+            self.canRemember = canRemember
             self.completion = completion
         }
 
@@ -89,13 +105,13 @@ extension Ghostty {
             guard let surface, let completion else { return }
             self.completion = nil
             DispatchQueue.main.async {
-                completion(surface, false)
+                completion(surface, false, false)
             }
         }
 
         /// Complete the request with the displayed clipboard contents.
-        func complete() {
-            finish(true)
+        func complete(remember: Bool = false) {
+            finish(true, remember: remember)
         }
 
         /// Cancel the request, denying access to the clipboard contents.
@@ -112,6 +128,7 @@ extension Ghostty {
 
         private func finish(
             _ confirmed: Bool,
+            remember: Bool = false,
             on explicitSurface: SurfaceView? = nil
         ) {
             guard let surface = explicitSurface ?? self.surface,
@@ -120,7 +137,7 @@ extension Ghostty {
                 return
             }
             self.completion = nil
-            completion(surface, confirmed)
+            completion(surface, confirmed, remember)
         }
     }
 }
