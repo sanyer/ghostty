@@ -85,6 +85,12 @@ pub const Handler = struct {
     /// remember the user's decision.
     kitty_clipboard_grants: kitty_clipboard.Grants = .{},
 
+    /// Maximum total decoded bytes accumulated by one Kitty clipboard
+    /// protocol (OSC 5522) write transaction, captured when the
+    /// transaction begins. Text data beyond the limit is truncated;
+    /// non-text data fails the transaction with EFBIG.
+    kitty_clipboard_write_max_bytes: usize = kitty_clipboard.max_write_size,
+
     /// Called for sequence identifiers not supported by this library.
     /// Currently, only APC is reported. Content is borrowed and only valid
     /// for the duration of the callback. Set `apc_handler.unknown_max_bytes`
@@ -1010,7 +1016,9 @@ pub const Handler = struct {
         const alloc = self.terminal.gpa();
         const state = try alloc.create(kitty_clipboard.WriteState);
         errdefer alloc.destroy(state);
-        state.* = try .init(alloc, meta);
+        state.* = try .init(alloc, meta, .{
+            .max_size = self.kitty_clipboard_write_max_bytes,
+        });
         self.kitty_clipboard_write = state;
     }
 
@@ -1044,6 +1052,14 @@ pub const Handler = struct {
                 );
                 return error.OutOfMemory;
             },
+
+            // Non-text data over the write limit aborts the
+            // transaction: truncated binary data would be corrupt.
+            error.TooLarge => self.kittyClipboardFinish(
+                state,
+                .EFBIG,
+                terminator,
+            ),
         };
     }
 
@@ -4247,6 +4263,40 @@ test "kitty clipboard invalid walias payload aborts with EINVAL" {
     try testing.expectEqual(@as(usize, 0), S.write_count);
     try testing.expectEqualStrings(
         "\x1B]5522;type=write:status=EINVAL:id=w\x1B\\",
+        S.responseSlice(),
+    );
+}
+
+test "kitty clipboard oversized non-text write aborts with EFBIG" {
+    var t: Terminal = try .init(testing.io, testing.allocator, .{ .cols = 80, .rows = 24 });
+    defer t.deinit(testing.allocator);
+
+    const S = KittyClipboardCapture;
+    S.reset();
+
+    var handler: Handler = .init(&t);
+    handler.effects.write_pty = &S.writePty;
+    handler.effects.clipboard_write = &S.clipboardWrite;
+    var s: Stream = .init(.{ .allocator = testing.allocator, .handler = handler });
+    defer s.deinit();
+
+    // Shrink the limit so the test doesn't have to stream the
+    // default 32MiB.
+    s.handler.kitty_clipboard_write_max_bytes = 4;
+
+    s.nextSlice("\x1B]5522;type=write:id=w\x1B\\");
+    s.nextSlice("\x1B]5522;type=wdata:mime=aW1hZ2UvcG5n;SGVsbG9Xb3JsZA==\x1B\\");
+    try testing.expectEqualStrings(
+        "\x1B]5522;type=write:status=EFBIG:id=w\x1B\\",
+        S.responseSlice(),
+    );
+    try testing.expect(!s.handler.semantic_failure);
+
+    // The transaction is gone: a commit does nothing further.
+    s.nextSlice("\x1B]5522;type=wdata\x1B\\");
+    try testing.expectEqual(@as(usize, 0), S.write_count);
+    try testing.expectEqualStrings(
+        "\x1B]5522;type=write:status=EFBIG:id=w\x1B\\",
         S.responseSlice(),
     );
 }

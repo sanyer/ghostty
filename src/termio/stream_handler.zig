@@ -51,6 +51,10 @@ pub const StreamHandler = struct {
     /// The clipboard write access configuration.
     clipboard_write: configpkg.ClipboardAccess,
 
+    /// Maximum total decoded bytes per Kitty clipboard protocol
+    /// (OSC 5522) write transaction; data beyond this is truncated.
+    clipboard_write_limit: usize,
+
     //---------------------------------------------------------------
     // Internal state
 
@@ -114,6 +118,7 @@ pub const StreamHandler = struct {
     pub fn changeConfig(self: *StreamHandler, config: *termio.DerivedConfig) void {
         self.osc_color_report_format = config.osc_color_report_format;
         self.clipboard_write = config.clipboard_write;
+        self.clipboard_write_limit = config.clipboard_write_limit;
         self.enquiry_response = config.enquiry_response;
         self.terminal.setDefaultCursorStyle(config.cursor_style);
         self.terminal.setDefaultCursorBlink(config.cursor_blink);
@@ -1174,7 +1179,9 @@ pub const StreamHandler = struct {
 
         const state = try self.alloc.create(terminal.kitty.clipboard.WriteState);
         errdefer self.alloc.destroy(state);
-        state.* = try .init(self.alloc, meta);
+        state.* = try .init(self.alloc, meta, .{
+            .max_size = self.clipboard_write_limit,
+        });
         self.kitty_clipboard_write = state;
     }
 
@@ -1210,6 +1217,14 @@ pub const StreamHandler = struct {
                 );
                 return error.OutOfMemory;
             },
+
+            // Non-text data over the write limit aborts the
+            // transaction: truncated binary data would be corrupt.
+            error.TooLarge => try self.kittyClipboardWriteFinish(
+                state,
+                .EFBIG,
+                terminator,
+            ),
         };
     }
 
