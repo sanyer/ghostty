@@ -13,6 +13,10 @@ extension Ghostty {
         /// An application is attempting to write to the clipboard using OSC 52.
         case osc_52_write
 
+        /// An application is attempting to read from the clipboard using
+        /// the Kitty clipboard protocol (OSC 5522).
+        case kitty_read
+
         /// The text to show in the clipboard confirmation prompt for this request.
         func text() -> String {
             switch self {
@@ -20,7 +24,7 @@ extension Ghostty {
                 return """
                 Pasting this text to the terminal may be dangerous as it looks like some commands may be executed.
                 """
-            case .osc_52_read:
+            case .osc_52_read, .kitty_read:
                 return """
                 An application is attempting to read from the clipboard.
                 The current clipboard contents are shown below.
@@ -41,6 +45,8 @@ extension Ghostty {
                 return .osc_52_read
             case GHOSTTY_CLIPBOARD_REQUEST_OSC_52_WRITE:
                 return .osc_52_write
+            case GHOSTTY_CLIPBOARD_REQUEST_KITTY_READ:
+                return .kitty_read
             default:
                 return nil
             }

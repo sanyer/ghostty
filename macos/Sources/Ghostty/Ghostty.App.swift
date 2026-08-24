@@ -287,19 +287,24 @@ extension Ghostty {
             _ userdata: UnsafeMutableRawPointer?,
             location: ghostty_clipboard_e,
             state: UnsafeMutableRawPointer?
-        ) -> Bool {
+        ) -> ghostty_clipboard_read_result_e {
             let surfaceView = self.surfaceUserdata(from: userdata)
-            guard let surface = surfaceView.surface else { return false }
+            guard let surface = surfaceView.surface else {
+                return GHOSTTY_CLIPBOARD_READ_UNSUPPORTED
+            }
 
             // Get our pasteboard
-            guard let pasteboard = NSPasteboard.ghostty(location) else { return false }
+            guard let pasteboard = NSPasteboard.ghostty(location) else {
+                return GHOSTTY_CLIPBOARD_READ_UNSUPPORTED
+            }
 
-            // Return false if there is no text-like clipboard content so
-            // performable paste bindings can pass through to the terminal.
-            guard let str = pasteboard.getOpinionatedStringContents() else { return false }
+            // We can only serve text-like clipboard contents.
+            guard let str = pasteboard.getOpinionatedStringContents() else {
+                return GHOSTTY_CLIPBOARD_READ_UNAVAILABLE
+            }
 
             completeClipboardRequest(surface, data: str, state: state)
-            return true
+            return GHOSTTY_CLIPBOARD_READ_STARTED
         }
 
         static func confirmReadClipboard(
@@ -325,7 +330,7 @@ extension Ghostty {
                 guard let surface = surfaceView.surface else { return }
                 completeClipboardRequest(
                     surface,
-                    data: contents ?? "",
+                    data: contents,
                     state: state,
                     confirmed: true)
             }
@@ -334,10 +339,16 @@ extension Ghostty {
 
         private static func completeClipboardRequest(
             _ surface: ghostty_surface_t,
-            data: String,
+            data: String?,
             state: UnsafeMutableRawPointer?,
             confirmed: Bool = false
         ) {
+            // Nil data denies the request.
+            guard let data else {
+                ghostty_surface_complete_clipboard_request(surface, nil, state, confirmed)
+                return
+            }
+
             data.withCString { ptr in
                 ghostty_surface_complete_clipboard_request(surface, ptr, state, confirmed)
             }

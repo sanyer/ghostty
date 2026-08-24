@@ -197,7 +197,7 @@ pub const ClipboardConfirmationDialog = extern struct {
                 self.as(Dialog.Parent).setHeading(i18n._("Authorize Clipboard Access"));
                 self.as(Dialog.Parent).setBody(i18n._("An application is attempting to write to the clipboard. The current clipboard contents are shown below."));
             },
-            .osc_52_read => {
+            .osc_52_read, .kitty_read => {
                 self.as(Dialog.Parent).setHeading(i18n._("Authorize Clipboard Access"));
                 self.as(Dialog.Parent).setBody(i18n._("An application is attempting to read from the clipboard. The current clipboard contents are shown below."));
             },

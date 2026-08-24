@@ -352,11 +352,11 @@ pub const StreamHandler = struct {
             .apc_end => try self.apcEnd(),
             .apc_put => self.apc.feed(self.alloc, value),
             .apc_put_slice => self.apc.feedSlice(self.alloc, value.bytes),
+            .kitty_clipboard => try self.kittyClipboard(value),
 
             // Unimplemented
             .title_push,
             .title_pop,
-            .kitty_clipboard,
             .kitty_dnd,
             => {},
         }
@@ -988,6 +988,126 @@ pub const StreamHandler = struct {
                 .clipboard_type = clipboard_type,
             },
         });
+    }
+
+    /// Handle one Kitty clipboard protocol (OSC 5522) packet.
+    fn kittyClipboard(
+        self: *StreamHandler,
+        v: terminal.osc.Command.KittyClipboardProtocol,
+    ) !void {
+        const kitty_clipboard = terminal.kitty.clipboard;
+
+        // Decode and validate the metadata. Malformed metadata drops
+        // the packet without any response, matching kitty.
+        var arena: std.heap.ArenaAllocator = .init(self.alloc);
+        defer arena.deinit();
+        const meta = (try kitty_clipboard.Metadata.parse(
+            arena.allocator(),
+            v.metadata,
+        )) orelse return;
+
+        switch (meta.op) {
+            .read => try self.kittyClipboardRead(
+                &meta,
+                v.payload orelse "",
+                v.terminator,
+            ),
+
+            // Writes aren't implemented in the GUI yet. Failing the
+            // transaction up front matches a libghostty-vt handler
+            // without a clipboard_write effect and spares the program
+            // from waiting on a commit response that never comes.
+            .write => {
+                var stream: std.Io.Writer.Allocating = .init(self.alloc);
+                defer stream.deinit();
+                try (kitty_clipboard.Response{
+                    .op = .write,
+                    .status = .ENOSYS,
+                    .id = meta.id,
+                    .terminator = v.terminator,
+                }).encode(&stream.writer);
+                self.messageWriter(.{ .write_alloc = .{
+                    .alloc = self.alloc,
+                    .data = try stream.toOwnedSlice(),
+                } });
+            },
+
+            // Data packets without an accepted write transaction are
+            // silently ignored, matching kitty.
+            .wdata, .walias => {},
+        }
+    }
+
+    fn kittyClipboardRead(
+        self: *StreamHandler,
+        meta: *const terminal.kitty.clipboard.Metadata,
+        payload: []const u8,
+        terminator: terminal.osc.Terminator,
+    ) !void {
+        const kitty_clipboard = terminal.kitty.clipboard;
+
+        // Everything about the request, including the request struct
+        // itself, lives in a single arena that crosses to the surface
+        // thread, which owns it from the moment the message is sent.
+        var arena: std.heap.ArenaAllocator = .init(self.alloc);
+        errdefer arena.deinit();
+        const alloc = arena.allocator();
+
+        // The payload is the requested MIME list. A read request with
+        // an undecodable payload is dropped without any response,
+        // matching kitty.
+        const decoded = kitty_clipboard.Payload.init(
+            alloc,
+            payload,
+        ) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.Invalid => {
+                arena.deinit();
+                return;
+            },
+        };
+
+        // The targets type ('.') asks for the listing of available
+        // types rather than data. Requested types beyond the cap are
+        // dropped and simply never served, which is how the protocol
+        // reports an unavailable type anyway. The MIME slices point
+        // into the decoded payload, which shares the request arena.
+        var mimes_buf: [kitty_clipboard.max_read_mimes][]const u8 = undefined;
+        var mimes_len: usize = 0;
+        var list = false;
+        var it = decoded.mimeIterator();
+        while (it.next()) |mime| {
+            if (std.mem.eql(u8, mime, kitty_clipboard.targets_mime)) {
+                list = true;
+                continue;
+            }
+            if (mimes_len == mimes_buf.len) continue;
+            mimes_buf[mimes_len] = mime;
+            mimes_len += 1;
+        }
+
+        // Note: session grants (the pw/name metadata) aren't
+        // implemented in the GUI clipboard path yet, so every request
+        // goes through the configured clipboard-read policy.
+
+        const req = try alloc.create(apprt.ClipboardRequest.KittyRead);
+        const mimes = try alloc.dupe([]const u8, mimes_buf[0..mimes_len]);
+        const id = try alloc.dupe(u8, meta.id);
+        req.* = .{
+            // The arena must be copied in last so it tracks every
+            // allocation above.
+            .arena = arena,
+            .location = switch (meta.loc) {
+                .primary => .primary,
+                else => .standard,
+            },
+            .mimes = mimes,
+            .list = list,
+            .id = id,
+            .terminator = terminator,
+        };
+
+        self.surfaceMessageWriter(.{ .kitty_clipboard_read = req });
     }
 
     fn semanticPrompt(

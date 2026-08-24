@@ -52,11 +52,17 @@ pub const App = struct {
         /// Callback called to handle an action.
         action: *const fn (*App, apprt.Target.C, apprt.Action.C) callconv(.c) bool,
 
-        /// Read the clipboard value. Returns true if the clipboard request
-        /// was started and complete_clipboard_request may be called with the
-        /// given state pointer. Returns false if the clipboard request couldn't
-        /// be started (such as when no text is available for a paste request).
-        read_clipboard: *const fn (SurfaceUD, c_int, *apprt.ClipboardRequest) callconv(.c) bool,
+        /// Read the clipboard value. The result only reports facts about
+        /// the clipboard: whether the request was started (in which case
+        /// complete_clipboard_request must eventually be called with the
+        /// given state pointer), whether the clipboard has no servable
+        /// contents, or whether the clipboard can't be read at all. How
+        /// each non-started state is answered is up to the core.
+        read_clipboard: *const fn (
+            SurfaceUD,
+            c_int,
+            *apprt.ClipboardRequest,
+        ) callconv(.c) apprt.ClipboardReadResult,
 
         /// This may be called after a read clipboard call to request
         /// confirmation that the clipboard value is safe to read. The embedder
@@ -692,7 +698,7 @@ pub const Surface = struct {
         self: *Surface,
         clipboard_type: apprt.Clipboard,
         state: apprt.ClipboardRequest,
-    ) !bool {
+    ) !apprt.ClipboardReadResult {
         // We need to allocate to get a pointer to store our clipboard request
         // so that it is stable until the read_clipboard callback and call
         // complete_clipboard_request. This sucks but clipboard requests aren't
@@ -702,26 +708,31 @@ pub const Surface = struct {
         errdefer alloc.destroy(state_ptr);
         state_ptr.* = state;
 
-        const started = self.app.opts.read_clipboard(
+        const result = self.app.opts.read_clipboard(
             self.userdata,
             @intCast(@intFromEnum(clipboard_type)),
             state_ptr,
         );
-        if (!started) {
-            alloc.destroy(state_ptr);
-            return false;
-        }
 
-        return true;
+        // Only a started request completes later and keeps the state.
+        if (result != .started) alloc.destroy(state_ptr);
+        return result;
     }
 
     fn completeClipboardRequest(
         self: *Surface,
-        str: [:0]const u8,
+        str_: ?[:0]const u8,
         state: *apprt.ClipboardRequest,
         confirmed: bool,
     ) void {
         const alloc = self.app.core_app.alloc;
+
+        // No string means the request was denied by the user.
+        const str = str_ orelse {
+            self.core_surface.denyClipboardRequest(state.*);
+            alloc.destroy(state);
+            return;
+        };
 
         // Attempt to complete the request, but we may request
         // confirmation.
@@ -1998,14 +2009,18 @@ pub const CAPI = struct {
     /// Complete a clipboard read request started via the read callback.
     /// This can only be called once for a given request. Once it is called
     /// with a request the request pointer will be invalidated.
+    ///
+    /// A null string denies the request: request types whose protocol
+    /// expects an answer (e.g. Kitty clipboard protocol reads) have
+    /// their denial reply written to the pty.
     export fn ghostty_surface_complete_clipboard_request(
         ptr: *Surface,
-        str: [*:0]const u8,
+        str: ?[*:0]const u8,
         state: *apprt.ClipboardRequest,
         confirmed: bool,
     ) void {
         ptr.completeClipboardRequest(
-            std.mem.sliceTo(str, 0),
+            if (str) |v| std.mem.sliceTo(v, 0) else null,
             state,
             confirmed,
         );
