@@ -54,20 +54,39 @@ extension NSPasteboard {
         return strings.joined(separator: " ")
     }
 
+    /// The file URLs on the pasteboard, e.g. files copied in Finder.
+    private var ghosttyFileURLs: [URL] {
+        (pasteboardItems ?? []).compactMap { item in
+            guard let plist = item.propertyList(forType: .fileURL),
+                  let url = NSURL(pasteboardPropertyList: plist, ofType: .fileURL) as URL?,
+                  url.isFileURL else { return nil }
+            return url
+        }
+    }
+
     /// The data for the given MIME type, if the pasteboard can serve it.
     ///
     /// The canonical "text/plain" type uses the opinionated string
     /// contents so that e.g. copying a file yields its escaped path;
-    /// this matches what pasting into the terminal produces. All other
+    /// this matches what pasting into the terminal produces. Copied
+    /// files are additionally served as "text/uri-list" (RFC 2483, the
+    /// type X11/Wayland clipboards carry file copies under). All other
     /// types are mapped through UTType.
     func ghosttyData(forMime mime: String) -> Data? {
-        if mime == "text/plain" {
+        switch mime {
+        case "text/plain":
             guard let str = getOpinionatedStringContents() else { return nil }
             return Data(str.utf8)
-        }
 
-        guard let type = NSPasteboard.PasteboardType(mimeType: mime) else { return nil }
-        return data(forType: type)
+        case "text/uri-list":
+            let urls = ghosttyFileURLs
+            guard !urls.isEmpty else { return nil }
+            return Data(urls.map { $0.absoluteString + "\r\n" }.joined().utf8)
+
+        default:
+            guard let type = NSPasteboard.PasteboardType(mimeType: mime) else { return nil }
+            return data(forType: type)
+        }
     }
 
     /// The MIME types available on the pasteboard, best-effort mapped
@@ -82,6 +101,14 @@ extension NSPasteboard {
         if getOpinionatedStringContents() != nil {
             result.append("text/plain")
             seen.insert("text/plain")
+        }
+
+        // Copied files are additionally served as a URI list. The
+        // generic mapping below never reports this since file URL
+        // pasteboard types have no MIME type.
+        if !ghosttyFileURLs.isEmpty {
+            result.append("text/uri-list")
+            seen.insert("text/uri-list")
         }
 
         for type in types ?? [] {
