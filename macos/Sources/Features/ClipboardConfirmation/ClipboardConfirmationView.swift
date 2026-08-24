@@ -39,6 +39,10 @@ struct ClipboardConfirmationView: View {
     /// grant, showing the remember toggle.
     var canRemember: Bool = false
 
+    /// An image decoded from the request contents, shown scaled in
+    /// place of most of the text area when present.
+    var previewImage: NSImage?
+
     /// Optional delegate to get results. If this is nil, then this view will never close on its own.
     weak var delegate: ClipboardConfirmationViewDelegate?
 
@@ -62,9 +66,17 @@ struct ClipboardConfirmationView: View {
                     .padding()
             }
 
-            TextEditor(text: .constant(contents))
-                .focusable(false)
-                .font(.system(.body, design: .monospaced))
+            if let previewImage {
+                Image(nsImage: previewImage)
+                    .resizable()
+                    .aspectRatio(contentMode: .fit)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .padding(.horizontal)
+            } else {
+                TextEditor(text: .constant(contents))
+                    .focusable(false)
+                    .font(.system(.body, design: .monospaced))
+            }
 
             if canRemember {
                 Toggle("Remember this choice for the session", isOn: $remember)

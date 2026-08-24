@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import GhosttyKit
 
@@ -81,6 +82,11 @@ extension Ghostty {
         /// grant, showing a remember option in the prompt.
         let canRemember: Bool
 
+        /// An image decoded from the request contents, previewed scaled
+        /// in the dialog when the request carries an image
+        /// representation.
+        let previewImage: NSImage?
+
         /// Called exactly once with whether the user confirmed the
         /// request and whether their decision should be remembered.
         private var completion: ((SurfaceView, Bool, Bool) -> Void)?
@@ -91,6 +97,7 @@ extension Ghostty {
             kind: ClipboardRequest,
             programName: String? = nil,
             canRemember: Bool = false,
+            previewImage: NSImage? = nil,
             completion: @escaping (SurfaceView, Bool, Bool) -> Void
         ) {
             self.surface = surface
@@ -98,6 +105,7 @@ extension Ghostty {
             self.kind = kind
             self.programName = programName
             self.canRemember = canRemember
+            self.previewImage = previewImage
             self.completion = completion
         }
 

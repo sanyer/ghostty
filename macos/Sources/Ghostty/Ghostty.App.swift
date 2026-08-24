@@ -391,6 +391,13 @@ extension Ghostty {
                 .flatMap { String(data: $0.data, encoding: .utf8) }
                 ?? reps.map { "\($0.mime) (\($0.data.count) bytes)" }.joined(separator: "\n")
 
+            // Decode an image representation so the dialog can preview
+            // exactly what would be disclosed rather than a byte count.
+            let previewImage: NSImage? = reps.lazy
+                .filter { $0.mime.hasPrefix("image/") }
+                .compactMap { NSImage(data: $0.data) }
+                .first
+
             // libghostty reaches this callback only when the request attempted
             // by readClipboard requires confirmation. Reads allowed by policy
             // complete immediately and never become pending Swift state.
@@ -399,7 +406,8 @@ extension Ghostty {
                 contents: display,
                 kind: kind,
                 programName: c.name.map { String(cString: $0) },
-                canRemember: c.can_remember
+                canRemember: c.can_remember,
+                previewImage: previewImage
             ) { surfaceView, confirmed, remember in
                 guard let surface = surfaceView.surface else { return }
                 if confirmed {

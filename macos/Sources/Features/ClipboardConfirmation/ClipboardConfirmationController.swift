@@ -56,6 +56,7 @@ class ClipboardConfirmationController: NSWindowController {
             request: confirmation.kind,
             programName: confirmation.programName,
             canRemember: confirmation.canRemember,
+            previewImage: confirmation.previewImage,
             delegate: delegate
         ))
     }
