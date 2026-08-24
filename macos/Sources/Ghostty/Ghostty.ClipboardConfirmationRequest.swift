@@ -62,16 +62,22 @@ extension Ghostty {
     /// occurs from inside the libghostty callback that created the request.
     final class ClipboardConfirmationRequest {
         private(set) weak var surface: SurfaceView?
+
+        /// The textual preview of the clipboard contents shown in the
+        /// confirmation dialog. The actual representations served on
+        /// confirmation are held by the completion.
         let contents: String
+
         let kind: ClipboardRequest
 
-        private var completion: ((SurfaceView, String?) -> Void)?
+        /// Called exactly once with whether the user confirmed the request.
+        private var completion: ((SurfaceView, Bool) -> Void)?
 
         init(
             surface: SurfaceView,
             contents: String,
             kind: ClipboardRequest,
-            completion: @escaping (SurfaceView, String?) -> Void
+            completion: @escaping (SurfaceView, Bool) -> Void
         ) {
             self.surface = surface
             self.contents = contents
@@ -83,29 +89,29 @@ extension Ghostty {
             guard let surface, let completion else { return }
             self.completion = nil
             DispatchQueue.main.async {
-                completion(surface, nil)
+                completion(surface, false)
             }
         }
 
-        /// Complete the request using the displayed clipboard contents.
+        /// Complete the request with the displayed clipboard contents.
         func complete() {
-            finish(contents)
+            finish(true)
         }
 
-        /// Cancel the request without using the displayed clipboard contents.
+        /// Cancel the request, denying access to the clipboard contents.
         func cancel() {
-            finish(nil)
+            finish(false)
         }
 
         /// Cancel using the owning surface explicitly. SurfaceView uses this
         /// for replacement and teardown because its weak reference is already
         /// nil during the owner's deinitialization.
         func cancel(from surface: SurfaceView) {
-            finish(nil, on: surface)
+            finish(false, on: surface)
         }
 
         private func finish(
-            _ contents: String?,
+            _ confirmed: Bool,
             on explicitSurface: SurfaceView? = nil
         ) {
             guard let surface = explicitSurface ?? self.surface,
@@ -114,7 +120,7 @@ extension Ghostty {
                 return
             }
             self.completion = nil
-            completion(surface, contents)
+            completion(surface, confirmed)
         }
     }
 }

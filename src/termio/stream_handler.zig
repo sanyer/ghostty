@@ -1070,8 +1070,7 @@ pub const StreamHandler = struct {
         // The targets type ('.') asks for the listing of available
         // types rather than data. Requested types beyond the cap are
         // dropped and simply never served, which is how the protocol
-        // reports an unavailable type anyway. The MIME slices point
-        // into the decoded payload, which shares the request arena.
+        // reports an unavailable type anyway.
         var mimes_buf: [kitty_clipboard.max_read_mimes][]const u8 = undefined;
         var mimes_len: usize = 0;
         var list = false;
@@ -1091,7 +1090,10 @@ pub const StreamHandler = struct {
         // goes through the configured clipboard-read policy.
 
         const req = try alloc.create(apprt.ClipboardRequest.KittyRead);
-        const mimes = try alloc.dupe([]const u8, mimes_buf[0..mimes_len]);
+        const mimes = try alloc.alloc([:0]const u8, mimes_len);
+        for (mimes_buf[0..mimes_len], mimes) |src, *dst| {
+            dst.* = try alloc.dupeZ(u8, src);
+        }
         const id = try alloc.dupe(u8, meta.id);
         req.* = .{
             // The arena must be copied in last so it tracks every

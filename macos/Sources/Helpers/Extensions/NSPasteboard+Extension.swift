@@ -54,6 +54,47 @@ extension NSPasteboard {
         return strings.joined(separator: " ")
     }
 
+    /// The data for the given MIME type, if the pasteboard can serve it.
+    ///
+    /// The canonical "text/plain" type uses the opinionated string
+    /// contents so that e.g. copying a file yields its escaped path;
+    /// this matches what pasting into the terminal produces. All other
+    /// types are mapped through UTType.
+    func ghosttyData(forMime mime: String) -> Data? {
+        if mime == "text/plain" {
+            guard let str = getOpinionatedStringContents() else { return nil }
+            return Data(str.utf8)
+        }
+
+        guard let type = NSPasteboard.PasteboardType(mimeType: mime) else { return nil }
+        return data(forType: type)
+    }
+
+    /// The MIME types available on the pasteboard, best-effort mapped
+    /// from the pasteboard types. Types without a MIME mapping are not
+    /// reported.
+    func ghosttyAvailableMimes() -> [String] {
+        var result: [String] = []
+        var seen = Set<String>()
+
+        // Any text-like contents are reported under the canonical type,
+        // matching what ghosttyData(forMime:) serves.
+        if getOpinionatedStringContents() != nil {
+            result.append("text/plain")
+            seen.insert("text/plain")
+        }
+
+        for type in types ?? [] {
+            guard let utType = UTType(type.rawValue),
+                  let mime = utType.preferredMIMEType,
+                  !seen.contains(mime) else { continue }
+            seen.insert(mime)
+            result.append(mime)
+        }
+
+        return result
+    }
+
     /// The pasteboard for the Ghostty enum type.
     static func ghostty(_ clipboard: ghostty_clipboard_e) -> NSPasteboard? {
         switch clipboard {

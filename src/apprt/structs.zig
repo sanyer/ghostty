@@ -120,8 +120,10 @@ pub const ClipboardRequest = union(ClipboardRequestType) {
 
         /// The requested MIME types in request order, already capped at
         /// terminal.kitty.clipboard.max_read_mimes by the sender. Only
-        /// these representations may be served in the response.
-        mimes: []const []const u8,
+        /// these representations may be served in the response. The
+        /// values are sentinel-terminated so they can cross a C apprt
+        /// boundary without copies.
+        mimes: []const [:0]const u8,
 
         /// True when the targets ('.') listing was requested.
         list: bool,

@@ -5848,8 +5848,14 @@ fn writeScreenFile(
 }
 
 /// Call this to complete a clipboard request sent to apprt. This should
-/// only be called once for each request. The data is immediately copied so
-/// it is safe to free the data after this call.
+/// only be called once for each request. All contents are immediately
+/// copied so it is safe to free them after this call.
+///
+/// The contents are the representations the apprt could serve for the
+/// request's MIME types and `available` is the listing of MIME types on
+/// the clipboard (only gathered when the request asked for it).
+/// Requesters that only carry text (paste, OSC 52) use the first
+/// text-like representation.
 ///
 /// If `confirmed` is true then any clipboard confirmation prompts are skipped:
 ///
@@ -5857,30 +5863,41 @@ fn writeScreenFile(
 ///     data is defined as data that contains newlines, though this definition
 ///     may change later to detect other scenarios.
 ///
-///   - For OSC 52 reads and writes no prompt is shown to the user if
-///     `confirmed` is true.
+///   - For OSC 52 and Kitty clipboard protocol reads and writes no prompt
+///     is shown to the user if `confirmed` is true.
 ///
 /// If `confirmed` is false then this may return either an UnsafePaste or
 /// UnauthorizedPaste error, depending on the type of clipboard request.
 pub fn completeClipboardRequest(
     self: *Surface,
     req: apprt.ClipboardRequest,
-    data: [:0]const u8,
+    contents: []const terminal.clipboard.Content,
+    available: []const []const u8,
     confirmed: bool,
 ) !void {
     switch (req) {
-        .paste => try self.completeClipboardPaste(data, confirmed),
+        .paste => try self.completeClipboardPaste(
+            clipboardTextContent(contents) orelse "",
+            confirmed,
+        ),
 
         .osc_52_read => |clipboard| try self.completeClipboardReadOSC52(
-            data,
+            clipboardTextContent(contents) orelse "",
             clipboard,
             confirmed,
         ),
 
-        .osc_52_write => |clipboard| try self.rt_surface.setClipboard(clipboard, &.{.{
-            .mime = "text/plain",
-            .data = data,
-        }}, !confirmed),
+        .osc_52_write => |clipboard| {
+            // The write API wants sentinel-terminated data; the write
+            // text round-tripped through the apprt confirmation flow as
+            // a plain representation.
+            const data = try self.alloc.dupeZ(u8, clipboardTextContent(contents) orelse "");
+            defer self.alloc.free(data);
+            try self.rt_surface.setClipboard(clipboard, &.{.{
+                .mime = "text/plain",
+                .data = data,
+            }}, !confirmed);
+        },
 
         .kitty_read => |kitty| {
             // If we need confirmation we return an error without
@@ -5891,9 +5908,17 @@ pub fn completeClipboardRequest(
             }
 
             defer kitty.destroy();
-            try self.completeKittyClipboardRead(kitty, data);
+            try self.completeKittyClipboardRead(kitty, contents, available);
         },
     }
+}
+
+/// The first text-like representation of the contents, if any.
+fn clipboardTextContent(contents: []const terminal.clipboard.Content) ?[]const u8 {
+    for (contents) |content| {
+        if (terminal.clipboard.isTextMime(content.mime)) return content.data;
+    }
+    return null;
 }
 
 /// Deny an in-flight clipboard request. This consumes the request: for
@@ -6118,7 +6143,7 @@ fn kittyClipboardRead(
         // to disclose.
         .unavailable => {
             defer req.destroy();
-            try self.completeKittyClipboardRead(req, "");
+            try self.completeKittyClipboardRead(req, &.{}, &.{});
         },
 
         // The apprt can't serve this clipboard at all, e.g. an
@@ -6156,34 +6181,47 @@ fn kittyClipboardReadStatus(
 fn completeKittyClipboardRead(
     self: *Surface,
     req: *const apprt.ClipboardRequest.KittyRead,
-    data: []const u8,
+    contents: []const terminal.clipboard.Content,
+    available: []const []const u8,
 ) !void {
     const kitty_clipboard = terminal.kitty.clipboard;
 
-    // Serve the requested representations in request order. The apprt
-    // clipboard read path only carries text today, so the contents are
-    // served under every requested text MIME name; other types are
+    // Serve the requested representations in request order under their
+    // requested names. Text-like MIME aliases all match the canonical
+    // text representation, since that is the only name the apprt
+    // serves text under. Requested types without a representation are
     // simply never served, which is how the protocol communicates an
     // unavailable representation.
     var contents_buf: [kitty_clipboard.max_read_mimes]terminal.clipboard.Content = undefined;
     var contents_len: usize = 0;
     for (req.mimes) |mime| {
-        if (!terminal.clipboard.isTextMime(mime)) continue;
+        const data: []const u8 = data: {
+            for (contents) |content| {
+                if (std.mem.eql(u8, content.mime, mime)) break :data content.data;
+                if (terminal.clipboard.isTextMime(mime) and
+                    terminal.clipboard.isTextMime(content.mime))
+                {
+                    break :data content.data;
+                }
+            }
+
+            continue;
+        };
+
         contents_buf[contents_len] = .{ .mime = mime, .data = data };
         contents_len += 1;
     }
 
     // Encode the full success sequence: the OK packet, the targets
-    // listing if it was requested (reporting the canonical text type
-    // only when we have contents to serve), DATA chunks for each
-    // served representation, and the final DONE packet.
+    // listing if it was requested, DATA chunks for each served
+    // representation, and the final DONE packet.
     var aw: std.Io.Writer.Allocating = .init(self.alloc);
     defer aw.deinit();
     try (kitty_clipboard.ReadSuccess{
         .primary = req.location == .primary,
         .id = req.id,
         .list = req.list,
-        .available = if (data.len > 0) &.{"text/plain"} else &.{},
+        .available = available,
         .contents = contents_buf[0..contents_len],
         .terminator = req.terminator,
     }).encode(&aw.writer);
