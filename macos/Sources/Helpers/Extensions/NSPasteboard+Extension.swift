@@ -91,14 +91,25 @@ extension NSPasteboard {
 
     /// The MIME types available on the pasteboard, best-effort mapped
     /// from the pasteboard types. Types without a MIME mapping are not
-    /// reported.
+    /// reported. This only inspects declared types and never reads data,
+    /// since mode 5522 paste events must remain metadata-only.
     func ghosttyAvailableMimes() -> [String] {
         var result: [String] = []
         var seen = Set<String>()
+        let availableTypes = types ?? []
+        let mimeType: (NSPasteboard.PasteboardType) -> String? = { type in
+            guard let mime = UTType(type.rawValue)?.preferredMIMEType else { return nil }
+            return mime == "text/plain;charset=utf-8" ? "text/plain" : mime
+        }
 
-        // Any text-like contents are reported under the canonical type,
-        // matching what ghosttyData(forMime:) serves.
-        if getOpinionatedStringContents() != nil {
+        // Plain text and copied files can both be served as the canonical
+        // text representation. Infer this from declared types so lazy
+        // pasteboard providers are not asked for their contents.
+        let hasFileURL = availableTypes.contains(.fileURL)
+        let hasPlainText = hasFileURL || availableTypes.contains { type in
+            mimeType(type) == "text/plain"
+        }
+        if hasPlainText {
             result.append("text/plain")
             seen.insert("text/plain")
         }
@@ -106,14 +117,13 @@ extension NSPasteboard {
         // Copied files are additionally served as a URI list. The
         // generic mapping below never reports this since file URL
         // pasteboard types have no MIME type.
-        if !ghosttyFileURLs.isEmpty {
+        if hasFileURL {
             result.append("text/uri-list")
             seen.insert("text/uri-list")
         }
 
-        for type in types ?? [] {
-            guard let utType = UTType(type.rawValue),
-                  let mime = utType.preferredMIMEType,
+        for type in availableTypes {
+            guard let mime = mimeType(type),
                   !seen.contains(mime) else { continue }
             seen.insert(mime)
             result.append(mime)

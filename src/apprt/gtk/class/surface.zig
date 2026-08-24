@@ -4121,7 +4121,7 @@ const Clipboard = struct {
     ) Allocator.Error!apprt.ClipboardReadResult {
         // The GTK apprt doesn't support Kitty clipboard protocol reads
         // yet.
-        if (state == .kitty_read) return .unsupported;
+        if (state == .kitty_read or state == .list) return .unsupported;
 
         // Get our requested clipboard
         const clipboard = get(
@@ -4172,7 +4172,7 @@ const Clipboard = struct {
 
         const surface = self.private().core_surface orelse return;
         surface.completeClipboardRequest(
-            .paste,
+            .{ .paste = .standard },
             .{ .contents = &.{.{ .mime = "text/plain", .data = text }} },
         ) catch |err| switch (err) {
             error.UnsafePaste,
@@ -4180,7 +4180,7 @@ const Clipboard = struct {
             => {
                 showClipboardConfirmation(
                     self,
-                    .paste,
+                    .{ .paste = .standard },
                     text,
                 );
                 return;
@@ -4224,7 +4224,7 @@ const Clipboard = struct {
                 .request = &req,
                 .@"can-remember" = switch (req) {
                     .osc_52_read, .osc_52_write => true,
-                    .paste, .kitty_read => false,
+                    .paste, .list, .kitty_read => false,
                 },
                 .@"clipboard-contents" = contents_buf,
             },
@@ -4261,7 +4261,7 @@ const Clipboard = struct {
         if (remember) switch (req.*) {
             .osc_52_read => surface.config.clipboard_read = .allow,
             .osc_52_write => surface.config.clipboard_write = .allow,
-            .paste, .kitty_read => {},
+            .paste, .list, .kitty_read => {},
         };
 
         // Get our text
@@ -4299,7 +4299,7 @@ const Clipboard = struct {
         if (remember) switch (req.*) {
             .osc_52_read => surface.config.clipboard_read = .deny,
             .osc_52_write => surface.config.clipboard_write = .deny,
-            .paste, .kitty_read => @panic("request should not be able to be remembered"),
+            .paste, .list, .kitty_read => @panic("request should not be able to be remembered"),
         };
     }
 

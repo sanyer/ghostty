@@ -4077,7 +4077,7 @@ pub fn mouseButtonCallback(
                 else
                     .standard,
             };
-            _ = try self.startClipboardRequest(clipboard, .{ .paste = {} });
+            _ = try self.startClipboardRequest(clipboard, .{ .paste = clipboard });
         },
     };
 
@@ -4161,7 +4161,7 @@ pub fn mouseButtonCallback(
                 // request so we need to unlock.
                 self.renderer_state.mutex.unlock(global.io());
                 defer self.renderer_state.mutex.lockUncancelable(global.io());
-                _ = try self.startClipboardRequest(.standard, .paste);
+                _ = try self.startClipboardRequest(.standard, .{ .paste = .standard });
 
                 // We don't need to clear selection because we didn't have
                 // one to begin with.
@@ -4176,7 +4176,7 @@ pub fn mouseButtonCallback(
                 // request so we need to unlock.
                 self.renderer_state.mutex.unlock(global.io());
                 defer self.renderer_state.mutex.lockUncancelable(global.io());
-                _ = try self.startClipboardRequest(.standard, .paste);
+                _ = try self.startClipboardRequest(.standard, .{ .paste = .standard });
             },
         }
 
@@ -5111,12 +5111,12 @@ pub fn performBindingAction(self: *Surface, action: input.Binding.Action) !bool 
 
         .paste_from_clipboard => return (try self.startClipboardRequest(
             .standard,
-            .{ .paste = {} },
+            .{ .paste = .standard },
         )) == .started,
 
         .paste_from_selection => return (try self.startClipboardRequest(
             .selection,
-            .{ .paste = {} },
+            .{ .paste = .selection },
         )) == .started,
 
         .increase_font_size => |delta| {
@@ -5897,6 +5897,13 @@ pub fn completeClipboardRequest(
             complete.confirmed,
         ),
 
+        .list => |clipboard| if (!try self.completeClipboardPasteEvent(
+            clipboard,
+            complete.available,
+        )) {
+            log.debug("mode 5522 paste event was not written", .{});
+        },
+
         .osc_52_read => |clipboard| try self.completeClipboardReadOSC52(
             clipboardTextContent(complete.contents) orelse "",
             clipboard,
@@ -5969,7 +5976,7 @@ fn clipboardTextContent(contents: []const terminal.clipboard.Content) ?[]const u
 pub fn denyClipboardRequest(self: *Surface, req: apprt.ClipboardRequest) void {
     switch (req) {
         // A denied paste simply doesn't happen.
-        .paste => {},
+        .paste, .list => {},
 
         // OSC 52 has no error responses, but the client is waiting on
         // a reply, so a denied read is answered with empty contents.
@@ -6006,8 +6013,25 @@ fn startClipboardRequest(
     loc: apprt.Clipboard,
     req: apprt.ClipboardRequest,
 ) !apprt.ClipboardReadResult {
-    switch (req) {
-        .paste => {}, // always allowed
+    const effective_req: apprt.ClipboardRequest = switch (req) {
+        .paste => |clipboard| effective: {
+            // Snapshot the mode before asking the apprt for clipboard data.
+            // Event pastes request only a MIME listing, while ordinary
+            // pastes request the text representation as before.
+            self.renderer_state.mutex.lockUncancelable(global.io());
+            const event = self.io.terminal.modes.get(.kitty_paste_events);
+            self.renderer_state.mutex.unlock(global.io());
+
+            break :effective if (event)
+                .{ .list = clipboard }
+            else
+                req;
+        },
+        else => req,
+    };
+
+    switch (effective_req) {
+        .paste, .list => {}, // always allowed
         .osc_52_read => if (self.config.clipboard_read == .deny) {
             log.info(
                 "application attempted to read clipboard, but 'clipboard-read' is set to deny",
@@ -6024,7 +6048,7 @@ fn startClipboardRequest(
         .osc_52_write => unreachable,
     }
 
-    return try self.rt_surface.clipboardRequest(loc, req);
+    return try self.rt_surface.clipboardRequest(loc, effective_req);
 }
 
 fn completeClipboardPaste(
@@ -6104,6 +6128,63 @@ fn completeClipboardPaste(
             vec,
         ), .unlocked);
     };
+}
+
+/// Send a Kitty clipboard-protocol paste event when mode 5522 is enabled.
+/// The event only lists the available MIME types; it does not read any of
+/// their data. The shared terminal paste implementation generates and records
+/// the one-time password used by the program's follow-up OSC 5522 read.
+fn completeClipboardPasteEvent(
+    self: *Surface,
+    clipboard: apprt.Clipboard,
+    available: []const []const u8,
+) !bool {
+    if (self.readonly) return false;
+
+    const kitty_clipboard = terminal.kitty.clipboard;
+    const location: terminal.clipboard.Location = switch (clipboard) {
+        .standard => .standard,
+        .selection => .selection,
+        .primary => .primary,
+    };
+
+    // The protocol implementation caps listings at this size too. Cap here
+    // so the temporary Content array stays on the stack.
+    var contents_buf: [kitty_clipboard.max_listing_mimes]terminal.clipboard.Content = undefined;
+    const contents_len = @min(available.len, contents_buf.len);
+    for (available[0..contents_len], contents_buf[0..contents_len]) |mime, *content| {
+        content.* = .{ .mime = mime, .data = "" };
+    }
+
+    var aw: std.Io.Writer.Allocating = .init(self.alloc);
+    defer aw.deinit();
+
+    self.renderer_state.mutex.lockUncancelable(global.io());
+    defer self.renderer_state.mutex.unlock(global.io());
+
+    const pasted = try terminal.paste.paste(.{
+        .terminal = &self.io.terminal,
+        .alloc = self.alloc,
+        .writer = &aw.writer,
+        .kitty_clipboard = .{
+            .grants = &self.io.terminal_stream.handler.kitty_clipboard_grants,
+            .io = global.io(),
+        },
+    }, .{
+        .source = .{ .clipboard = location },
+        .contents = .{ .memory = contents_buf[0..contents_len] },
+        // A paste event discloses no clipboard data, so unsafe-text
+        // confirmation does not apply. If mode 5522 is reset, the empty
+        // stand-in representations cause the shared helper to write nothing.
+        .allow_unsafe = true,
+    });
+    if (!pasted) return false;
+
+    self.queueIo(.{ .write_alloc = .{
+        .alloc = self.alloc,
+        .data = try aw.toOwnedSlice(),
+    } }, .locked);
+    return true;
 }
 
 fn completeClipboardReadOSC52(
