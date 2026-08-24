@@ -3776,6 +3776,18 @@ test "kitty clipboard write result maps to response status" {
         "\x1B]5522;type=write:status=DONE\x07",
         S.responseSlice(),
     );
+
+    // A system without a primary selection answers a loc=primary write
+    // with ENOSYS, echoing the id.
+    S.reset();
+    S.write_result = .unsupported;
+    s.nextSlice("\x1B]5522;type=write:loc=primary:id=p1\x1B\\");
+    s.nextSlice("\x1B]5522;type=wdata\x1B\\");
+    try testing.expectEqual(clipboard.Location.primary, S.last_location);
+    try testing.expectEqualStrings(
+        "\x1B]5522;type=write:status=ENOSYS:id=p1\x1B\\",
+        S.responseSlice(),
+    );
 }
 
 test "kitty clipboard write without clipboard effect responds ENOSYS" {
