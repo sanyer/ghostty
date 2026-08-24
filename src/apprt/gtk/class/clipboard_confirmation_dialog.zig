@@ -205,6 +205,7 @@ pub const ClipboardConfirmationDialog = extern struct {
                 self.as(Dialog.Parent).setHeading(i18n._("Warning: Potentially Unsafe Paste"));
                 self.as(Dialog.Parent).setBody(i18n._("Pasting this text into the terminal may be dangerous as it looks like some commands may be executed."));
             },
+            .list => unreachable,
         }
     }
 

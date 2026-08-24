@@ -70,6 +70,7 @@ pub const ClipboardRequestType = enum(u8) {
     osc_52_read,
     osc_52_write,
     kitty_read,
+    list,
 };
 
 /// The result of starting a clipboard read request. This only reports
@@ -95,7 +96,7 @@ pub const ClipboardReadResult = enum(c_int) {
 /// be sent as a response to a ClipboardRequest event.
 pub const ClipboardRequest = union(ClipboardRequestType) {
     /// A direct paste of clipboard contents.
-    paste: void,
+    paste: Clipboard,
 
     /// A request to read clipboard contents via OSC 52.
     osc_52_read: Clipboard,
@@ -106,6 +107,10 @@ pub const ClipboardRequest = union(ClipboardRequestType) {
     /// A request to read clipboard contents via the Kitty clipboard
     /// protocol (OSC 5522).
     kitty_read: *KittyRead,
+
+    /// A request to list the available clipboard MIME types without
+    /// reading any of their data.
+    list: Clipboard,
 
     /// State for one in-flight Kitty clipboard protocol read. This is
     /// created on the IO thread and completed on the app thread, so it

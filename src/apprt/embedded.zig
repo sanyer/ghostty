@@ -720,6 +720,10 @@ pub const Surface = struct {
         const mimes: []const [*:0]const u8 = switch (state) {
             .paste, .osc_52_read => &.{"text/plain"},
 
+            // A mode 5522 paste event only lists types and must not read
+            // any clipboard data.
+            .list => &.{},
+
             .kitty_read => |kitty| mimes: {
                 assert(kitty.mimes.len <= mimes_buf.len);
                 for (kitty.mimes, mimes_buf[0..kitty.mimes.len]) |mime, *dst| {
@@ -735,6 +739,9 @@ pub const Surface = struct {
             .osc_52_write => unreachable,
         };
         const list = switch (state) {
+            // Paste events need the full MIME listing without reading any
+            // representation. Kitty reads only ask for it when requested.
+            .list => true,
             .kitty_read => |kitty| kitty.list,
             else => false,
         };
