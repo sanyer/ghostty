@@ -743,9 +743,7 @@ pub const State = struct {
         // If any error happens, we unload the image and it is invalid.
         errdefer gop.value_ptr.image.markForUnload();
 
-        // TODO: We can remove this check if there are no conversions to make
-        // This shouldn't be needed now that we convertCopy to own the data in the renderer.
-        gop.value_ptr.image.prepForUpload(alloc) catch |err| {
+        gop.value_ptr.image.getPendingPointer().?.prepForUpload(alloc) catch |err| {
             log.warn("error preparing image for upload err={}", .{err});
             return error.ImageConversionError;
         };
@@ -983,6 +981,12 @@ pub const Image = union(enum) {
             } };
             return result;
         }
+
+        /// Prepare the pending image data for upload to the GPU.
+        /// This doesn't need GPU access so is safe to call any time.
+        fn prepForUpload(self: *Image.Pending, alloc: Allocator) wuffs.Error!void {
+            try self.convertReplace(alloc);
+        }
     };
 
     pub fn deinit(self: Image, alloc: Allocator) void {
@@ -1063,15 +1067,6 @@ pub const Image = union(enum) {
         };
     }
 
-    /// Prepare the pending image data for upload to the GPU.
-    /// This doesn't need GPU access so is safe to call any time.
-    fn prepForUpload(self: *Image, alloc: Allocator) wuffs.Error!void {
-        assert(self.isPending());
-        // TODO: Remove this CPU-side conversion and use GPU-sampler swizzling
-        // Then we can remove this function entirely
-        try self.getPendingPointer().?.convertReplace(alloc);
-    }
-
     /// Upload the pending image to the GPU and change the state of this
     /// image to ready.
     pub fn upload(
@@ -1084,12 +1079,12 @@ pub const Image = union(enum) {
     })!void {
         assert(self.isPending());
 
+        // Get our pending info
+        const p = self.getPendingPointer().?;
+
         // No error recover is required after this call because it just
         // converts in place and is idempotent.
-        try self.prepForUpload(alloc);
-
-        // Get our pending info
-        const p = self.getPending().?;
+        try p.prepForUpload(alloc);
 
         // Create our texture
         const texture = Texture.init(
