@@ -44,6 +44,7 @@ pub const Terminator = oscpkg.Terminator;
 
 pub const Metadata = command.Metadata;
 pub const Payload = command.Payload;
+pub const readPromptExempt = command.readPromptExempt;
 pub const max_id_len = command.max_id_len;
 pub const max_pw_len = command.max_pw_len;
 pub const max_mime_len = command.max_mime_len;

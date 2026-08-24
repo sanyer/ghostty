@@ -757,6 +757,11 @@ struct GhosttyClipboardRead {
    * True if the terminal already holds a session grant for this request
    * (kitty clipboard protocol passwords). The embedder should skip any
    * permission prompt and serve the read.
+   *
+   * Always false when mimes_len is zero: such a request is served
+   * without a prompt (see the callback docs), so the terminal never
+   * consults grants for it and a one-time password is preserved for
+   * the follow-up data read.
    */
   bool granted;
 
@@ -792,7 +797,9 @@ struct GhosttyClipboardRead {
  * state; a reply that sets `remember` records a session grant so later
  * requests with the same password arrive with `granted` set. Kitty itself
  * serves a request for only the targets listing (`list` with no `mimes`)
- * without prompting.
+ * without prompting, and embedders are expected to do the same; the
+ * terminal never consults grants for such requests (`granted` is false
+ * and one-time passwords are not consumed).
  *
  * Installing this callback also enables Kitty paste events (mode 5522):
  * ghostty_terminal_paste() sends the program an event instead of the text,
