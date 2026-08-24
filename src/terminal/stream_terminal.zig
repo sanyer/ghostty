@@ -1384,7 +1384,16 @@ pub const Handler = struct {
     }
 
     fn requestMode(self: *Handler, mode: modes.Mode) void {
-        const report = self.terminal.modes.getReport(.fromMode(mode));
+        var report = self.terminal.modes.getReport(.fromMode(mode));
+
+        // Kitty paste events (mode 5522) can't work without a clipboard
+        // read effect, so if that isn't set mark it as unrecognized.
+        if (mode == .kitty_paste_events and
+            self.effects.clipboard_read == null)
+        {
+            report.state = .not_recognized;
+        }
+
         self.sendModeReport(report);
     }
 
@@ -6041,7 +6050,7 @@ test "paste: mode 5522 without entropy fails and records no grant" {
     try testing.expectEqualStrings("hello", S.written.items);
 }
 
-test "paste: mode 5522 is settable and reported in the lib build" {
+test "paste: mode 5522 DECRQM requires clipboard read effect" {
     if (comptime build_options.artifact != .lib) return error.SkipZigTest;
 
     var t: Terminal = try .init(testing.io, testing.allocator, .{ .cols = 80, .rows = 24 });
@@ -6056,18 +6065,34 @@ test "paste: mode 5522 is settable and reported in the lib build" {
     var s: Stream = .init(.{ .allocator = testing.allocator, .handler = handler });
     defer s.deinit();
 
-    // Recognized and reset by default, so programs can detect support.
+    // A paste event is unusable if its follow-up read can't be served, so
+    // the mode isn't advertised without a clipboard read effect.
     s.nextSlice("\x1B[?5522$p");
-    try testing.expectEqualStrings("\x1B[?5522;2$y", S.written.items);
+    try testing.expectEqualStrings("\x1B[?5522;0$y", S.written.items);
 
     S.reset();
     s.nextSlice("\x1B[?5522h");
     try testing.expect(t.modes.get(.kitty_paste_events));
     s.nextSlice("\x1B[?5522$p");
+    try testing.expectEqualStrings("\x1B[?5522;0$y", S.written.items);
+
+    // Installing the effect makes the current mode state reportable.
+    S.reset();
+    s.handler.effects.clipboard_read = &S.clipboardRead;
+    s.nextSlice("\x1B[?5522$p");
     try testing.expectEqualStrings("\x1B[?5522;1$y", S.written.items);
 
+    S.reset();
     s.nextSlice("\x1B[?5522l");
     try testing.expect(!t.modes.get(.kitty_paste_events));
+    s.nextSlice("\x1B[?5522$p");
+    try testing.expectEqualStrings("\x1B[?5522;2$y", S.written.items);
+
+    // Removing the effect stops advertising the capability again.
+    S.reset();
+    s.handler.effects.clipboard_read = null;
+    s.nextSlice("\x1B[?5522$p");
+    try testing.expectEqualStrings("\x1B[?5522;0$y", S.written.items);
 }
 
 test "full reset drops kitty clipboard grants" {
