@@ -87,8 +87,8 @@ pub const Handler = struct {
 
     /// Maximum total decoded bytes accumulated by one Kitty clipboard
     /// protocol (OSC 5522) write transaction, captured when the
-    /// transaction begins. Text data beyond the limit is truncated;
-    /// non-text data fails the transaction with EFBIG.
+    /// transaction begins. Data beyond the limit fails the transaction
+    /// with EFBIG.
     kitty_clipboard_write_max_bytes: usize = kitty_clipboard.max_write_size,
 
     /// Called for sequence identifiers not supported by this library.
@@ -1053,8 +1053,8 @@ pub const Handler = struct {
                 return error.OutOfMemory;
             },
 
-            // Non-text data over the write limit aborts the
-            // transaction: truncated binary data would be corrupt.
+            // Data over the write limit aborts the transaction and is
+            // reported to the client.
             error.TooLarge => self.kittyClipboardFinish(
                 state,
                 .EFBIG,
@@ -4267,7 +4267,7 @@ test "kitty clipboard invalid walias payload aborts with EINVAL" {
     );
 }
 
-test "kitty clipboard oversized non-text write aborts with EFBIG" {
+test "kitty clipboard oversized text write aborts with EFBIG" {
     var t: Terminal = try .init(testing.io, testing.allocator, .{ .cols = 80, .rows = 24 });
     defer t.deinit(testing.allocator);
 
@@ -4281,18 +4281,21 @@ test "kitty clipboard oversized non-text write aborts with EFBIG" {
     defer s.deinit();
 
     // Shrink the limit so the test doesn't have to stream the
-    // default 32MiB.
+    // default 64MiB.
     s.handler.kitty_clipboard_write_max_bytes = 4;
 
     s.nextSlice("\x1B]5522;type=write:id=w\x1B\\");
-    s.nextSlice("\x1B]5522;type=wdata:mime=aW1hZ2UvcG5n;SGVsbG9Xb3JsZA==\x1B\\");
+    s.nextSlice("\x1B]5522;type=wdata:mime=dGV4dC9wbGFpbg==;SGVsbA==\x1B\\"); // "Hell"
+    try testing.expectEqual(@as(usize, 0), S.responses_len);
+    s.nextSlice("\x1B]5522;type=wdata:mime=dGV4dC9wbGFpbg==;bw==\x1B\\"); // "o"
     try testing.expectEqualStrings(
         "\x1B]5522;type=write:status=EFBIG:id=w\x1B\\",
         S.responseSlice(),
     );
     try testing.expect(!s.handler.semantic_failure);
 
-    // The transaction is gone: a commit does nothing further.
+    // The transaction is gone: later data and the commit do nothing.
+    s.nextSlice("\x1B]5522;type=wdata:mime=dGV4dC9wbGFpbg==;IQ==\x1B\\");
     s.nextSlice("\x1B]5522;type=wdata\x1B\\");
     try testing.expectEqual(@as(usize, 0), S.write_count);
     try testing.expectEqualStrings(
