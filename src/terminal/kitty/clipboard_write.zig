@@ -243,6 +243,7 @@ pub const WriteState = struct {
         assert(meta.mime.len > 0);
         const decoded = try Payload.init(alloc, payload);
         defer decoded.deinit(alloc);
+        if (!decoded.isValidUtf8()) return error.Invalid;
         var it = decoded.mimeIterator();
 
         // Copy the target only if at least one valid alias exists.
@@ -494,6 +495,22 @@ test "write: aliases resolve at commit" {
     try testing.expectEqualStrings("Ghostty", committed.contents[1].data);
     try testing.expectEqualStrings("UTF8_STRING", committed.contents[2].mime);
     try testing.expectEqualStrings("Ghostty", committed.contents[2].data);
+}
+
+test "write: alias payload must be valid utf8" {
+    const testing = std.testing;
+    const alloc = testing.allocator;
+
+    const begin_meta: Metadata = .{ .op = .write };
+    var state: WriteState = try .init(alloc, &begin_meta, .{});
+    defer state.deinit(alloc);
+
+    const alias_meta: Metadata = .{ .op = .walias, .mime = "text/plain" };
+    // Valid base64 encoding of a single 0xff byte.
+    try testing.expectError(
+        error.Invalid,
+        state.alias(alloc, &alias_meta, "/w=="),
+    );
 }
 
 test "write: default limit when unset" {
