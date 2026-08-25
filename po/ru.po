@@ -146,7 +146,7 @@ msgstr "Очистить"
 
 #: src/apprt/gtk/ui/1.2/surface.blp:338 src/apprt/gtk/ui/1.5/window.blp:286
 msgid "Reset"
-msgstr "Сброс"
+msgstr "Сбросить"
 
 #: src/apprt/gtk/ui/1.2/surface.blp:345 src/apprt/gtk/ui/1.5/window.blp:250
 msgid "Split"
@@ -312,14 +312,14 @@ msgstr ""
 
 #: src/apprt/gtk/class/clipboard_confirmation_dialog.zig:205
 msgid "Warning: Potentially Unsafe Paste"
-msgstr "Внимание! Вставляемые данные могут нанести вред вашей системе"
+msgstr "Внимание! Потенциально небезопасная вставка"
 
 #: src/apprt/gtk/class/clipboard_confirmation_dialog.zig:206
 msgid ""
 "Pasting this text into the terminal may be dangerous as it looks like some "
 "commands may be executed."
 msgstr ""
-"Этот текст может быть опасен: его вставка в терминал приведёт к выполнению "
+"Опасно вставлять этот текст в терминал: есть риск автоматического выполнения "
 "команд."
 
 #: src/apprt/gtk/class/close_confirmation_dialog.zig:184
