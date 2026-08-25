@@ -1026,14 +1026,29 @@ pub const StreamHandler = struct {
     ) error{ OutOfMemory, WriteFailed }!void {
         const kitty_clipboard = terminal.kitty.clipboard;
 
-        // Decode and validate the metadata. Malformed metadata drops
-        // the packet without any response, matching kitty.
+        // Decode and validate the metadata. Malformed structure drops
+        // the packet without a response. Invalid decoded text on a write
+        // data or alias packet aborts an in-flight transaction.
         var arena: std.heap.ArenaAllocator = .init(self.alloc);
         defer arena.deinit();
-        const meta = (try kitty_clipboard.Metadata.parse(
+        const meta = (kitty_clipboard.Metadata.parse(
             arena.allocator(),
             v.metadata,
-        )) orelse return;
+        ) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.InvalidValue => {
+                const state = self.kitty_clipboard_write orelse return;
+                switch (kitty_clipboard.Metadata.operation(v.metadata) orelse return) {
+                    .wdata, .walias => try self.kittyClipboardWriteFinish(
+                        state,
+                        .EINVAL,
+                        v.terminator,
+                    ),
+                    .read, .write => {},
+                }
+                return;
+            },
+        }) orelse return;
 
         switch (meta.op) {
             .read => try self.kittyClipboardRead(
@@ -1089,6 +1104,10 @@ pub const StreamHandler = struct {
                 return;
             },
         };
+        if (!decoded.isValidUtf8()) {
+            arena.deinit();
+            return;
+        }
 
         // The targets type ('.') asks for the listing of available
         // types rather than data. Requested types beyond the cap are
@@ -1235,10 +1254,15 @@ pub const StreamHandler = struct {
         payload: []const u8,
         terminator: terminal.osc.Terminator,
     ) error{ OutOfMemory, WriteFailed }!void {
-        // Aliases without a transaction or without a target MIME type
-        // are silently ignored, matching kitty.
+        // Aliases without a transaction are silently ignored. Once a
+        // transaction exists, a missing target MIME type is invalid and
+        // aborts the transaction.
         const state = self.kitty_clipboard_write orelse return;
-        if (meta.mime.len == 0) return;
+        if (meta.mime.len == 0) return self.kittyClipboardWriteFinish(
+            state,
+            .EINVAL,
+            terminator,
+        );
 
         state.alias(
             self.alloc,

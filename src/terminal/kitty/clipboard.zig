@@ -11,6 +11,9 @@
 //!     metadata section), an unknown or missing `type`, and invalid
 //!     base64 in `mime`, `name`, or `pw` all silently drop the request
 //!     with no response.
+//!   * Decoded metadata and MIME-list payloads must be valid UTF-8. An
+//!     invalid value on `wdata` or `walias`, or a `walias` without a
+//!     target MIME type, aborts an in-flight write with EINVAL.
 //!   * `mime`, `name`, and `pw` metadata values are base64-encoded UTF-8;
 //!     everything else is verbatim. Unknown keys are ignored.
 //!   * `id` is sanitized by stripping characters outside [a-zA-Z0-9-_+.]
