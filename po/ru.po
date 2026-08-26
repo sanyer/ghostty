@@ -1094,7 +1094,7 @@ msgstr "Переключить прозрачность фона"
 
 #: src/input/command.zig:679
 msgid "Toggle the background opacity of a window that started transparent."
-msgstr "Изменить прозрачность фона изначально прозрачного окна."
+msgstr "Изменить прозрачность у изначально прозрачного окна."
 
 #: src/input/command.zig:684
 msgid "Check for Updates"
