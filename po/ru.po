@@ -938,7 +938,7 @@ msgstr "Включить или отключить режим только дл�
 
 #: src/input/command.zig:557
 msgid "Equalize Splits"
-msgstr "Выровнять области"
+msgstr "Уровнять области"
 
 #: src/input/command.zig:558
 msgid "Equalize the size of all splits."
