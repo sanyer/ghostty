@@ -491,7 +491,7 @@ msgstr "Искать выделенное"
 
 #: src/input/command.zig:204
 msgid "Start a search for the current text selection."
-msgstr "Начать поиск текущего выделения."
+msgstr "Начать поиск выделенного текста."
 
 #: src/input/command.zig:209
 msgid "End Search"
