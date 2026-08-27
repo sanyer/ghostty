@@ -3086,6 +3086,14 @@ pub fn insertLines(self: *Terminal, count: usize) void {
                 cur_row,
                 cells[self.scrolling_region.left .. self.scrolling_region.right + 1],
             );
+
+            // With a full-width scroll region the entire row is a
+            // fresh blank row: reset the metadata so nothing (wrap
+            // state, semantic prompt) is retained from the row whose
+            // storage it recycles. With left/right margins the row
+            // keeps content outside the margins so the metadata is
+            // preserved, matching the shift case above.
+            if (!left_right) cur_row.reset();
         }
 
         // Mark the row as dirty
@@ -3246,6 +3254,14 @@ pub fn deleteLines(self: *Terminal, count: usize) void {
                 cur_row,
                 cells[self.scrolling_region.left .. self.scrolling_region.right + 1],
             );
+
+            // With a full-width scroll region the entire row is a
+            // fresh blank row: reset the metadata so nothing (wrap
+            // state, semantic prompt) is retained from the row whose
+            // storage it recycles. With left/right margins the row
+            // keeps content outside the margins so the metadata is
+            // preserved, matching the shift case above.
+            if (!left_right) cur_row.reset();
         }
 
         // Mark the row as dirty
@@ -7418,6 +7434,85 @@ test "Terminal: print wide char at right edge with hyperlink" {
         const list_cell = t.screens.active.pages.getCell(.{ .screen = .{ .x = 1, .y = 1 } }).?;
         try testing.expectEqual(Cell.Wide.spacer_tail, list_cell.cell.wide);
         try testing.expect(list_cell.cell.hyperlink);
+    }
+}
+
+// A cursor style or hyperlink ID is an index into a set stored in the
+// page memory of the page the cursor pin points at. When scrollClear
+// (here via ED 22, kitty's scroll_complete) pushes the active area onto
+// a later page while the cursor pin is still on an earlier one,
+// cursorReload must migrate the cursor's style and hyperlink references
+// to the destination page. It previously replaced the pin directly,
+// leaving the cursor holding an ID that was dead or aliased an unrelated
+// entry on the new page, and the next print attached a live cell to it.
+// Found via fuzzing.
+test "Terminal: scrollClear across pages keeps cursor hyperlink refs page-local" {
+    const alloc = testing.allocator;
+
+    // Minimized from a 774-byte AFL fuzz input. Reading it:
+    //
+    //   A                 print, so REP has something to repeat
+    //   ESC [ 48111 b     REP, filling the page and spilling onto a second
+    //   ESC ] 8 ; ; 0x93  OSC 8; the C1 byte terminates the OSC and makes
+    //                     the URI non-empty, so a hyperlink starts
+    //   ESC [ 11 A        CUU, moving the cursor back onto the first page
+    //   ESC [ 22 J        ED 22, i.e. scroll_complete -> Screen.scrollClear
+    //   B                 print, which attaches the cursor hyperlink
+    //   ESC ] 8 ; ; ESC   OSC 8 with an empty URI, ending the hyperlink
+    //
+    // The grid must be wide enough to fill a page from a single REP, so
+    // this does not reproduce at 80x24.
+    const input = "A\x1b[48111b\x1b]8;;\x93\x1b[11A\x1b[22JB\x1b]8;;\x1b";
+
+    var t = try init(testing.io, alloc, .{ .cols = 200, .rows = 50 });
+    defer t.deinit(alloc);
+
+    {
+        var s = t.vtStream();
+        defer s.deinit();
+        s.nextSlice(input);
+    }
+
+    // With slow runtime safety on, the page integrity checks during the
+    // stream above already catch the bug. Verify the ref counts explicitly
+    // as well so this test is meaningful with runtime safety off: every
+    // cell holding a hyperlink ID owns a reference, so a count below the
+    // number of holding cells means a live cell points at an entry that
+    // was already freed.
+    var node_ = t.screens.active.pages.pages.first;
+    while (node_) |node| : (node_ = node.next) {
+        const page = node.page();
+        const cap = page.hyperlink_set.layout.cap;
+        if (cap == 0) continue;
+
+        const holders = try alloc.alloc(u32, cap);
+        defer alloc.free(holders);
+        @memset(holders, 0);
+
+        for (page.rows.ptr(page.memory)[0..page.size.rows]) |*row| {
+            if (!row.hyperlink) continue;
+            for (row.cells.ptr(page.memory)[0..page.size.cols]) |*cell| {
+                if (!cell.hyperlink) continue;
+                const id = page.lookupHyperlink(cell) orelse continue;
+                if (id < cap) holders[id] += 1;
+            }
+        }
+
+        for (holders, 0..) |held, id| {
+            if (held == 0) continue;
+            const refs = page.hyperlink_set.refCount(page.memory, @intCast(id));
+            try testing.expect(refs >= held);
+        }
+    }
+
+    // If the cursor still has an active hyperlink, its own extra
+    // reference must live on the cursor's page.
+    const cursor = &t.screens.active.cursor;
+    if (cursor.hyperlink_id != 0) {
+        const page = cursor.page_pin.node.page();
+        try testing.expect(
+            page.hyperlink_set.refCount(page.memory, cursor.hyperlink_id) > 0,
+        );
     }
 }
 
@@ -16210,4 +16305,162 @@ test "Terminal: glyph APC stores session glossary entries" {
 
     t.fullReset();
     try testing.expect(!t.glyph_glossary.contains(0xE0A0));
+}
+
+test "Terminal: scroll region linefeed recycled row has default metadata" {
+    const alloc = testing.allocator;
+    const io_impl = testing.io;
+    var t = try init(io_impl, alloc, .{ .cols = 5, .rows = 5 });
+    defer t.deinit(alloc);
+
+    // A soft-wrapped line across rows 0-2 so that row 1 has both wrap
+    // flags set. Mark row 1 as a prompt as well (OSC 133 A would).
+    for (0..12) |_| try t.print('A');
+    t.screens.active.pages.getCell(
+        .{ .active = .{ .y = 1 } },
+    ).?.row.semantic_prompt = .prompt;
+
+    // DECSTBM rows 2-4, cursor to the region bottom, and linefeed:
+    // row 1 is discarded and its Row storage recycled as the new
+    // blank region-bottom row.
+    t.setTopAndBottomMargin(2, 4);
+    t.setCursorPos(4, 1);
+    try t.linefeed();
+
+    {
+        const rac = t.screens.active.pages.getCell(.{ .active = .{ .y = 3 } }).?;
+        try testing.expect(!rac.row.wrap);
+        try testing.expect(!rac.row.wrap_continuation);
+        try testing.expectEqual(.none, rac.row.semantic_prompt);
+    }
+}
+
+test "Terminal: alt screen scroll up recycled row has default metadata" {
+    const alloc = testing.allocator;
+    const io_impl = testing.io;
+    var t = try init(io_impl, alloc, .{ .cols = 5, .rows = 3 });
+    defer t.deinit(alloc);
+
+    try t.switchScreenMode(.@"1049", true);
+
+    // A soft-wrapped line across rows 0-1 and a prompt mark on row 0.
+    for (0..7) |_| try t.print('A');
+    t.screens.active.pages.getCell(
+        .{ .active = .{} },
+    ).?.row.semantic_prompt = .prompt;
+
+    // Scroll up: with no scrollback, row 0 is discarded and its Row
+    // storage recycled as the new blank bottom row.
+    try t.scrollUp(1);
+
+    {
+        const rac = t.screens.active.pages.getCell(.{ .active = .{ .y = 2 } }).?;
+        try testing.expect(!rac.row.wrap);
+        try testing.expect(!rac.row.wrap_continuation);
+        try testing.expectEqual(.none, rac.row.semantic_prompt);
+    }
+}
+
+test "Terminal: insertLines count over region blanks row metadata" {
+    const alloc = testing.allocator;
+    const io_impl = testing.io;
+    var t = try init(io_impl, alloc, .{ .cols = 5, .rows = 5 });
+    defer t.deinit(alloc);
+
+    // A soft-wrapped line across rows 0-2 so that row 1 has both wrap
+    // flags set, plus a prompt mark on row 1.
+    for (0..12) |_| try t.print('A');
+    t.screens.active.pages.getCell(
+        .{ .active = .{ .y = 1 } },
+    ).?.row.semantic_prompt = .prompt;
+
+    // Insert more lines than remain in the region: every row from the
+    // cursor to the region bottom is blanked in place, with no shifts.
+    t.setCursorPos(2, 1);
+    t.insertLines(10);
+
+    for (1..5) |y| {
+        const rac = t.screens.active.pages.getCell(
+            .{ .active = .{ .y = @intCast(y) } },
+        ).?;
+        try testing.expect(!rac.row.wrap);
+        try testing.expect(!rac.row.wrap_continuation);
+        try testing.expectEqual(.none, rac.row.semantic_prompt);
+    }
+}
+
+test "Terminal: deleteLines count over region blanks row metadata" {
+    const alloc = testing.allocator;
+    const io_impl = testing.io;
+    var t = try init(io_impl, alloc, .{ .cols = 5, .rows = 5 });
+    defer t.deinit(alloc);
+
+    for (0..12) |_| try t.print('A');
+    t.screens.active.pages.getCell(
+        .{ .active = .{ .y = 1 } },
+    ).?.row.semantic_prompt = .prompt;
+
+    t.setCursorPos(2, 1);
+    t.deleteLines(10);
+
+    for (1..5) |y| {
+        const rac = t.screens.active.pages.getCell(
+            .{ .active = .{ .y = @intCast(y) } },
+        ).?;
+        try testing.expect(!rac.row.wrap);
+        try testing.expect(!rac.row.wrap_continuation);
+        try testing.expectEqual(.none, rac.row.semantic_prompt);
+    }
+}
+
+test "Terminal: deleteLines blank row does not retain semantic prompt" {
+    const alloc = testing.allocator;
+    const io_impl = testing.io;
+    var t = try init(io_impl, alloc, .{ .cols = 5, .rows = 3 });
+    defer t.deinit(alloc);
+
+    // Mark row 0 as a prompt row, then delete it. The blank row that
+    // appears at the region bottom reuses the deleted row's storage
+    // and must not read as a prompt (e.g. for prompt navigation).
+    try t.print('$');
+    t.screens.active.pages.getCell(
+        .{ .active = .{} },
+    ).?.row.semantic_prompt = .prompt;
+
+    t.setCursorPos(1, 1);
+    t.deleteLines(1);
+
+    {
+        const rac = t.screens.active.pages.getCell(.{ .active = .{ .y = 2 } }).?;
+        try testing.expect(!rac.row.wrap);
+        try testing.expect(!rac.row.wrap_continuation);
+        try testing.expectEqual(.none, rac.row.semantic_prompt);
+    }
+}
+
+test "Terminal: eraseDisplay complete ignores stale prompt on recycled row" {
+    const alloc = testing.allocator;
+    const io_impl = testing.io;
+    var t = try init(io_impl, alloc, .{ .cols = 10, .rows = 3 });
+    defer t.deinit(alloc);
+
+    // Screen content that must NOT enter the scrollback on a clear.
+    try t.printString("hello");
+
+    // Mark row 1 as a prompt row and then discard it with a region
+    // scroll, recycling its storage as the blank bottom row.
+    t.screens.active.pages.getCell(
+        .{ .active = .{ .y = 1 } },
+    ).?.row.semantic_prompt = .prompt;
+    t.setTopAndBottomMargin(2, 3);
+    t.setCursorPos(3, 1);
+    try t.linefeed();
+    t.setTopAndBottomMargin(0, 0);
+
+    // ED2: since no prompt is on screen, this must NOT take the
+    // scroll-and-clear path that pushes content into scrollback. A
+    // stale prompt flag on the recycled blank bottom row would.
+    t.eraseDisplay(.complete, false);
+
+    try testing.expectEqual(t.screens.active.pages.rows, t.screens.active.pages.total_rows);
 }
