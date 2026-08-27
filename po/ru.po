@@ -130,7 +130,7 @@ msgstr "Режим только для чтения"
 
 #: src/apprt/gtk/ui/1.2/surface.blp:316 src/apprt/gtk/ui/1.5/window.blp:203
 msgid "Copy"
-msgstr "Копировать"
+msgstr "Скопировать"
 
 #: src/apprt/gtk/ui/1.2/surface.blp:321 src/apprt/gtk/ui/1.5/window.blp:208
 msgid "Paste"
@@ -138,7 +138,7 @@ msgstr "Вставить"
 
 #: src/apprt/gtk/ui/1.2/surface.blp:326
 msgid "Notify on Next Command Finish"
-msgstr "Сообщить о завершении"
+msgstr "Сообщить о завершении команды"
 
 #: src/apprt/gtk/ui/1.2/surface.blp:333 src/apprt/gtk/ui/1.5/window.blp:281
 msgid "Clear"
@@ -406,59 +406,59 @@ msgstr "Вернуть терминал в исходное состояние."
 
 #: src/input/command.zig:155
 msgid "Copy to Clipboard"
-msgstr "Копировать в буфер обмена"
+msgstr "Скопировать в буфер обмена"
 
 #: src/input/command.zig:156
 msgid ""
 "Copy the selected text to the clipboard in both plain and styled formats."
 msgstr ""
-"Копировать выделенный текст в буфер обмена в обычном и в форматированном "
+"Скопировать выделенный текст в буфер обмена в обычном и в форматированном "
 "виде."
 
 #: src/input/command.zig:159
 msgid "Copy Selection as Plain Text to Clipboard"
-msgstr "Копировать выделение как обычный текст в буфер обмена"
+msgstr "Скопировать выделение как обычный текст в буфер обмена"
 
 #: src/input/command.zig:160
 msgid "Copy the selected text as plain text to the clipboard."
-msgstr "Копировать выделенный текст как обычный текст в буфер обмена."
+msgstr "Скопировать выделенный текст как обычный текст в буфер обмена."
 
 #: src/input/command.zig:163
 msgid "Copy Selection as ANSI Sequences to Clipboard"
-msgstr "Копировать выделение как ANSI в буфер обмена"
+msgstr "Скопировать выделение как ANSI в буфер обмена"
 
 #: src/input/command.zig:164
 msgid "Copy the selected text as ANSI escape sequences to the clipboard."
 msgstr ""
-"Копировать выделенный текст как управляющие последовательности ANSI в "
+"Скопировать выделенный текст как управляющие последовательности ANSI в "
 "буфер обмена."
 
 #: src/input/command.zig:167
 msgid "Copy Selection as HTML to Clipboard"
-msgstr "Копировать выделение как HTML в буфер обмена"
+msgstr "Скопировать выделение как HTML в буфер обмена"
 
 #: src/input/command.zig:168
 msgid "Copy the selected text as HTML to the clipboard."
-msgstr "Копировать выделенный текст как HTML в буфер обмена."
+msgstr "Скопировать выделенный текст как HTML в буфер обмена."
 
 #: src/input/command.zig:173
 msgid "Copy URL to Clipboard"
-msgstr "Копировать URL в буфер обмена"
+msgstr "Скопировать URL в буфер обмена"
 
 #: src/input/command.zig:174
 msgid "Copy the URL under the cursor to the clipboard."
-msgstr "Копировать URL под курсором в буфер обмена."
+msgstr "Скопировать URL под курсором в буфер обмена."
 
 #: src/input/command.zig:179
 msgid "Copy Terminal Title to Clipboard"
-msgstr "Копировать заголовок терминала в буфер обмена"
+msgstr "Скопировать заголовок терминала в буфер обмена"
 
 #: src/input/command.zig:180
 msgid ""
 "Copy the terminal title to the clipboard. If the terminal title is not set "
 "this has no effect."
 msgstr ""
-"Копировать заголовок терминала в буфер обмена. Если заголовок не задан, "
+"Скопировать заголовок терминала в буфер обмена. Если заголовок не задан, "
 "ничего не произойдёт."
 
 #: src/input/command.zig:185
@@ -599,193 +599,193 @@ msgstr "Прокрутить на одну страницу вниз."
 
 #: src/input/command.zig:286
 msgid "Copy Screen to Temporary File and Copy Path"
-msgstr "Копировать вывод во временный файл и копировать путь"
+msgstr "Скопировать вывод во временный файл и скопировать путь"
 
 #: src/input/command.zig:287
 msgid ""
 "Copy the screen contents to a temporary file and copy the path to the "
 "clipboard."
 msgstr ""
-"Копировать весь вывод во временный файл и копировать путь к нему в буфер "
+"Скопировать весь вывод во временный файл и скопировать путь к нему в буфер "
 "обмена."
 
 #: src/input/command.zig:291
 msgid "Copy Screen to Temporary File and Paste Path"
-msgstr "Копировать вывод во временный файл и вставить путь"
+msgstr "Скопировать вывод во временный файл и вставить путь"
 
 #: src/input/command.zig:292
 msgid ""
 "Copy the screen contents to a temporary file and paste the path to the file."
-msgstr "Копировать весь вывод во временный файл и вставить путь к файлу."
+msgstr "Скопировать весь вывод во временный файл и вставить путь к файлу."
 
 #: src/input/command.zig:296
 msgid "Copy Screen to Temporary File and Open"
-msgstr "Копировать вывод во временный файл и открыть"
+msgstr "Скопировать вывод во временный файл и открыть"
 
 #: src/input/command.zig:297
 msgid "Copy the screen contents to a temporary file and open it."
-msgstr "Копировать весь вывод во временный файл и открыть его."
+msgstr "Скопировать весь вывод во временный файл и открыть его."
 
 #: src/input/command.zig:305
 msgid "Copy Screen as HTML to Temporary File and Copy Path"
-msgstr "Копировать вывод как HTML во временный файл и копировать путь"
+msgstr "Скопировать вывод как HTML во временный файл и скопировать путь"
 
 #: src/input/command.zig:306
 msgid ""
 "Copy the screen contents as HTML to a temporary file and copy the path to "
 "the clipboard."
 msgstr ""
-"Копировать весь вывод как HTML во временный файл и копировать путь к нему "
+"Скопировать весь вывод как HTML во временный файл и скопировать путь к нему "
 "в буфер обмена."
 
 #: src/input/command.zig:313
 msgid "Copy Screen as HTML to Temporary File and Paste Path"
-msgstr "Копировать вывод как HTML во временный файл и вставить путь"
+msgstr "Скопировать вывод как HTML во временный файл и вставить путь"
 
 #: src/input/command.zig:314
 msgid ""
 "Copy the screen contents as HTML to a temporary file and paste the path to "
 "the file."
-msgstr "Копировать весь вывод как HTML во временный файл и вставить путь к файлу."
+msgstr "Скопировать весь вывод как HTML во временный файл и вставить путь к файлу."
 
 #: src/input/command.zig:321
 msgid "Copy Screen as HTML to Temporary File and Open"
-msgstr "Копировать вывод как HTML во временный файл и открыть"
+msgstr "Скопировать вывод как HTML во временный файл и открыть"
 
 #: src/input/command.zig:322
 msgid "Copy the screen contents as HTML to a temporary file and open it."
-msgstr "Копировать весь вывод как HTML во временный файл и открыть его."
+msgstr "Скопировать весь вывод как HTML во временный файл и открыть его."
 
 #: src/input/command.zig:330
 msgid "Copy Screen as ANSI Sequences to Temporary File and Copy Path"
-msgstr "Копировать вывод как ANSI во временный файл и копировать путь"
+msgstr "Скопировать вывод как ANSI во временный файл и скопировать путь"
 
 #: src/input/command.zig:331
 msgid ""
 "Copy the screen contents as ANSI escape sequences to a temporary file and "
 "copy the path to the clipboard."
 msgstr ""
-"Копировать весь вывод как управляющие последовательности ANSI во временный "
-"файл и копировать путь к нему в буфер обмена."
+"Скопировать весь вывод как управляющие последовательности ANSI во временный "
+"файл и скопировать путь к нему в буфер обмена."
 
 #: src/input/command.zig:338
 msgid "Copy Screen as ANSI Sequences to Temporary File and Paste Path"
-msgstr "Копировать вывод как ANSI во временный файл и вставить путь"
+msgstr "Скопировать вывод как ANSI во временный файл и вставить путь"
 
 #: src/input/command.zig:339
 msgid ""
 "Copy the screen contents as ANSI escape sequences to a temporary file and "
 "paste the path to the file."
 msgstr ""
-"Копировать весь вывод как управляющие последовательности ANSI во временный "
+"Скопировать весь вывод как управляющие последовательности ANSI во временный "
 "файл и вставить путь к файлу."
 
 #: src/input/command.zig:346
 msgid "Copy Screen as ANSI Sequences to Temporary File and Open"
-msgstr "Копировать вывод как ANSI во временный файл и открыть"
+msgstr "Скопировать вывод как ANSI во временный файл и открыть"
 
 #: src/input/command.zig:347
 msgid ""
 "Copy the screen contents as ANSI escape sequences to a temporary file and "
 "open it."
 msgstr ""
-"Копировать весь вывод как управляющие последовательности ANSI во временный "
+"Скопировать весь вывод как управляющие последовательности ANSI во временный "
 "файл и открыть его."
 
 #: src/input/command.zig:354
 msgid "Copy Selection to Temporary File and Copy Path"
-msgstr "Копировать выделение во временный файл и копировать путь"
+msgstr "Скопировать выделение во временный файл и скопировать путь"
 
 #: src/input/command.zig:355
 msgid ""
 "Copy the selection contents to a temporary file and copy the path to the "
 "clipboard."
 msgstr ""
-"Копировать выделение во временный файл и копировать путь к нему в буфер обмена."
+"Скопировать выделение во временный файл и скопировать путь к нему в буфер обмена."
 
 #: src/input/command.zig:359
 msgid "Copy Selection to Temporary File and Paste Path"
-msgstr "Копировать выделение во временный файл и вставить путь"
+msgstr "Скопировать выделение во временный файл и вставить путь"
 
 #: src/input/command.zig:360
 msgid ""
 "Copy the selection contents to a temporary file and paste the path to the "
 "file."
-msgstr "Копировать выделение во временный файл и вставить путь к файлу."
+msgstr "Скопировать выделение во временный файл и вставить путь к файлу."
 
 #: src/input/command.zig:364
 msgid "Copy Selection to Temporary File and Open"
-msgstr "Копировать выделение во временный файл и открыть"
+msgstr "Скопировать выделение во временный файл и открыть"
 
 #: src/input/command.zig:365
 msgid "Copy the selection contents to a temporary file and open it."
-msgstr "Копировать выделение во временный файл и открыть его."
+msgstr "Скопировать выделение во временный файл и открыть его."
 
 #: src/input/command.zig:373
 msgid "Copy Selection as HTML to Temporary File and Copy Path"
-msgstr "Копировать выделение как HTML во временный файл и копировать путь"
+msgstr "Скопировать выделение как HTML во временный файл и скопировать путь"
 
 #: src/input/command.zig:374
 msgid ""
 "Copy the selection contents as HTML to a temporary file and copy the path to "
 "the clipboard."
 msgstr ""
-"Копировать выделение как HTML во временный файл и копировать путь к нему "
+"Скопировать выделение как HTML во временный файл и скопировать путь к нему "
 "в буфер обмена."
 
 #: src/input/command.zig:381
 msgid "Copy Selection as HTML to Temporary File and Paste Path"
-msgstr "Копировать выделение как HTML во временный файл и вставить путь"
+msgstr "Скопировать выделение как HTML во временный файл и вставить путь"
 
 #: src/input/command.zig:382
 msgid ""
 "Copy the selection contents as HTML to a temporary file and paste the path "
 "to the file."
 msgstr ""
-"Копировать выделение как HTML во временный файл и вставить путь к файлу."
+"Скопировать выделение как HTML во временный файл и вставить путь к файлу."
 
 #: src/input/command.zig:389
 msgid "Copy Selection as HTML to Temporary File and Open"
-msgstr "Копировать выделение как HTML во временный файл и открыть"
+msgstr "Скопировать выделение как HTML во временный файл и открыть"
 
 #: src/input/command.zig:390
 msgid "Copy the selection contents as HTML to a temporary file and open it."
-msgstr "Копировать выделение как HTML во временный файл и открыть его."
+msgstr "Скопировать выделение как HTML во временный файл и открыть его."
 
 #: src/input/command.zig:398
 msgid "Copy Selection as ANSI Sequences to Temporary File and Copy Path"
-msgstr "Копировать выделение как ANSI во временный файл и копировать путь"
+msgstr "Скопировать выделение как ANSI во временный файл и скопировать путь"
 
 #: src/input/command.zig:399
 msgid ""
 "Copy the selection contents as ANSI escape sequences to a temporary file and "
 "copy the path to the clipboard."
 msgstr ""
-"Копировать выделение как управляющие последовательности ANSI во временный "
-"файл и копировать путь к нему в буфер обмена."
+"Скопировать выделение как управляющие последовательности ANSI во временный "
+"файл и скопировать путь к нему в буфер обмена."
 
 #: src/input/command.zig:406
 msgid "Copy Selection as ANSI Sequences to Temporary File and Paste Path"
-msgstr "Копировать выделение как ANSI во временный файл и вставить путь"
+msgstr "Скопировать выделение как ANSI во временный файл и вставить путь"
 
 #: src/input/command.zig:407
 msgid ""
 "Copy the selection contents as ANSI escape sequences to a temporary file and "
 "paste the path to the file."
 msgstr ""
-"Копировать выделение как управляющие последовательности ANSI во временный "
+"Скопировать выделение как управляющие последовательности ANSI во временный "
 "файл и вставить путь к файлу."
 
 #: src/input/command.zig:414
 msgid "Copy Selection as ANSI Sequences to Temporary File and Open"
-msgstr "Копировать выделение как ANSI во временный файл и открыть"
+msgstr "Скопировать выделение как ANSI во временный файл и открыть"
 
 #: src/input/command.zig:415
 msgid ""
 "Copy the selection contents as ANSI escape sequences to a temporary file and "
 "open it."
 msgstr ""
-"Копировать выделение как управляющие последовательности ANSI во временный "
+"Скопировать выделение как управляющие последовательности ANSI во временный "
 "файл и открыть его."
 
 #: src/input/command.zig:422
@@ -922,7 +922,7 @@ msgstr "Перейти к следующему окну."
 
 #: src/input/command.zig:545
 msgid "Toggle Split Zoom"
-msgstr "Переключить развёрнутый режим области"
+msgstr "Переключить полнооконный режим области"
 
 #: src/input/command.zig:546
 msgid "Toggle the zoom state of the current split."
@@ -938,11 +938,11 @@ msgstr "Включить или отключить режим только дл�
 
 #: src/input/command.zig:557
 msgid "Equalize Splits"
-msgstr "Уровнять области"
+msgstr "Выровнять области"
 
 #: src/input/command.zig:558
 msgid "Equalize the size of all splits."
-msgstr "Выровнять размеры всех областей."
+msgstr "Выровнять размеры всех областей по сетке."
 
 #: src/input/command.zig:563
 msgid "Reset Window Size"
@@ -1130,4 +1130,4 @@ msgstr "Ghostty"
 
 #: src/input/command.zig:709
 msgid "Put a little Ghostty in your terminal."
-msgstr "Добавить маленького Ghostty в терминал."
+msgstr "Вставить в терминал маленького Ghostty."
