@@ -876,15 +876,15 @@ msgstr "Врати величину прозора на подразумеван
 
 #: src/input/command.zig:569
 msgid "Toggle Inspector"
-msgstr "Окини инспектора"
+msgstr "Окини инспектор"
 
 #: src/input/command.zig:570
 msgid "Toggle the inspector."
-msgstr "Окини инспектора."
+msgstr "Окини инспектор."
 
 #: src/input/command.zig:575
 msgid "Show the GTK Inspector"
-msgstr "Прикажи ГТК инспектора"
+msgstr "Прикажи ГТК инспектор"
 
 #: src/input/command.zig:576
 msgid "Show the GTK inspector."
