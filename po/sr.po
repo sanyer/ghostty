@@ -403,15 +403,15 @@ msgstr "Копирај изабрани текст као ANSI излазне с
 
 #: src/input/command.zig:167
 msgid "Copy Selection as HTML to Clipboard"
-msgstr "Копирај изабрано као хтмл у оставу"
+msgstr "Копирај изабрано као HTML у оставу"
 
 #: src/input/command.zig:168
 msgid "Copy the selected text as HTML to the clipboard."
-msgstr "Копирајте изабрани текст као хтмл у оставу."
+msgstr "Копирај изабрани текст као HTML у оставу."
 
 #: src/input/command.zig:173
 msgid "Copy URL to Clipboard"
-msgstr "Копирај УРЛ у оставу"
+msgstr "Копирај URL у оставу"
 
 #: src/input/command.zig:174
 msgid "Copy the URL under the cursor to the clipboard."
@@ -423,7 +423,7 @@ msgstr "Копирај наслов терминала у оставу"
 
 #: src/input/command.zig:180
 msgid "Copy the terminal title to the clipboard. If the terminal title is not set this has no effect."
-msgstr "Копирајте наслов терминала у оставу. Ако наслов терминала није постављен, ово неће имати дејства."
+msgstr "Копирај наслов терминала у оставу. Ако наслов терминала није постављен, ово неће имати дејства."
 
 #: src/input/command.zig:185
 msgid "Paste from Clipboard"
@@ -431,7 +431,7 @@ msgstr "Убаци из оставе"
 
 #: src/input/command.zig:186
 msgid "Paste the contents of the main clipboard."
-msgstr "Убаците садржај главне оставе."
+msgstr "Убаци садржај главне оставе."
 
 #: src/input/command.zig:191
 msgid "Paste from Selection"
@@ -455,7 +455,7 @@ msgstr "Претражи избор"
 
 #: src/input/command.zig:204
 msgid "Start a search for the current text selection."
-msgstr "Покрени претрагу за тренутни текстуални избор."
+msgstr "Покрени претрагу за тренутно изабрани текст."
 
 #: src/input/command.zig:209
 msgid "End Search"
@@ -567,7 +567,7 @@ msgstr "Копирај екран у привремену датотеку и к
 
 #: src/input/command.zig:287
 msgid "Copy the screen contents to a temporary file and copy the path to the clipboard."
-msgstr "Копирајте садржај екрана у привремену датотеку и копирајте путању у оставу."
+msgstr "Копирај садржај екрана у привремену датотеку и копирајте путању у оставу."
 
 #: src/input/command.zig:291
 msgid "Copy Screen to Temporary File and Paste Path"
@@ -587,11 +587,11 @@ msgstr "Копирајте садржај екрана у привремену �
 
 #: src/input/command.zig:305
 msgid "Copy Screen as HTML to Temporary File and Copy Path"
-msgstr "Копирај екран као ХТМЛ у привремену датотеку и копирај путању"
+msgstr "Копирај екран као HTML у привремену датотеку и копирај путању"
 
 #: src/input/command.zig:306
 msgid "Copy the screen contents as HTML to a temporary file and copy the path to the clipboard."
-msgstr "Копирајте садржај екрана као ХТМЛ у привремену датотеку и копирајте путању у оставу."
+msgstr "Копирајте садржај екрана као HTML у привремену датотеку и копирајте путању у оставу."
 
 #: src/input/command.zig:313
 msgid "Copy Screen as HTML to Temporary File and Paste Path"
@@ -756,11 +756,11 @@ msgstr "Промени наслов терминала…"
 
 #: src/input/command.zig:459
 msgid "Prompt for a new title for the current terminal."
-msgstr "Затражите нови наслов за текући терминал."
+msgstr "Затражи унос новог наслова за тренутни терминал."
 
 #: src/input/command.zig:465
 msgid "Prompt for a new title for the current tab."
-msgstr "Затражите нови наслов за текући језичак."
+msgstr "Затражи унос новог наслова за тренутни језичак."
 
 #: src/input/command.zig:478
 msgid "Split the terminal to the left."
@@ -888,7 +888,7 @@ msgstr "Прикажи ГТК инспектора"
 
 #: src/input/command.zig:576
 msgid "Show the GTK inspector."
-msgstr "Прикажи ГТК Inspector."
+msgstr "Прикажи ГТК инспектор."
 
 #: src/input/command.zig:581
 msgid "Show On-Screen Keyboard"
@@ -1004,7 +1004,7 @@ msgstr "Промени режим безбедног уноса."
 
 #: src/input/command.zig:672
 msgid "Toggle Mouse Reporting"
-msgstr "Окини пријављивање миша"
+msgstr "Окини прослеђивање догађаја миша"
 
 #: src/input/command.zig:673
 msgid "Toggle whether mouse events are reported to terminal applications."
@@ -1032,7 +1032,7 @@ msgstr "Опозови"
 
 #: src/input/command.zig:691
 msgid "Undo the last action."
-msgstr "Опозовите последњу радњу."
+msgstr "Опозови последњу радњу."
 
 #: src/input/command.zig:696
 msgid "Redo"
@@ -1040,7 +1040,7 @@ msgstr "Понови"
 
 #: src/input/command.zig:697
 msgid "Redo the last undone action."
-msgstr "Поновите последњу опозвану радњу."
+msgstr "Понови последњу опозвану радњу."
 
 #: src/input/command.zig:703
 msgid "Quit the application."
