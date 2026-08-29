@@ -395,11 +395,11 @@ msgstr "Копирај изабрани текст као обичан текс�
 
 #: src/input/command.zig:163
 msgid "Copy Selection as ANSI Sequences to Clipboard"
-msgstr "Копирај изабрано као ANSI низове у оставу"
+msgstr "Копирај изабрано као ANSI секвенце у оставу"
 
 #: src/input/command.zig:164
 msgid "Copy the selected text as ANSI escape sequences to the clipboard."
-msgstr "Копирај изабрани текст као ANSI излазне низове у оставу."
+msgstr "Копирај изабрани текст као ANSI излазне секвенце у оставу."
 
 #: src/input/command.zig:167
 msgid "Copy Selection as HTML to Clipboard"
@@ -611,29 +611,29 @@ msgstr "Копирај садржај екрана као ХТМЛ у привр
 
 #: src/input/command.zig:330
 msgid "Copy Screen as ANSI Sequences to Temporary File and Copy Path"
-msgstr "Копирај екран као ANSI низове у привремену датотеку и копирај путању"
+msgstr "Копирај екран као ANSI секвенце у привремену датотеку и копирај путању"
 
 #: src/input/command.zig:331
 msgid ""
 "Copy the screen contents as ANSI escape sequences to a temporary file and copy the path to the clipboard."
-msgstr "Копирај садржај екрана као излазне ANSI низове у привремену датотеку и копирај путању у оставу."
+msgstr "Копирај садржај екрана као излазне ANSI секвенце у привремену датотеку и копирај путању у оставу."
 
 #: src/input/command.zig:338
 msgid "Copy Screen as ANSI Sequences to Temporary File and Paste Path"
-msgstr "Копирај екран као ANSI низове у привремену датотеку и убаци путању"
+msgstr "Копирај екран као ANSI секвенце у привремену датотеку и убаци путању"
 
 #: src/input/command.zig:339
 msgid ""
 "Copy the screen contents as ANSI escape sequences to a temporary file and paste the path to the file."
-msgstr "Копирај садржај екрана као излазне ANSI низове у привремену датотеку и убаци путању до датотеке."
+msgstr "Копирај садржај екрана као излазне ANSI секвенце у привремену датотеку и убаци путању до датотеке."
 
 #: src/input/command.zig:346
 msgid "Copy Screen as ANSI Sequences to Temporary File and Open"
-msgstr "Копирај екран као ANSI низове у привремену датотеку и отвори"
+msgstr "Копирај екран као ANSI секвенце у привремену датотеку и отвори"
 
 #: src/input/command.zig:347
 msgid "Copy the screen contents as ANSI escape sequences to a temporary file and open it."
-msgstr "Копирај садржај екрана као излазне ANSI низове у привремену датотеку и отвори је."
+msgstr "Копирај садржај екрана као излазне ANSI секвенце у привремену датотеку и отвори је."
 
 #: src/input/command.zig:354
 msgid "Copy Selection to Temporary File and Copy Path"
@@ -685,30 +685,30 @@ msgstr "Копирај садржај изабраног као ХТМЛ у пр
 
 #: src/input/command.zig:398
 msgid "Copy Selection as ANSI Sequences to Temporary File and Copy Path"
-msgstr "Копирај изабрано као ANSI низове у привремену датотеку и копирај путању"
+msgstr "Копирај изабрано као ANSI секвенце у привремену датотеку и копирај путању"
 
 #: src/input/command.zig:399
 msgid ""
 "Copy the selection contents as ANSI escape sequences to a temporary file and copy the path to the "
 "clipboard."
-msgstr "Копирај садржај избора као излазне ANSI низове у привремену датотеку и копирај путању у оставу."
+msgstr "Копирај садржај избора као излазне ANSI секвенце у привремену датотеку и копирај путању у оставу."
 
 #: src/input/command.zig:406
 msgid "Copy Selection as ANSI Sequences to Temporary File and Paste Path"
-msgstr "Копирај изабрано као ANSI низове у привремену датотеку и убаци путању"
+msgstr "Копирај изабрано као ANSI секвенце у привремену датотеку и убаци путању"
 
 #: src/input/command.zig:407
 msgid ""
 "Copy the selection contents as ANSI escape sequences to a temporary file and paste the path to the file."
-msgstr "Копирај садржај избора као излазне ANSI низове у привремену датотеку и убаци путању до те датотеке."
+msgstr "Копирај садржај избора као излазне ANSI секвенце у привремену датотеку и убаци путању до те датотеке."
 
 #: src/input/command.zig:414
 msgid "Copy Selection as ANSI Sequences to Temporary File and Open"
-msgstr "Копирај изабрано као ANSI низове у привремену датотеку и отвори"
+msgstr "Копирај изабрано као ANSI секвенце у привремену датотеку и отвори"
 
 #: src/input/command.zig:415
 msgid "Copy the selection contents as ANSI escape sequences to a temporary file and open it."
-msgstr "Копирај садржај избора као излазне ANSI низове у привремену датотеку и отвори је."
+msgstr "Копирај садржај избора као излазне ANSI секвенце у привремену датотеку и отвори је."
 
 #: src/input/command.zig:422
 msgid "Open a new window."
