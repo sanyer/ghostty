@@ -158,12 +158,12 @@ msgstr "Раздели доле"
 #: src/apprt/gtk/ui/1.2/surface.blp:365 src/apprt/gtk/ui/1.5/window.blp:190
 #: src/apprt/gtk/ui/1.5/window.blp:268 src/input/command.zig:477
 msgid "Split Left"
-msgstr "Раздели лево"
+msgstr "Раздели улево"
 
 #: src/apprt/gtk/ui/1.2/surface.blp:371 src/apprt/gtk/ui/1.5/window.blp:195
 #: src/apprt/gtk/ui/1.5/window.blp:273 src/input/command.zig:482
 msgid "Split Right"
-msgstr "Раздели десно"
+msgstr "Раздели удесно"
 
 #: src/apprt/gtk/ui/1.2/surface.blp:377
 msgid "Close Split"
@@ -724,7 +724,7 @@ msgstr "Помери језичак улево"
 
 #: src/input/command.zig:435
 msgid "Move the current tab to the left."
-msgstr "Премести текући језичак лево."
+msgstr "Премести тренутни језичак улево."
 
 #: src/input/command.zig:439
 msgid "Move Tab Right"
@@ -732,7 +732,7 @@ msgstr "Помери језичак удесно"
 
 #: src/input/command.zig:440
 msgid "Move the current tab to the right."
-msgstr "Преместите текући језичак десно."
+msgstr "Премести тренутни језичак удесно."
 
 #: src/input/command.zig:446
 msgid "Move Tab to New Window"
@@ -740,7 +740,7 @@ msgstr "Помери језичак у нови прозор"
 
 #: src/input/command.zig:447
 msgid "Move the current tab to a new window."
-msgstr "Преместите текући језичак у нови прозор."
+msgstr "Премести тренутни језичак у нови прозор."
 
 #: src/input/command.zig:452
 msgid "Toggle Tab Overview"
@@ -764,11 +764,11 @@ msgstr "Затражи унос новог наслова за тренутни 
 
 #: src/input/command.zig:478
 msgid "Split the terminal to the left."
-msgstr "Раздели терминал лево."
+msgstr "Раздели терминал улево."
 
 #: src/input/command.zig:483
 msgid "Split the terminal to the right."
-msgstr "Раздели терминал десно."
+msgstr "Раздели терминал удесно."
 
 #: src/input/command.zig:488
 msgid "Split the terminal up."
@@ -796,19 +796,19 @@ msgstr "Фокусирај следећу разделу, ако постоји.
 
 #: src/input/command.zig:510
 msgid "Focus Split: Left"
-msgstr "Фокус разделе: лево"
+msgstr "Фокус разделе: улево"
 
 #: src/input/command.zig:511
 msgid "Focus the split to the left, if it exists."
-msgstr "Фокусирај разделу лево, ако постоји."
+msgstr "Фокусирај разделу улево, ако постоји."
 
 #: src/input/command.zig:515
 msgid "Focus Split: Right"
-msgstr "Фокус разделе: десно"
+msgstr "Фокус разделе: удесно"
 
 #: src/input/command.zig:516
 msgid "Focus the split to the right, if it exists."
-msgstr "Усредсреди десну разделу, ако постоји."
+msgstr "Фокусирај разделу удесно, ако постоји."
 
 #: src/input/command.zig:520
 msgid "Focus Split: Up"
