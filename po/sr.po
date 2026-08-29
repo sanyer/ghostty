@@ -812,35 +812,35 @@ msgstr "Фокусирај разделу удесно, ако постоји."
 
 #: src/input/command.zig:520
 msgid "Focus Split: Up"
-msgstr "Усредсреди разделу: горе"
+msgstr "Фокусирај разделу: горе"
 
 #: src/input/command.zig:521
 msgid "Focus the split above, if it exists."
-msgstr "Усредсреди горњу разделу, ако постоји."
+msgstr "Фокусирај горњу разделу, ако постоји."
 
 #: src/input/command.zig:525
 msgid "Focus Split: Down"
-msgstr "Усредсреди разделу: доле"
+msgstr "Фокусирај разделу: доле"
 
 #: src/input/command.zig:526
 msgid "Focus the split below, if it exists."
-msgstr "Усредсреди доњу разделу, ако постоји."
+msgstr "Фокусирај доњу разделу, ако постоји."
 
 #: src/input/command.zig:533
 msgid "Focus Window: Previous"
-msgstr "Усредсреди прозор: претходни"
+msgstr "Фокусирај прозор: претходни"
 
 #: src/input/command.zig:534
 msgid "Focus the previous window, if any."
-msgstr "Усредсреди претходни прозор, ако постоји."
+msgstr "Фокусирај претходни прозор, ако постоји."
 
 #: src/input/command.zig:538
 msgid "Focus Window: Next"
-msgstr "Усредсреди прозор: следећи"
+msgstr "Фокусирај прозор: следећи"
 
 #: src/input/command.zig:539
 msgid "Focus the next window, if any."
-msgstr "Усредсреди следећи прозор, ако постоји."
+msgstr "Фокусирај следећи прозор, ако постоји."
 
 #: src/input/command.zig:545
 msgid "Toggle Split Zoom"
