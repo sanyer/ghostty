@@ -732,7 +732,7 @@ msgstr "Копирај го избраното како HTML во приврем
 msgid ""
 "Copy the selection contents as HTML to a temporary file and paste the path "
 "to the file."
-msgstr "Копирај ја избраната содржина како HTML во привремена датотека и 
+msgstr "Копирај ја избраната содржина како HTML во привремена датотека и "
 "вметни ја патеката до датотеката."
 
 #: src/input/command.zig:389
