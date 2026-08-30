@@ -46,6 +46,7 @@ alexfeijoo44
 alexjuca
 alosarjos
 amadeus
+and-rs
 andrejdaskalov
 anhthang
 anmitalidev
@@ -211,6 +212,7 @@ marrocco-simone
 masterflitzer
 matkotiric
 mattn
+mgsloan
 micaeljarniac
 michielvk
 miguelelgallo
