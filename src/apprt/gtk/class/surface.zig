@@ -1572,12 +1572,13 @@ pub const Surface = extern struct {
                 break :xft_scale 1.0;
             };
 
-            // Use a value of 1.0 for the XFT DPI scale if the setting is <= 0
-            // See:
-            // https://gitlab.gnome.org/GNOME/libadwaita/-/commit/a7738a4d269bfdf4d8d5429ca73ccdd9b2450421
+            // -1 specifies default scale. See:
+            // https://docs.gtk.org/gtk4/property.Settings.gtk-xft-dpi.html
             // https://gitlab.gnome.org/GNOME/libadwaita/-/commit/9759d3fd81129608dd78116001928f2aed974ead
             if (gtk_xft_dpi <= 0) {
-                log.warn("gtk-xft-dpi has invalid value ({}), using default", .{gtk_xft_dpi});
+                if (gtk_xft_dpi != -1) {
+                    log.warn("gtk-xft-dpi has invalid value ({}), using default", .{gtk_xft_dpi});
+                }
                 break :xft_scale 1.0;
             }
 
