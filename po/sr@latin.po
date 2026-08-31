@@ -1,24 +1,21 @@
-# Language SR@latin translations for com.mitchellh.ghostty package.
+# Language SR translations for com.mitchellh.ghostty package.
 # Copyright (C) 2026 "Mitchell Hashimoto, Ghostty contributors"
 # This file is distributed under the same license as the com.mitchellh.ghostty package.
 # Марко Костић <marko.m.kostic@gmail.com>, 2026.
-#
-# Do not translate or edit this file directly. It is generated from po/sr.po with:
-# msgfilter -i po/sr.po -o po/sr@latin.po recode-sr-latin
-# After updating po/sr.po, regenerate this file and set `Language: sr@latin`.
 #
 msgid ""
 msgstr ""
 "Project-Id-Version: com.mitchellh.ghostty\n"
 "Report-Msgid-Bugs-To: m@mitchellh.com\n"
 "POT-Creation-Date: 2026-08-10 10:06-0500\n"
-"PO-Revision-Date: 2026-08-15 10:28+0200\n"
+"PO-Revision-Date: 2026-08-29 12:49+0200\n"
 "Last-Translator: Marko Kostić <marko.m.kostic@gmail.com>\n"
 "Language-Team: Language SR\n"
-"Language: sr@latin\n"
+"Language: sr\n"
 "MIME-Version: 1.0\n"
 "Content-Type: text/plain; charset=UTF-8\n"
 "Content-Transfer-Encoding: 8bit\n"
+"X-Generator: Poedit 3.9\n"
 
 #: dist/linux/ghostty_nautilus.py:53
 msgid "Open in Ghostty"
@@ -29,7 +26,7 @@ msgstr "Otvori u Ghostty-ju"
 #: src/apprt/gtk/class/clipboard_confirmation_dialog.zig:197
 #: src/apprt/gtk/class/clipboard_confirmation_dialog.zig:201
 msgid "Authorize Clipboard Access"
-msgstr "Ovlasti pristup ostavi"
+msgstr "Odobri pristup ostavi"
 
 #: src/apprt/gtk/ui/1.0/clipboard-confirmation-dialog.blp:17
 #: src/apprt/gtk/ui/1.4/clipboard-confirmation-dialog.blp:17
@@ -47,7 +44,7 @@ msgstr "Zapamti izbor za ovu razdelu"
 
 #: src/apprt/gtk/ui/1.4/clipboard-confirmation-dialog.blp:93
 msgid "Reload configuration to show this prompt again"
-msgstr "Ponovo učitaj postavke da bi se ovaj upit ponovo prikazao"
+msgstr "Ponovo učitaj podešavanja da bi se ovaj upit ponovo prikazao"
 
 #: src/apprt/gtk/ui/1.2/close-confirmation-dialog.blp:7
 #: src/apprt/gtk/ui/1.5/title-dialog.blp:8
@@ -63,15 +60,15 @@ msgstr "Zatvori"
 
 #: src/apprt/gtk/ui/1.2/config-errors-dialog.blp:6
 msgid "Configuration Errors"
-msgstr "Greške u postavkama"
+msgstr "Greške u podešavanjima"
 
 #: src/apprt/gtk/ui/1.2/config-errors-dialog.blp:8
 msgid ""
 "One or more configuration errors were found. Please review the errors below, "
 "and either reload your configuration or ignore these errors."
 msgstr ""
-"Pronađena je jedna ili više grešaka u postavkama. Pregledajte greške ispod, "
-"i ponovo učitajte svoje postavke ili zanemarite ove greške."
+"Pronađena je jedna ili više grešaka u podešavanjima. Pregledajte greške "
+"ispod, i ponovo učitajte svoja podešavanja ili zanemarite ove greške."
 
 #: src/apprt/gtk/ui/1.2/config-errors-dialog.blp:12
 msgid "Ignore"
@@ -80,7 +77,7 @@ msgstr "Zanemari"
 #: src/apprt/gtk/ui/1.2/config-errors-dialog.blp:13
 #: src/apprt/gtk/ui/1.2/surface.blp:439 src/apprt/gtk/ui/1.5/window.blp:318
 msgid "Reload Configuration"
-msgstr "Ponovo učitaj postavke"
+msgstr "Ponovo učitaj podešavanja"
 
 #: src/apprt/gtk/ui/1.2/debug-warning.blp:7
 #: src/apprt/gtk/ui/1.3/debug-warning.blp:6
@@ -168,12 +165,12 @@ msgstr "Razdeli dole"
 #: src/apprt/gtk/ui/1.2/surface.blp:365 src/apprt/gtk/ui/1.5/window.blp:190
 #: src/apprt/gtk/ui/1.5/window.blp:268 src/input/command.zig:477
 msgid "Split Left"
-msgstr "Razdeli levo"
+msgstr "Razdeli ulevo"
 
 #: src/apprt/gtk/ui/1.2/surface.blp:371 src/apprt/gtk/ui/1.5/window.blp:195
 #: src/apprt/gtk/ui/1.5/window.blp:273 src/input/command.zig:482
 msgid "Split Right"
-msgstr "Razdeli desno"
+msgstr "Razdeli udesno"
 
 #: src/apprt/gtk/ui/1.2/surface.blp:377
 msgid "Close Split"
@@ -223,11 +220,11 @@ msgstr "Podešavanja"
 
 #: src/apprt/gtk/ui/1.2/surface.blp:427 src/apprt/gtk/ui/1.5/window.blp:306
 msgid "Open Configuration in OS Editor"
-msgstr "Otvori postavke u uređivaču OS-a"
+msgstr "Otvori podešavanja u uređivaču OS-a"
 
 #: src/apprt/gtk/ui/1.2/surface.blp:433 src/apprt/gtk/ui/1.5/window.blp:312
 msgid "Open Configuration in New Window"
-msgstr "Otvori postavke u novom prozoru"
+msgstr "Otvori podešavanja u novom prozoru"
 
 #: src/apprt/gtk/ui/1.5/title-dialog.blp:5
 msgid "Leave blank to restore the default title."
@@ -291,7 +288,7 @@ msgstr "Izvezi"
 
 #: src/apprt/gtk/class/application.zig:2783
 msgid "Editing configuration file"
-msgstr "Uređivanje datoteke sa postavkama"
+msgstr "Uređivanje datoteke sa podešavanjima"
 
 #: src/apprt/gtk/class/clipboard_confirmation_dialog.zig:198
 msgid ""
@@ -380,7 +377,7 @@ msgstr "Promeni naslov prozora"
 
 #: src/apprt/gtk/class/window.zig:1153
 msgid "Reloaded the configuration"
-msgstr "Ponovo učitane postavke"
+msgstr "Ponovo učitana podešavanja"
 
 #: src/apprt/gtk/class/window.zig:1830
 msgid "Copied to clipboard"
@@ -421,19 +418,19 @@ msgstr "Kopiraj izabrani tekst kao običan tekst u ostavu."
 
 #: src/input/command.zig:163
 msgid "Copy Selection as ANSI Sequences to Clipboard"
-msgstr "Kopiraj izabrano kao ANSI nizove u ostavu"
+msgstr "Kopiraj izabrano kao ANSI sekvence u ostavu"
 
 #: src/input/command.zig:164
 msgid "Copy the selected text as ANSI escape sequences to the clipboard."
-msgstr "Kopiraj izabrani tekst kao ANSI izlazne nizove u ostavu."
+msgstr "Kopiraj izabrani tekst kao ANSI izlazne sekvence u ostavu."
 
 #: src/input/command.zig:167
 msgid "Copy Selection as HTML to Clipboard"
-msgstr "Kopiraj izabrano kao html u ostavu"
+msgstr "Kopiraj izabrano kao HTML u ostavu"
 
 #: src/input/command.zig:168
 msgid "Copy the selected text as HTML to the clipboard."
-msgstr "Kopirajte izabrani tekst kao html u ostavu."
+msgstr "Kopiraj izabrani tekst kao HTML u ostavu."
 
 #: src/input/command.zig:173
 msgid "Copy URL to Clipboard"
@@ -452,8 +449,8 @@ msgid ""
 "Copy the terminal title to the clipboard. If the terminal title is not set "
 "this has no effect."
 msgstr ""
-"Kopirajte naslov terminala u ostavu. Ako naslov terminala nije postavljen, "
-"ovo neće imati dejstva."
+"Kopiraj naslov terminala u ostavu. Ako naslov terminala nije postavljen, ovo "
+"neće imati dejstva."
 
 #: src/input/command.zig:185
 msgid "Paste from Clipboard"
@@ -461,7 +458,7 @@ msgstr "Ubaci iz ostave"
 
 #: src/input/command.zig:186
 msgid "Paste the contents of the main clipboard."
-msgstr "Ubacite sadržaj glavne ostave."
+msgstr "Ubaci sadržaj glavne ostave."
 
 #: src/input/command.zig:191
 msgid "Paste from Selection"
@@ -485,7 +482,7 @@ msgstr "Pretraži izbor"
 
 #: src/input/command.zig:204
 msgid "Start a search for the current text selection."
-msgstr "Pokreni pretragu za trenutni tekstualni izbor."
+msgstr "Pokreni pretragu za trenutno izabrani tekst."
 
 #: src/input/command.zig:209
 msgid "End Search"
@@ -600,7 +597,7 @@ msgid ""
 "Copy the screen contents to a temporary file and copy the path to the "
 "clipboard."
 msgstr ""
-"Kopirajte sadržaj ekrana u privremenu datoteku i kopirajte putanju u ostavu."
+"Kopiraj sadržaj ekrana u privremenu datoteku i kopirajte putanju u ostavu."
 
 #: src/input/command.zig:291
 msgid "Copy Screen to Temporary File and Paste Path"
@@ -655,38 +652,39 @@ msgstr "Kopiraj sadržaj ekrana kao HTML u privremenu datoteku i otvori je."
 
 #: src/input/command.zig:330
 msgid "Copy Screen as ANSI Sequences to Temporary File and Copy Path"
-msgstr "Kopiraj ekran kao ANSI nizove u privremenu datoteku i kopiraj putanju"
+msgstr ""
+"Kopiraj ekran kao ANSI sekvence u privremenu datoteku i kopiraj putanju"
 
 #: src/input/command.zig:331
 msgid ""
 "Copy the screen contents as ANSI escape sequences to a temporary file and "
 "copy the path to the clipboard."
 msgstr ""
-"Kopiraj sadržaj ekrana kao izlazne ANSI nizove u privremenu datoteku i "
+"Kopiraj sadržaj ekrana kao izlazne ANSI sekvence u privremenu datoteku i "
 "kopiraj putanju u ostavu."
 
 #: src/input/command.zig:338
 msgid "Copy Screen as ANSI Sequences to Temporary File and Paste Path"
-msgstr "Kopiraj ekran kao ANSI nizove u privremenu datoteku i ubaci putanju"
+msgstr "Kopiraj ekran kao ANSI sekvence u privremenu datoteku i ubaci putanju"
 
 #: src/input/command.zig:339
 msgid ""
 "Copy the screen contents as ANSI escape sequences to a temporary file and "
 "paste the path to the file."
 msgstr ""
-"Kopiraj sadržaj ekrana kao izlazne ANSI nizove u privremenu datoteku i ubaci "
-"putanju do datoteke."
+"Kopiraj sadržaj ekrana kao izlazne ANSI sekvence u privremenu datoteku i "
+"ubaci putanju do datoteke."
 
 #: src/input/command.zig:346
 msgid "Copy Screen as ANSI Sequences to Temporary File and Open"
-msgstr "Kopiraj ekran kao ANSI nizove u privremenu datoteku i otvori"
+msgstr "Kopiraj ekran kao ANSI sekvence u privremenu datoteku i otvori"
 
 #: src/input/command.zig:347
 msgid ""
 "Copy the screen contents as ANSI escape sequences to a temporary file and "
 "open it."
 msgstr ""
-"Kopiraj sadržaj ekrana kao izlazne ANSI nizove u privremenu datoteku i "
+"Kopiraj sadržaj ekrana kao izlazne ANSI sekvence u privremenu datoteku i "
 "otvori je."
 
 #: src/input/command.zig:354
@@ -754,38 +752,39 @@ msgstr "Kopiraj sadržaj izabranog kao HTML u privremenu datoteku i otvori je."
 #: src/input/command.zig:398
 msgid "Copy Selection as ANSI Sequences to Temporary File and Copy Path"
 msgstr ""
-"Kopiraj izabrano kao ANSI nizove u privremenu datoteku i kopiraj putanju"
+"Kopiraj izabrano kao ANSI sekvence u privremenu datoteku i kopiraj putanju"
 
 #: src/input/command.zig:399
 msgid ""
 "Copy the selection contents as ANSI escape sequences to a temporary file and "
 "copy the path to the clipboard."
 msgstr ""
-"Kopiraj sadržaj izbora kao izlazne ANSI nizove u privremenu datoteku i "
+"Kopiraj sadržaj izbora kao izlazne ANSI sekvence u privremenu datoteku i "
 "kopiraj putanju u ostavu."
 
 #: src/input/command.zig:406
 msgid "Copy Selection as ANSI Sequences to Temporary File and Paste Path"
-msgstr "Kopiraj izabrano kao ANSI nizove u privremenu datoteku i ubaci putanju"
+msgstr ""
+"Kopiraj izabrano kao ANSI sekvence u privremenu datoteku i ubaci putanju"
 
 #: src/input/command.zig:407
 msgid ""
 "Copy the selection contents as ANSI escape sequences to a temporary file and "
 "paste the path to the file."
 msgstr ""
-"Kopiraj sadržaj izbora kao izlazne ANSI nizove u privremenu datoteku i ubaci "
-"putanju do te datoteke."
+"Kopiraj sadržaj izbora kao izlazne ANSI sekvence u privremenu datoteku i "
+"ubaci putanju do te datoteke."
 
 #: src/input/command.zig:414
 msgid "Copy Selection as ANSI Sequences to Temporary File and Open"
-msgstr "Kopiraj izabrano kao ANSI nizove u privremenu datoteku i otvori"
+msgstr "Kopiraj izabrano kao ANSI sekvence u privremenu datoteku i otvori"
 
 #: src/input/command.zig:415
 msgid ""
 "Copy the selection contents as ANSI escape sequences to a temporary file and "
 "open it."
 msgstr ""
-"Kopiraj sadržaj izbora kao izlazne ANSI nizove u privremenu datoteku i "
+"Kopiraj sadržaj izbora kao izlazne ANSI sekvence u privremenu datoteku i "
 "otvori je."
 
 #: src/input/command.zig:422
@@ -802,7 +801,7 @@ msgstr "Pomeri jezičak ulevo"
 
 #: src/input/command.zig:435
 msgid "Move the current tab to the left."
-msgstr "Premesti tekući jezičak levo."
+msgstr "Premesti trenutni jezičak ulevo."
 
 #: src/input/command.zig:439
 msgid "Move Tab Right"
@@ -810,7 +809,7 @@ msgstr "Pomeri jezičak udesno"
 
 #: src/input/command.zig:440
 msgid "Move the current tab to the right."
-msgstr "Premestite tekući jezičak desno."
+msgstr "Premesti trenutni jezičak udesno."
 
 #: src/input/command.zig:446
 msgid "Move Tab to New Window"
@@ -818,7 +817,7 @@ msgstr "Pomeri jezičak u novi prozor"
 
 #: src/input/command.zig:447
 msgid "Move the current tab to a new window."
-msgstr "Premestite tekući jezičak u novi prozor."
+msgstr "Premesti trenutni jezičak u novi prozor."
 
 #: src/input/command.zig:452
 msgid "Toggle Tab Overview"
@@ -834,19 +833,19 @@ msgstr "Promeni naslov terminala…"
 
 #: src/input/command.zig:459
 msgid "Prompt for a new title for the current terminal."
-msgstr "Zatražite novi naslov za tekući terminal."
+msgstr "Zatraži unos novog naslova za trenutni terminal."
 
 #: src/input/command.zig:465
 msgid "Prompt for a new title for the current tab."
-msgstr "Zatražite novi naslov za tekući jezičak."
+msgstr "Zatraži unos novog naslova za trenutni jezičak."
 
 #: src/input/command.zig:478
 msgid "Split the terminal to the left."
-msgstr "Razdeli terminal levo."
+msgstr "Razdeli terminal ulevo."
 
 #: src/input/command.zig:483
 msgid "Split the terminal to the right."
-msgstr "Razdeli terminal desno."
+msgstr "Razdeli terminal udesno."
 
 #: src/input/command.zig:488
 msgid "Split the terminal up."
@@ -874,51 +873,51 @@ msgstr "Fokusiraj sledeću razdelu, ako postoji."
 
 #: src/input/command.zig:510
 msgid "Focus Split: Left"
-msgstr "Fokus razdele: levo"
+msgstr "Fokus razdele: ulevo"
 
 #: src/input/command.zig:511
 msgid "Focus the split to the left, if it exists."
-msgstr "Fokusiraj razdelu levo, ako postoji."
+msgstr "Fokusiraj razdelu ulevo, ako postoji."
 
 #: src/input/command.zig:515
 msgid "Focus Split: Right"
-msgstr "Fokus razdele: desno"
+msgstr "Fokus razdele: udesno"
 
 #: src/input/command.zig:516
 msgid "Focus the split to the right, if it exists."
-msgstr "Usredsredi desnu razdelu, ako postoji."
+msgstr "Fokusiraj razdelu udesno, ako postoji."
 
 #: src/input/command.zig:520
 msgid "Focus Split: Up"
-msgstr "Usredsredi razdelu: gore"
+msgstr "Fokusiraj razdelu: gore"
 
 #: src/input/command.zig:521
 msgid "Focus the split above, if it exists."
-msgstr "Usredsredi gornju razdelu, ako postoji."
+msgstr "Fokusiraj gornju razdelu, ako postoji."
 
 #: src/input/command.zig:525
 msgid "Focus Split: Down"
-msgstr "Usredsredi razdelu: dole"
+msgstr "Fokusiraj razdelu: dole"
 
 #: src/input/command.zig:526
 msgid "Focus the split below, if it exists."
-msgstr "Usredsredi donju razdelu, ako postoji."
+msgstr "Fokusiraj donju razdelu, ako postoji."
 
 #: src/input/command.zig:533
 msgid "Focus Window: Previous"
-msgstr "Usredsredi prozor: prethodni"
+msgstr "Fokusiraj prozor: prethodni"
 
 #: src/input/command.zig:534
 msgid "Focus the previous window, if any."
-msgstr "Usredsredi prethodni prozor, ako postoji."
+msgstr "Fokusiraj prethodni prozor, ako postoji."
 
 #: src/input/command.zig:538
 msgid "Focus Window: Next"
-msgstr "Usredsredi prozor: sledeći"
+msgstr "Fokusiraj prozor: sledeći"
 
 #: src/input/command.zig:539
 msgid "Focus the next window, if any."
-msgstr "Usredsredi sledeći prozor, ako postoji."
+msgstr "Fokusiraj sledeći prozor, ako postoji."
 
 #: src/input/command.zig:545
 msgid "Toggle Split Zoom"
@@ -954,19 +953,19 @@ msgstr "Vrati veličinu prozora na podrazumevanu."
 
 #: src/input/command.zig:569
 msgid "Toggle Inspector"
-msgstr "Okini inspektora"
+msgstr "Okini inspektor"
 
 #: src/input/command.zig:570
 msgid "Toggle the inspector."
-msgstr "Okini inspektora."
+msgstr "Okini inspektor."
 
 #: src/input/command.zig:575
 msgid "Show the GTK Inspector"
-msgstr "Prikaži GTK inspektora"
+msgstr "Prikaži GTK inspektor"
 
 #: src/input/command.zig:576
 msgid "Show the GTK inspector."
-msgstr "Prikaži GTK Inspector."
+msgstr "Prikaži GTK inspektor."
 
 #: src/input/command.zig:581
 msgid "Show On-Screen Keyboard"
@@ -1083,7 +1082,7 @@ msgstr "Promeni režim bezbednog unosa."
 
 #: src/input/command.zig:672
 msgid "Toggle Mouse Reporting"
-msgstr "Okini prijavljivanje miša"
+msgstr "Okini prosleđivanje događaja miša"
 
 #: src/input/command.zig:673
 msgid "Toggle whether mouse events are reported to terminal applications."
@@ -1111,7 +1110,7 @@ msgstr "Opozovi"
 
 #: src/input/command.zig:691
 msgid "Undo the last action."
-msgstr "Opozovite poslednju radnju."
+msgstr "Opozovi poslednju radnju."
 
 #: src/input/command.zig:696
 msgid "Redo"
@@ -1119,7 +1118,7 @@ msgstr "Ponovi"
 
 #: src/input/command.zig:697
 msgid "Redo the last undone action."
-msgstr "Ponovite poslednju opozvanu radnju."
+msgstr "Ponovi poslednju opozvanu radnju."
 
 #: src/input/command.zig:703
 msgid "Quit the application."
