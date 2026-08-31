@@ -32,6 +32,7 @@
  * - @ref render "Render State" - Incremental render state updates for custom renderers
  * - @ref formatter "Formatter" - Format terminal content as plain text, VT sequences, or HTML
  * - @ref snapshot "Terminal Snapshot" - Encode and incrementally restore terminal state
+ * - @ref search "Search" - Search terminal contents, including scrollback
  * - @ref osc "OSC Parser" - Parse OSC (Operating System Command) sequences
  * - @ref sgr "SGR Parser" - Parse SGR (Select Graphic Rendition) sequences
  * - @ref paste "Paste" - Paste into a terminal, validate and encode paste data
@@ -156,6 +157,7 @@ extern "C" {
 #include <ghostty/vt/paste.h>
 #include <ghostty/vt/point.h>
 #include <ghostty/vt/screen.h>
+#include <ghostty/vt/search.h>
 #include <ghostty/vt/selection.h>
 #include <ghostty/vt/size_report.h>
 #include <ghostty/vt/snapshot.h>
