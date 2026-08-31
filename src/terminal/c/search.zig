@@ -14,18 +14,27 @@ const log = std.log.scoped(.search_c);
 /// C: GhosttySearch
 pub const Search = ?*SearchWrapper;
 
-const SearchWrapper = struct {
+pub const SearchWrapper = struct {
     alloc: std.mem.Allocator,
 
     /// The terminal this search is bound to. This is borrowed, so the
-    /// search never frees it and the terminal must outlive the search.
-    terminal: *terminal_c.ZigTerminal,
+    /// search never frees it. If the terminal is freed first, it sets
+    /// this to null to detach the search: calls that need the terminal
+    /// then fail cleanly and free releases only search-owned memory.
+    terminal: terminal_c.Terminal,
 
     search: TerminalSearch,
 
     /// The scroll policy applied by the select options. Persistent
     /// across selects, set via the select_scroll option.
     select_scroll: TerminalSearch.SelectScroll = .if_needed,
+
+    /// The Zig terminal this search is bound to, or null if the
+    /// terminal was freed before the search.
+    fn zigTerminal(self: *const SearchWrapper) ?*terminal_c.ZigTerminal {
+        const terminal_wrapper = self.terminal orelse return null;
+        return terminal_wrapper.terminal;
+    }
 };
 
 /// C: GhosttySearchStatus
@@ -117,7 +126,7 @@ pub fn new(
     const out = out_search orelse return .invalid_value;
     out.* = null;
 
-    const t = terminal_c.zigTerminal(terminal) orelse return .invalid_value;
+    const terminal_wrapper = terminal orelse return .invalid_value;
     const opts = options orelse return .invalid_value;
     if (opts.size < @sizeOf(Options)) return .invalid_value;
     if (opts.needle.len == 0) return .invalid_value;
@@ -132,16 +141,36 @@ pub fn new(
     };
     wrapper.* = .{
         .alloc = alloc,
-        .terminal = t,
+        .terminal = terminal_wrapper,
         .search = search,
     };
+
+    // Store the search in the terminal so that when the terminal is
+    // freed the search can be detached safely.
+    terminal_wrapper.searches.putNoClobber(
+        terminal_wrapper.terminal.gpa(),
+        wrapper,
+        {},
+    ) catch {
+        wrapper.search.deinit(terminal_wrapper.terminal);
+        alloc.destroy(wrapper);
+        return .out_of_memory;
+    };
+
     out.* = wrapper;
     return .success;
 }
 
 pub fn free(search_: Search) callconv(lib.calling_conv) void {
     const wrapper = search_ orelse return;
-    wrapper.search.deinit(wrapper.terminal);
+    if (wrapper.terminal) |terminal_wrapper| {
+        _ = terminal_wrapper.searches.swapRemove(wrapper);
+        wrapper.search.deinit(terminal_wrapper.terminal);
+    } else {
+        // The terminal was freed first. Tracked state died with it,
+        // so only search-owned memory is freed.
+        wrapper.search.deinit(null);
+    }
     const alloc = wrapper.alloc;
     alloc.destroy(wrapper);
 }
@@ -158,26 +187,28 @@ pub fn tick(
 
 pub fn feed(search_: Search) callconv(lib.calling_conv) Result {
     const wrapper = search_ orelse return .invalid_value;
+    const t = wrapper.zigTerminal() orelse return .invalid_value;
 
     // The C API has no renderer cooperation to know whether the active
     // area changed, so it is always re-scanned. This is correct without
     // any dirty tracking and cheap because the active area search was
     // built for exactly this.
-    wrapper.search.feed(wrapper.terminal, true);
+    wrapper.search.feed(t, true);
     return .success;
 }
 
 pub fn run(search_: Search) callconv(lib.calling_conv) Result {
     const wrapper = search_ orelse return .invalid_value;
+    const t = wrapper.zigTerminal() orelse return .invalid_value;
 
     // Always start with a feed: complete only means caught up as of
     // the last feed, so run doubles as the "terminal changed, catch
     // up" convenience for one-shot embedders.
-    wrapper.search.feed(wrapper.terminal, true);
+    wrapper.search.feed(t, true);
     while (true) {
         switch (wrapper.search.status()) {
             .complete => return .success,
-            .feed_required => wrapper.search.feed(wrapper.terminal, true),
+            .feed_required => wrapper.search.feed(t, true),
             .running => _ = wrapper.search.tick(),
         }
     }
@@ -215,8 +246,9 @@ fn setTyped(
             // The value is reserved for future use and must be NULL.
             if (value != null) return .invalid_value;
 
+            const t = wrapper.zigTerminal() orelse return .invalid_value;
             const selected = wrapper.search.select(
-                wrapper.terminal,
+                t,
                 switch (option) {
                     .select_next => .next,
                     .select_prev => .prev,
@@ -837,6 +869,84 @@ test "search new validates options" {
         null,
         &opts,
     ));
+}
+
+test "search free after terminal free" {
+    var terminal: terminal_c.Terminal = null;
+    try testing.expectEqual(Result.success, terminal_c.new(
+        &lib.alloc.test_allocator,
+        &terminal,
+        10,
+        4,
+    ));
+
+    terminal_c.vt_write(terminal, "Fizz\r\nFizz", 10);
+
+    var search: Search = null;
+    const opts: Options = .{ .needle = testString("Fizz") };
+    try testing.expectEqual(Result.success, new(
+        &lib.alloc.test_allocator,
+        &search,
+        terminal,
+        &opts,
+    ));
+
+    // Run and select so the search holds tracked pins within the
+    // terminal's page storage.
+    try testing.expectEqual(Result.success, run(search));
+    try testing.expectEqual(Result.success, set(search, .select_next, null));
+
+    // Free the terminal first. The search detaches: calls that need
+    // the terminal fail cleanly instead of touching freed memory.
+    terminal_c.free(terminal);
+    try testing.expectEqual(Result.invalid_value, feed(search));
+    try testing.expectEqual(Result.invalid_value, run(search));
+    try testing.expectEqual(Result.invalid_value, set(search, .select_next, null));
+
+    // Reads that only touch search-owned state still answer.
+    var needle_out: lib.String = undefined;
+    try testing.expectEqual(Result.success, get(search, .needle, &needle_out));
+    try testing.expectEqualStrings("Fizz", needle_out.ptr[0..needle_out.len]);
+    const scroll: Scroll = .none;
+    try testing.expectEqual(Result.success, set(search, .select_scroll, &scroll));
+
+    // The search can still be freed, releasing only its own memory.
+    free(search);
+}
+
+test "search freed before terminal detaches from the registry" {
+    var terminal: terminal_c.Terminal = null;
+    try testing.expectEqual(Result.success, terminal_c.new(
+        &lib.alloc.test_allocator,
+        &terminal,
+        10,
+        4,
+    ));
+    defer terminal_c.free(terminal);
+
+    // Create two searches and free one while the terminal is alive.
+    // The freed search must be unregistered so the later terminal free
+    // only detaches the survivor.
+    const opts: Options = .{ .needle = testString("Fizz") };
+    var a: Search = null;
+    try testing.expectEqual(Result.success, new(
+        &lib.alloc.test_allocator,
+        &a,
+        terminal,
+        &opts,
+    ));
+    var b: Search = null;
+    try testing.expectEqual(Result.success, new(
+        &lib.alloc.test_allocator,
+        &b,
+        terminal,
+        &opts,
+    ));
+    defer free(b);
+
+    try testing.expectEqual(Result.success, run(a));
+    free(a);
+    try testing.expectEqual(Result.success, run(b));
 }
 
 test "search free null" {

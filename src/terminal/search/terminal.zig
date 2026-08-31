@@ -101,21 +101,23 @@ pub const TerminalSearch = struct {
         };
     }
 
-    /// Release all state, including tracked pins held within the
-    /// terminal, so this must be called before the terminal is
-    /// deinitialized. The terminal must be the same one given to
-    /// every other call.
-    pub fn deinit(self: *TerminalSearch, t: *Terminal) void {
+    /// Release all state. The terminal must be the same one given to
+    /// every other call, or null if the terminal has already been
+    /// deinitialized. When the terminal is alive this releases tracked
+    /// pins held within it. When it is null, those pins died with the
+    /// terminal's page storage, so only search-owned memory is freed.
+    pub fn deinit(self: *TerminalSearch, t_: ?*Terminal) void {
         self.clearViewportMatches();
         self.viewport_matches.deinit(self.alloc);
         self.viewport.deinit();
         var it = self.screens.iterator();
         while (it.next()) |entry| {
-            if (self.screenIsValid(
+            const valid = if (t_) |t| self.screenIsValid(
                 &t.screens,
                 entry.key,
                 entry.value,
-            )) {
+            ) else false;
+            if (valid) {
                 entry.value.deinit();
             } else {
                 entry.value.deinitScreenInvalid();
@@ -605,6 +607,38 @@ test "select scrolls the viewport only when needed" {
     // visible.
     try testing.expect(try search.select(&t, .next, .none));
     try testing.expect(!Visible.check(&t, &search));
+}
+
+test "deinit after the terminal is gone" {
+    const alloc = testing.allocator;
+    const io = testing.io;
+    var t: Terminal = try .init(io, alloc, .{
+        .cols = 10,
+        .rows = 2,
+        .max_scrollback_bytes = std.math.maxInt(usize),
+    });
+
+    var stream = t.vtStream();
+    stream.nextSlice("Fizz\r\nBuzz\r\nFizz");
+
+    // Run to complete and select a match so the search holds tracked
+    // pins within the terminal's page storage.
+    var search: TerminalSearch = try .init(alloc, "Fizz");
+    while (search.status() != .complete) {
+        switch (search.status()) {
+            .feed_required => search.feed(&t, true),
+            .running => _ = search.tick(),
+            .complete => unreachable,
+        }
+    }
+    try testing.expect(try search.select(&t, .next, .none));
+
+    // Deinitialize the terminal first. The pins died with the page
+    // storage, so deinit with a null terminal must free only
+    // search-owned memory without touching the terminal.
+    stream.deinit();
+    t.deinit(alloc);
+    search.deinit(null);
 }
 
 test "no matches selects nothing" {
