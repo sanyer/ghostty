@@ -21,13 +21,18 @@ extern "C" {
  * Search a terminal for a string, covering the active area and
  * scrollback of both the primary and alternate screens.
  *
- * A GhosttySearch searches one terminal for one needle. It is bound to
- * the terminal it was created with and handles the hard parts of
- * terminal search internally: results stay in sync with the live
- * screens, survive primary/alternate screen switches (entering and
- * leaving a fullscreen app such as vim does not restart a scrollback
- * search), and recover from resize, reflow, resets, and scrollback
- * pruning.
+ * A GhosttySearch searches the terminal it was created with for a
+ * needle set with GHOSTTY_SEARCH_OPT_NEEDLE. It handles the hard
+ * parts of terminal search internally: results stay in sync with the
+ * live screens, survive primary/alternate screen switches (entering
+ * and leaving a fullscreen app such as vim does not restart a
+ * scrollback search), and recover from resize, reflow, resets, and
+ * scrollback pruning.
+ *
+ * A search starts idle. Setting the needle starts the search,
+ * changing it restarts the search from scratch, and clearing it
+ * returns the search to idle. Matching is byte-exact except ASCII
+ * letters, which compare case-insensitively.
  *
  * ## Driving a search
  *
@@ -91,8 +96,8 @@ extern "C" {
  *
  * Functions that touch the terminal (ghostty_search_new(),
  * ghostty_search_feed(), ghostty_search_run(), ghostty_search_set()
- * with the select options, and ghostty_search_free()) must also be
- * serialized with all other access to the same terminal.
+ * with the needle and select options, and ghostty_search_free()) must
+ * also be serialized with all other access to the same terminal.
  *
  * Everything else (ghostty_search_tick(), ghostty_search_get(), and
  * ghostty_search_get_multi()) only touches memory owned by the search
@@ -121,8 +126,8 @@ typedef enum GHOSTTY_ENUM_TYPED {
   GHOSTTY_SEARCH_STATUS_RUNNING = 0,
 
   /**
-   * Blocked until ghostty_search_feed(). This is also the initial
-   * state, since a search that has never been fed has never seen the
+   * Blocked until ghostty_search_feed(). This is also the state right
+   * after a needle is set, since the search has not yet seen the
    * terminal.
    */
   GHOSTTY_SEARCH_STATUS_FEED_REQUIRED = 1,
@@ -130,7 +135,8 @@ typedef enum GHOSTTY_ENUM_TYPED {
   /**
    * Caught up with the terminal state as of the last feed. This never
    * means finished forever, since later terminal writes require
-   * another feed to be seen.
+   * another feed to be seen. A search with no needle set also reports
+   * complete, since there is nothing to look for.
    */
   GHOSTTY_SEARCH_STATUS_COMPLETE = 2,
 
@@ -172,8 +178,9 @@ typedef enum GHOSTTY_ENUM_TYPED {
 
   /**
    * The needle this search is looking for: GhosttyString*. The bytes
-   * are borrowed from the search and remain valid until
-   * ghostty_search_free().
+   * are borrowed from the search and remain valid until the needle is
+   * changed or the search is freed. Returns GHOSTTY_NO_VALUE when no
+   * needle is set.
    */
   GHOSTTY_SEARCH_DATA_NEEDLE = 1,
 
@@ -238,6 +245,25 @@ typedef enum GHOSTTY_ENUM_TYPED {
  */
 typedef enum GHOSTTY_ENUM_TYPED {
   /**
+   * Set the needle to search for: const GhosttyString*. The bytes are
+   * copied, so the caller's memory does not need to outlive the call.
+   * Matching is byte-exact except ASCII letters, which compare
+   * case-insensitively.
+   *
+   * Changing the needle restarts the search from scratch and drops
+   * all results. As an exception, setting a needle equal to the current
+   * one (compared the same way as matching) keeps existing results,
+   * so find bars can resubmit freely. A NULL or empty value clears
+   * the needle and returns the search to idle.
+   *
+   * Replacing or clearing a needle releases tracked state held
+   * within the terminal, so the caller must serialize this with all
+   * other access to the same terminal. Returns GHOSTTY_INVALID_VALUE
+   * after the terminal was freed.
+   */
+  GHOSTTY_SEARCH_OPT_NEEDLE = 0,
+
+  /**
    * Select the next match, moving toward older content: from the
    * bottom of the screen upward into history, the direction a search
    * from the prompt usually wants. Wraps around past the oldest
@@ -252,14 +278,14 @@ typedef enum GHOSTTY_ENUM_TYPED {
    * other access to the same terminal. Returns GHOSTTY_NO_VALUE when
    * there are no matches.
    */
-  GHOSTTY_SEARCH_OPT_SELECT_NEXT = 0,
+  GHOSTTY_SEARCH_OPT_SELECT_NEXT = 1,
 
   /**
    * Select the previous match, moving toward newer content, wrapping
    * around past the newest match. Otherwise identical to
    * GHOSTTY_SEARCH_OPT_SELECT_NEXT.
    */
-  GHOSTTY_SEARCH_OPT_SELECT_PREV = 1,
+  GHOSTTY_SEARCH_OPT_SELECT_PREV = 2,
 
   /**
    * Set the scroll policy applied by the select options: const
@@ -267,35 +293,10 @@ typedef enum GHOSTTY_ENUM_TYPED {
    * value resets it to GHOSTTY_SEARCH_SCROLL_IF_NEEDED. This only
    * modifies search-owned state and never reads the terminal.
    */
-  GHOSTTY_SEARCH_OPT_SELECT_SCROLL = 2,
+  GHOSTTY_SEARCH_OPT_SELECT_SCROLL = 3,
 
   GHOSTTY_SEARCH_OPT_MAX_VALUE = GHOSTTY_ENUM_MAX_VALUE,
 } GhosttySearchOption;
-
-/**
- * Options for creating a search.
- *
- * This is a sized struct. Use GHOSTTY_INIT_SIZED() to initialize it.
- *
- * @ingroup search
- */
-typedef struct {
-  /** Size of this struct in bytes. Must be set to sizeof(GhosttySearchOptions). */
-  size_t size;
-
-  /**
-   * The bytes to search for. This is copied, so the caller's memory
-   * does not need to outlive the create call. Must not be empty.
-   *
-   * Matching is byte-exact except ASCII letters, which compare
-   * case-insensitively.
-   *
-   * The needle cannot be changed after the search is created. To
-   * change the query, free the search and create a new one. This is
-   * also how Ghostty's own find bar handles retyping.
-   */
-  GhosttyString needle;
-} GhosttySearchOptions;
 
 /**
  * Create a search bound to a terminal.
@@ -303,26 +304,28 @@ typedef struct {
  * The search borrows the terminal and never frees it. The search and
  * the terminal can be freed in either order; see ghostty_search_free().
  *
- * Creation is cheap and does not read terminal contents (the first
- * feed does), but it registers the search with the terminal so the
- * two can be freed in any order. The caller must serialize this call
- * with all other access to the same terminal.
+ * The search starts idle with no needle: it reports
+ * GHOSTTY_SEARCH_STATUS_COMPLETE and finds nothing. Set
+ * GHOSTTY_SEARCH_OPT_NEEDLE to start searching.
+ *
+ * Creation is cheap and does not read terminal contents, but it
+ * registers the search with the terminal so the two can be freed in
+ * any order. The caller must serialize this call with all other
+ * access to the same terminal.
  *
  * @param allocator Allocator, or NULL for the default allocator
  * @param out_search Receives the created search handle
  * @param terminal Terminal to bind the search to
- * @param options Search options (the needle is copied)
  * @return GHOSTTY_SUCCESS on success, GHOSTTY_INVALID_VALUE if
- *         out_search, terminal, or options are invalid or the needle
- *         is empty, or GHOSTTY_OUT_OF_MEMORY if allocation fails
+ *         out_search or terminal is invalid, or GHOSTTY_OUT_OF_MEMORY
+ *         if allocation fails
  *
  * @ingroup search
  */
 GHOSTTY_API GhosttyResult ghostty_search_new(
                                     const GhosttyAllocator* allocator,
                                     GhosttySearch* out_search,
-                                    GhosttyTerminal terminal,
-                                    const GhosttySearchOptions* options);
+                                    GhosttyTerminal terminal);
 
 /**
  * Free a search.
@@ -408,9 +411,9 @@ GHOSTTY_API GhosttyResult ghostty_search_run(GhosttySearch search);
  * Write an option to a search.
  *
  * The value type, and what a NULL value means, depends on the option
- * and is documented by GhosttySearchOption. The select options read
- * the terminal, so the caller must serialize those calls with all
- * other access to the same terminal.
+ * and is documented by GhosttySearchOption. The needle and select
+ * options touch the terminal, so the caller must serialize those
+ * calls with all other access to the same terminal.
  * GHOSTTY_SEARCH_OPT_SELECT_SCROLL only modifies search-owned state.
  *
  * @param search Search handle (NULL returns GHOSTTY_INVALID_VALUE)
@@ -418,10 +421,10 @@ GHOSTTY_API GhosttyResult ghostty_search_run(GhosttySearch search);
  * @param value Pointer to the input value for the option. The meaning
  *              of NULL is documented per option.
  * @return GHOSTTY_SUCCESS on success, GHOSTTY_NO_VALUE if a select
- *         option found no matches, GHOSTTY_OUT_OF_MEMORY if selection
- *         tracking fails, or GHOSTTY_INVALID_VALUE if search, option,
- *         or value is invalid or a select option is used after the
- *         terminal was freed
+ *         option found no matches, GHOSTTY_OUT_OF_MEMORY if
+ *         allocation fails, or GHOSTTY_INVALID_VALUE if search,
+ *         option, or value is invalid or the option needs a terminal
+ *         that was already freed
  *
  * @ingroup search
  */

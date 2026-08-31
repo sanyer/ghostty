@@ -23,7 +23,9 @@ pub const SearchWrapper = struct {
     /// then fail cleanly and free releases only search-owned memory.
     terminal: terminal_c.Terminal,
 
-    search: TerminalSearch,
+    /// The search state. Null when no needle is set: the search
+    /// starts idle and returns to idle when the needle is cleared.
+    search: ?TerminalSearch = null,
 
     /// The scroll policy applied by the select options. Persistent
     /// across selects, set via the select_scroll option.
@@ -34,6 +36,13 @@ pub const SearchWrapper = struct {
     fn zigTerminal(self: *const SearchWrapper) ?*terminal_c.ZigTerminal {
         const terminal_wrapper = self.terminal orelse return null;
         return terminal_wrapper.terminal;
+    }
+
+    /// The status of the search. A search with no needle reports
+    /// complete since there is nothing to look for.
+    fn status(self: *SearchWrapper) Status {
+        const s = if (self.search) |*s| s else return .complete;
+        return .fromZig(s.status());
     }
 };
 
@@ -98,12 +107,14 @@ pub const Data = enum(c_int) {
 
 /// C: GhosttySearchOption
 pub const Option = enum(c_int) {
-    select_next = 0,
-    select_prev = 1,
-    select_scroll = 2,
+    needle = 0,
+    select_next = 1,
+    select_prev = 2,
+    select_scroll = 3,
 
     pub fn Type(comptime self: Option) type {
         return switch (self) {
+            .needle => lib.String,
             // The value must be NULL. Reserved for future use.
             .select_next, .select_prev => void,
             .select_scroll => Scroll,
@@ -111,38 +122,20 @@ pub const Option = enum(c_int) {
     }
 };
 
-/// C: GhosttySearchOptions
-pub const Options = extern struct {
-    size: usize = @sizeOf(Options),
-    needle: lib.String,
-};
-
 pub fn new(
     alloc_: ?*const CAllocator,
     out_search: ?*Search,
     terminal: terminal_c.Terminal,
-    options: ?*const Options,
 ) callconv(lib.calling_conv) Result {
     const out = out_search orelse return .invalid_value;
     out.* = null;
 
     const terminal_wrapper = terminal orelse return .invalid_value;
-    const opts = options orelse return .invalid_value;
-    if (opts.size < @sizeOf(Options)) return .invalid_value;
-    if (opts.needle.len == 0) return .invalid_value;
-    if (@intFromPtr(opts.needle.ptr) == 0) return .invalid_value;
-    const needle = opts.needle.ptr[0..opts.needle.len];
-
     const alloc = lib.alloc.default(alloc_);
     const wrapper = alloc.create(SearchWrapper) catch return .out_of_memory;
-    const search = TerminalSearch.init(alloc, needle) catch {
-        alloc.destroy(wrapper);
-        return .out_of_memory;
-    };
     wrapper.* = .{
         .alloc = alloc,
         .terminal = terminal_wrapper,
-        .search = search,
     };
 
     // Store the search in the terminal so that when the terminal is
@@ -152,7 +145,6 @@ pub fn new(
         wrapper,
         {},
     ) catch {
-        wrapper.search.deinit(terminal_wrapper.terminal);
         alloc.destroy(wrapper);
         return .out_of_memory;
     };
@@ -165,11 +157,11 @@ pub fn free(search_: Search) callconv(lib.calling_conv) void {
     const wrapper = search_ orelse return;
     if (wrapper.terminal) |terminal_wrapper| {
         _ = terminal_wrapper.searches.swapRemove(wrapper);
-        wrapper.search.deinit(terminal_wrapper.terminal);
+        if (wrapper.search) |*s| s.deinit(terminal_wrapper.terminal);
     } else {
         // The terminal was freed first. Tracked state died with it,
         // so only search-owned memory is freed.
-        wrapper.search.deinit(null);
+        if (wrapper.search) |*s| s.deinit(null);
     }
     const alloc = wrapper.alloc;
     alloc.destroy(wrapper);
@@ -180,36 +172,38 @@ pub fn tick(
     out_status: ?*Status,
 ) callconv(lib.calling_conv) Result {
     const wrapper = search_ orelse return .invalid_value;
-    _ = wrapper.search.tick();
-    if (out_status) |out| out.* = .fromZig(wrapper.search.status());
+    if (wrapper.search) |*s| _ = s.tick();
+    if (out_status) |out| out.* = wrapper.status();
     return .success;
 }
 
 pub fn feed(search_: Search) callconv(lib.calling_conv) Result {
     const wrapper = search_ orelse return .invalid_value;
     const t = wrapper.zigTerminal() orelse return .invalid_value;
+    const s = if (wrapper.search) |*s| s else return .success;
 
     // The C API has no renderer cooperation to know whether the active
     // area changed, so it is always re-scanned. This is correct without
     // any dirty tracking and cheap because the active area search was
     // built for exactly this.
-    wrapper.search.feed(t, true);
+    s.feed(t, true);
     return .success;
 }
 
 pub fn run(search_: Search) callconv(lib.calling_conv) Result {
     const wrapper = search_ orelse return .invalid_value;
     const t = wrapper.zigTerminal() orelse return .invalid_value;
+    const s = if (wrapper.search) |*s| s else return .success;
 
     // Always start with a feed: complete only means caught up as of
     // the last feed, so run doubles as the "terminal changed, catch
     // up" convenience for one-shot embedders.
-    wrapper.search.feed(t, true);
+    s.feed(t, true);
     while (true) {
-        switch (wrapper.search.status()) {
+        switch (s.status()) {
             .complete => return .success,
-            .feed_required => wrapper.search.feed(t, true),
-            .running => _ = wrapper.search.tick(),
+            .feed_required => s.feed(t, true),
+            .running => _ = s.tick(),
         }
     }
 }
@@ -242,12 +236,46 @@ fn setTyped(
 ) Result {
     const wrapper = search_ orelse return .invalid_value;
     switch (option) {
+        .needle => {
+            // The needle touches the terminal (replacing or clearing
+            // an active search releases tracked pins through it), so
+            // it requires the terminal to still be alive.
+            const t = wrapper.zigTerminal() orelse return .invalid_value;
+
+            // NULL and empty both clear the needle, returning the
+            // search to idle. This matches the internal engine, where
+            // an empty needle stops the search.
+            const v = value orelse return clearNeedle(wrapper, t);
+            if (v.len == 0) return clearNeedle(wrapper, t);
+            if (@intFromPtr(v.ptr) == 0) return .invalid_value;
+            const bytes = v.ptr[0..v.len];
+
+            // Setting the current needle again keeps existing results,
+            // using the same ASCII case-insensitive comparison as
+            // matching. This is what a find bar wants on resubmit.
+            if (wrapper.search) |*s| {
+                if (std.ascii.eqlIgnoreCase(s.needle(), bytes)) {
+                    return .success;
+                }
+            }
+
+            // Create the replacement before dropping the current
+            // search so an allocation failure keeps existing state.
+            const replacement = TerminalSearch.init(
+                wrapper.alloc,
+                bytes,
+            ) catch return .out_of_memory;
+            if (wrapper.search) |*s| s.deinit(t);
+            wrapper.search = replacement;
+        },
+
         .select_next, .select_prev => {
             // The value is reserved for future use and must be NULL.
             if (value != null) return .invalid_value;
 
             const t = wrapper.zigTerminal() orelse return .invalid_value;
-            const selected = wrapper.search.select(
+            const s = if (wrapper.search) |*s| s else return .no_value;
+            const selected = s.select(
                 t,
                 switch (option) {
                     .select_next => .next,
@@ -270,6 +298,14 @@ fn setTyped(
         },
     }
 
+    return .success;
+}
+
+fn clearNeedle(wrapper: *SearchWrapper, t: *terminal_c.ZigTerminal) Result {
+    if (wrapper.search) |*s| {
+        s.deinit(t);
+        wrapper.search = null;
+    }
     return .success;
 }
 
@@ -322,33 +358,41 @@ fn getTyped(
     out: *data.OutType(),
 ) Result {
     const wrapper = search_ orelse return .invalid_value;
-    const search = &wrapper.search;
 
     switch (data) {
-        .status => out.* = .fromZig(search.status()),
+        .status => out.* = wrapper.status(),
 
-        .needle => out.* = .init(search.needle()),
+        .needle => {
+            const s = if (wrapper.search) |*s| s else return .no_value;
+            out.* = .init(s.needle());
+        },
 
-        .total_matches => out.* = if (search.activeScreenSearch()) |ss|
-            ss.matchesLen()
-        else
-            0,
+        .total_matches => out.* = total: {
+            const s = if (wrapper.search) |*s| s else break :total 0;
+            const ss = s.activeScreenSearch() orelse break :total 0;
+            break :total ss.matchesLen();
+        },
 
         .selected_index => {
-            const ss = search.activeScreenSearch() orelse return .no_value;
+            const s = if (wrapper.search) |*s| s else return .no_value;
+            const ss = s.activeScreenSearch() orelse return .no_value;
             const selected = ss.selected orelse return .no_value;
             out.* = selected.idx;
         },
 
         .selected_match => {
-            const ss = search.activeScreenSearch() orelse return .no_value;
+            const s = if (wrapper.search) |*s| s else return .no_value;
+            const ss = s.activeScreenSearch() orelse return .no_value;
             const hl = ss.selectedMatch() orelse return .no_value;
             out.* = selectionFromHighlight(hl);
         },
 
         .matches => {
-            const ss = search.activeScreenSearch();
-            const total = if (ss) |s| s.matchesLen() else 0;
+            const ss = if (wrapper.search) |*s|
+                s.activeScreenSearch()
+            else
+                null;
+            const total = if (ss) |v| v.matchesLen() else 0;
             if (out.cap < total) {
                 out.len = total;
                 return .out_of_space;
@@ -363,8 +407,10 @@ fn getTyped(
         },
 
         .viewport_matches => {
-            const matches = search.viewportMatches() catch
-                return .out_of_memory;
+            const matches: []const FlattenedHighlight = if (wrapper.search) |*s|
+                s.viewportMatches() catch return .out_of_memory
+            else
+                &.{};
             if (out.cap < matches.len) {
                 out.len = matches.len;
                 return .out_of_space;
@@ -395,6 +441,19 @@ fn testString(str: []const u8) lib.String {
     return .init(str);
 }
 
+fn testNewSearch(terminal: terminal_c.Terminal, needle_str: []const u8) !Search {
+    var search: Search = null;
+    try testing.expectEqual(Result.success, new(
+        &lib.alloc.test_allocator,
+        &search,
+        terminal,
+    ));
+    errdefer free(search);
+    const needle_value = testString(needle_str);
+    try testing.expectEqual(Result.success, set(search, .needle, &needle_value));
+    return search;
+}
+
 test "search lifecycle and run to complete" {
     var terminal: terminal_c.Terminal = null;
     try testing.expectEqual(Result.success, terminal_c.new(
@@ -407,19 +466,12 @@ test "search lifecycle and run to complete" {
 
     terminal_c.vt_write(terminal, "Fizz\r\nBuzz\r\nFizz\r\nBang", 22);
 
-    var search: Search = null;
-    const opts: Options = .{ .needle = testString("Fizz") };
-    try testing.expectEqual(Result.success, new(
-        &lib.alloc.test_allocator,
-        &search,
-        terminal,
-        &opts,
-    ));
+    const search: Search = try testNewSearch(terminal, "Fizz");
     defer free(search);
 
-    // A fresh search must report feed_required, not complete. The
-    // internal completion check is trivially true before the search
-    // has seen the terminal.
+    // Right after the needle is set the search must report
+    // feed_required, not complete. The internal completion check is
+    // trivially true before the search has seen the terminal.
     var status: Status = .complete;
     try testing.expectEqual(Result.success, get(search, .status, &status));
     try testing.expectEqual(Status.feed_required, status);
@@ -448,14 +500,7 @@ test "search tick reports feed required before first feed" {
     ));
     defer terminal_c.free(terminal);
 
-    var search: Search = null;
-    const opts: Options = .{ .needle = testString("Fizz") };
-    try testing.expectEqual(Result.success, new(
-        &lib.alloc.test_allocator,
-        &search,
-        terminal,
-        &opts,
-    ));
+    const search: Search = try testNewSearch(terminal, "Fizz");
     defer free(search);
 
     var status: Status = .complete;
@@ -478,14 +523,7 @@ test "search feed after write updates results" {
 
     terminal_c.vt_write(terminal, "Fizz", 4);
 
-    var search: Search = null;
-    const opts: Options = .{ .needle = testString("Fizz") };
-    try testing.expectEqual(Result.success, new(
-        &lib.alloc.test_allocator,
-        &search,
-        terminal,
-        &opts,
-    ));
+    const search: Search = try testNewSearch(terminal, "Fizz");
     defer free(search);
 
     try testing.expectEqual(Result.success, run(search));
@@ -513,14 +551,7 @@ test "search alt screen flip and return retains results" {
 
     terminal_c.vt_write(terminal, "Fizz\r\nFizz", 10);
 
-    var search: Search = null;
-    const opts: Options = .{ .needle = testString("Fizz") };
-    try testing.expectEqual(Result.success, new(
-        &lib.alloc.test_allocator,
-        &search,
-        terminal,
-        &opts,
-    ));
+    const search: Search = try testNewSearch(terminal, "Fizz");
     defer free(search);
 
     try testing.expectEqual(Result.success, run(search));
@@ -558,14 +589,7 @@ test "search select wraps in both directions" {
 
     terminal_c.vt_write(terminal, "Fizz\r\nBuzz\r\nFizz", 16);
 
-    var search: Search = null;
-    const opts: Options = .{ .needle = testString("Fizz") };
-    try testing.expectEqual(Result.success, new(
-        &lib.alloc.test_allocator,
-        &search,
-        terminal,
-        &opts,
-    ));
+    const search: Search = try testNewSearch(terminal, "Fizz");
     defer free(search);
     try testing.expectEqual(Result.success, run(search));
 
@@ -607,14 +631,7 @@ test "search select with no matches returns no value" {
     ));
     defer terminal_c.free(terminal);
 
-    var search: Search = null;
-    const opts: Options = .{ .needle = testString("Fizz") };
-    try testing.expectEqual(Result.success, new(
-        &lib.alloc.test_allocator,
-        &search,
-        terminal,
-        &opts,
-    ));
+    const search: Search = try testNewSearch(terminal, "Fizz");
     defer free(search);
 
     try testing.expectEqual(Result.no_value, set(search, .select_next, null));
@@ -631,14 +648,7 @@ test "search select rejects a non-null reserved value" {
     ));
     defer terminal_c.free(terminal);
 
-    var search: Search = null;
-    const opts: Options = .{ .needle = testString("Fizz") };
-    try testing.expectEqual(Result.success, new(
-        &lib.alloc.test_allocator,
-        &search,
-        terminal,
-        &opts,
-    ));
+    const search: Search = try testNewSearch(terminal, "Fizz");
     defer free(search);
 
     const bogus: c_int = 0;
@@ -656,14 +666,7 @@ test "search select scroll option" {
     ));
     defer terminal_c.free(terminal);
 
-    var search: Search = null;
-    const opts: Options = .{ .needle = testString("Fizz") };
-    try testing.expectEqual(Result.success, new(
-        &lib.alloc.test_allocator,
-        &search,
-        terminal,
-        &opts,
-    ));
+    const search: Search = try testNewSearch(terminal, "Fizz");
     defer free(search);
 
     var scroll: Scroll = .none;
@@ -697,14 +700,7 @@ test "search selection dropped when reset prunes results" {
 
     terminal_c.vt_write(terminal, "Fizz\r\nBuzz", 10);
 
-    var search: Search = null;
-    const opts: Options = .{ .needle = testString("Fizz") };
-    try testing.expectEqual(Result.success, new(
-        &lib.alloc.test_allocator,
-        &search,
-        terminal,
-        &opts,
-    ));
+    const search: Search = try testNewSearch(terminal, "Fizz");
     defer free(search);
     try testing.expectEqual(Result.success, run(search));
     try testing.expectEqual(Result.success, set(search, .select_next, null));
@@ -736,14 +732,7 @@ test "search matches buffer semantics" {
 
     terminal_c.vt_write(terminal, "Fizz\r\nBuzz\r\nFizz", 16);
 
-    var search: Search = null;
-    const opts: Options = .{ .needle = testString("Fizz") };
-    try testing.expectEqual(Result.success, new(
-        &lib.alloc.test_allocator,
-        &search,
-        terminal,
-        &opts,
-    ));
+    const search: Search = try testNewSearch(terminal, "Fizz");
     defer free(search);
     try testing.expectEqual(Result.success, run(search));
 
@@ -792,14 +781,7 @@ test "search get_multi returns first failing index" {
 
     terminal_c.vt_write(terminal, "Fizz", 4);
 
-    var search: Search = null;
-    const opts: Options = .{ .needle = testString("Fizz") };
-    try testing.expectEqual(Result.success, new(
-        &lib.alloc.test_allocator,
-        &search,
-        terminal,
-        &opts,
-    ));
+    const search: Search = try testNewSearch(terminal, "Fizz");
     defer free(search);
     try testing.expectEqual(Result.success, run(search));
 
@@ -845,30 +827,121 @@ test "search new validates options" {
 
     var search: Search = null;
 
-    // Empty needle is invalid.
-    const empty: Options = .{ .needle = testString("") };
+    // NULL out and NULL terminal are invalid.
+    try testing.expectEqual(Result.invalid_value, new(
+        &lib.alloc.test_allocator,
+        null,
+        terminal,
+    ));
     try testing.expectEqual(Result.invalid_value, new(
         &lib.alloc.test_allocator,
         &search,
-        terminal,
-        &empty,
+        null,
     ));
     try testing.expect(search == null);
+}
 
-    // NULL options and NULL terminal are invalid.
-    const opts: Options = .{ .needle = testString("Fizz") };
-    try testing.expectEqual(Result.invalid_value, new(
+test "search without a needle is idle" {
+    var terminal: terminal_c.Terminal = null;
+    try testing.expectEqual(Result.success, terminal_c.new(
+        &lib.alloc.test_allocator,
+        &terminal,
+        10,
+        4,
+    ));
+    defer terminal_c.free(terminal);
+
+    terminal_c.vt_write(terminal, "Fizz", 4);
+
+    var search: Search = null;
+    try testing.expectEqual(Result.success, new(
         &lib.alloc.test_allocator,
         &search,
         terminal,
-        null,
     ));
-    try testing.expectEqual(Result.invalid_value, new(
+    defer free(search);
+
+    // With nothing to look for, the search is complete and empty, and
+    // driving it is a harmless no-op.
+    var status: Status = .running;
+    try testing.expectEqual(Result.success, get(search, .status, &status));
+    try testing.expectEqual(Status.complete, status);
+    try testing.expectEqual(Result.success, feed(search));
+    try testing.expectEqual(Result.success, run(search));
+    try testing.expectEqual(Result.success, tick(search, &status));
+    try testing.expectEqual(Status.complete, status);
+
+    var needle_out: lib.String = undefined;
+    try testing.expectEqual(Result.no_value, get(search, .needle, &needle_out));
+    var total: usize = 999;
+    try testing.expectEqual(Result.success, get(search, .total_matches, &total));
+    try testing.expectEqual(@as(usize, 0), total);
+    try testing.expectEqual(Result.no_value, set(search, .select_next, null));
+
+    var buf: selection_c.CSelectionBuffer = .{};
+    try testing.expectEqual(Result.success, get(search, .matches, &buf));
+    try testing.expectEqual(@as(usize, 0), buf.len);
+    buf = .{};
+    try testing.expectEqual(Result.success, get(search, .viewport_matches, &buf));
+    try testing.expectEqual(@as(usize, 0), buf.len);
+
+    // Clearing an already-clear needle is fine.
+    try testing.expectEqual(Result.success, set(search, .needle, null));
+}
+
+test "search needle change and clear" {
+    var terminal: terminal_c.Terminal = null;
+    try testing.expectEqual(Result.success, terminal_c.new(
         &lib.alloc.test_allocator,
-        &search,
-        null,
-        &opts,
+        &terminal,
+        10,
+        4,
     ));
+    defer terminal_c.free(terminal);
+
+    terminal_c.vt_write(terminal, "Fizz\r\nBuzz", 10);
+
+    const search: Search = try testNewSearch(terminal, "Fizz");
+    defer free(search);
+    try testing.expectEqual(Result.success, run(search));
+    try testing.expectEqual(Result.success, set(search, .select_next, null));
+
+    var total: usize = 0;
+    try testing.expectEqual(Result.success, get(search, .total_matches, &total));
+    try testing.expectEqual(@as(usize, 1), total);
+
+    // Setting the same needle again (any ASCII case) keeps existing
+    // results and the selection.
+    const same = testString("fIZZ");
+    try testing.expectEqual(Result.success, set(search, .needle, &same));
+    var needle_out: lib.String = undefined;
+    try testing.expectEqual(Result.success, get(search, .needle, &needle_out));
+    try testing.expectEqualStrings("Fizz", needle_out.ptr[0..needle_out.len]);
+    var idx: usize = 999;
+    try testing.expectEqual(Result.success, get(search, .selected_index, &idx));
+    try testing.expectEqual(@as(usize, 0), idx);
+
+    // Changing the needle restarts the search from scratch.
+    const changed = testString("Buzz");
+    try testing.expectEqual(Result.success, set(search, .needle, &changed));
+    var status: Status = .complete;
+    try testing.expectEqual(Result.success, get(search, .status, &status));
+    try testing.expectEqual(Status.feed_required, status);
+    try testing.expectEqual(Result.no_value, get(search, .selected_index, &idx));
+    try testing.expectEqual(Result.success, run(search));
+    try testing.expectEqual(Result.success, get(search, .total_matches, &total));
+    try testing.expectEqual(@as(usize, 1), total);
+    try testing.expectEqual(Result.success, get(search, .needle, &needle_out));
+    try testing.expectEqualStrings("Buzz", needle_out.ptr[0..needle_out.len]);
+
+    // An empty needle clears the search, same as NULL.
+    const empty = testString("");
+    try testing.expectEqual(Result.success, set(search, .needle, &empty));
+    try testing.expectEqual(Result.no_value, get(search, .needle, &needle_out));
+    try testing.expectEqual(Result.success, get(search, .status, &status));
+    try testing.expectEqual(Status.complete, status);
+    try testing.expectEqual(Result.success, get(search, .total_matches, &total));
+    try testing.expectEqual(@as(usize, 0), total);
 }
 
 test "search free after terminal free" {
@@ -882,14 +955,7 @@ test "search free after terminal free" {
 
     terminal_c.vt_write(terminal, "Fizz\r\nFizz", 10);
 
-    var search: Search = null;
-    const opts: Options = .{ .needle = testString("Fizz") };
-    try testing.expectEqual(Result.success, new(
-        &lib.alloc.test_allocator,
-        &search,
-        terminal,
-        &opts,
-    ));
+    const search: Search = try testNewSearch(terminal, "Fizz");
 
     // Run and select so the search holds tracked pins within the
     // terminal's page storage.
@@ -902,6 +968,8 @@ test "search free after terminal free" {
     try testing.expectEqual(Result.invalid_value, feed(search));
     try testing.expectEqual(Result.invalid_value, run(search));
     try testing.expectEqual(Result.invalid_value, set(search, .select_next, null));
+    const needle_value = testString("Buzz");
+    try testing.expectEqual(Result.invalid_value, set(search, .needle, &needle_value));
 
     // Reads that only touch search-owned state still answer.
     var needle_out: lib.String = undefined;
@@ -927,21 +995,8 @@ test "search freed before terminal detaches from the registry" {
     // Create two searches and free one while the terminal is alive.
     // The freed search must be unregistered so the later terminal free
     // only detaches the survivor.
-    const opts: Options = .{ .needle = testString("Fizz") };
-    var a: Search = null;
-    try testing.expectEqual(Result.success, new(
-        &lib.alloc.test_allocator,
-        &a,
-        terminal,
-        &opts,
-    ));
-    var b: Search = null;
-    try testing.expectEqual(Result.success, new(
-        &lib.alloc.test_allocator,
-        &b,
-        terminal,
-        &opts,
-    ));
+    const a: Search = try testNewSearch(terminal, "Fizz");
+    const b: Search = try testNewSearch(terminal, "Fizz");
     defer free(b);
 
     try testing.expectEqual(Result.success, run(a));

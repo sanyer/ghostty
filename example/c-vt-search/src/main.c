@@ -23,15 +23,18 @@ int main() {
                               strlen(lines[i]));
   }
 
-  // The user typed a query into the find bar, so create a search bound
-  // to the terminal. Matching is byte-exact except ASCII letters, which
-  // compare case-insensitively, so "error" also finds "ERROR". The
-  // needle can't be changed later. Retyping means free and create.
-  GhosttySearchOptions opts = GHOSTTY_INIT_SIZED(GhosttySearchOptions);
-  opts.needle = (GhosttyString){ (const uint8_t *)"error", 5 };
-
+  // The user opened the find bar, so create a search bound to the
+  // terminal. It starts idle until it has a needle.
   GhosttySearch search;
-  result = ghostty_search_new(NULL, &search, terminal, &opts);
+  result = ghostty_search_new(NULL, &search, terminal);
+  assert(result == GHOSTTY_SUCCESS);
+
+  // The user typed a query. Matching is byte-exact except ASCII
+  // letters, which compare case-insensitively, so "error" also finds
+  // "ERROR". Retyping just sets the needle again: a changed needle
+  // restarts the search and an unchanged one keeps its results.
+  GhosttyString needle = { (const uint8_t *)"error", 5 };
+  result = ghostty_search_set(search, GHOSTTY_SEARCH_OPT_NEEDLE, &needle);
   assert(result == GHOSTTY_SUCCESS);
 
   // Drive the search. Interactive embedders interleave
@@ -105,8 +108,8 @@ int main() {
            (unsigned)start.x, (unsigned)end.x);
   }
 
-  // Closing the find bar (or retyping the needle). The search borrows
-  // the terminal, so it must always be freed before the terminal.
+  // Closing the find bar. The search borrows the terminal, but the
+  // two can be freed in either order.
   ghostty_search_free(search);
   ghostty_terminal_free(terminal);
   return 0;

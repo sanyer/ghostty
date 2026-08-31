@@ -204,7 +204,6 @@ const type_decls = [_]TypeDecl{
     .initStruct("GhosttyRenderStateColors", render.Colors),
     .initStruct("GhosttyRenderStateCursor", render.Cursor),
     .initStruct("GhosttyRenderStateRowSelection", render.RowSelection),
-    .initStruct("GhosttySearchOptions", search.Options),
     .initStruct("GhosttySelection", selection.CSelection),
     .initStruct("GhosttySelectionBuffer", selection.CSelectionBuffer),
     .initStruct("GhosttySelectionGestureBehaviors", selection_gesture.Behaviors),
