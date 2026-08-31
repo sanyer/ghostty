@@ -415,7 +415,7 @@ msgstr "Копирај URL у оставу"
 
 #: src/input/command.zig:174
 msgid "Copy the URL under the cursor to the clipboard."
-msgstr "Копирајте УРЛ испод показивача у оставу."
+msgstr "Копирајте URL испод показивача у оставу."
 
 #: src/input/command.zig:179
 msgid "Copy Terminal Title to Clipboard"
@@ -595,19 +595,19 @@ msgstr "Копирајте садржај екрана као HTML у привр
 
 #: src/input/command.zig:313
 msgid "Copy Screen as HTML to Temporary File and Paste Path"
-msgstr "Копирај екран као ХТМЛ у привремену датотеку и убаци путању"
+msgstr "Копирај екран као HTML у привремену датотеку и убаци путању"
 
 #: src/input/command.zig:314
 msgid "Copy the screen contents as HTML to a temporary file and paste the path to the file."
-msgstr "Копирајте садржај екрана као ХТМЛ у привремену датотеку и убаците путању до те датотеке."
+msgstr "Копирајте садржај екрана као HTML у привремену датотеку и убаците путању до те датотеке."
 
 #: src/input/command.zig:321
 msgid "Copy Screen as HTML to Temporary File and Open"
-msgstr "Копирај екран као ХТМЛ у привремену датотеку и отвори"
+msgstr "Копирај екран као HTML у привремену датотеку и отвори"
 
 #: src/input/command.zig:322
 msgid "Copy the screen contents as HTML to a temporary file and open it."
-msgstr "Копирај садржај екрана као ХТМЛ у привремену датотеку и отвори је."
+msgstr "Копирај садржај екрана као HTML у привремену датотеку и отвори је."
 
 #: src/input/command.zig:330
 msgid "Copy Screen as ANSI Sequences to Temporary File and Copy Path"
@@ -661,27 +661,27 @@ msgstr "Копирај садржај изабраног у привремену
 
 #: src/input/command.zig:373
 msgid "Copy Selection as HTML to Temporary File and Copy Path"
-msgstr "Копирај изабрано као ХТМЛ у привремену датотеку и копирај путању"
+msgstr "Копирај изабрано као HTML у привремену датотеку и копирај путању"
 
 #: src/input/command.zig:374
 msgid "Copy the selection contents as HTML to a temporary file and copy the path to the clipboard."
-msgstr "Копирај садржај изабраног као ХТМЛ у привремену датотеку и копирај путању у оставу."
+msgstr "Копирај садржај изабраног као HTML у привремену датотеку и копирај путању у оставу."
 
 #: src/input/command.zig:381
 msgid "Copy Selection as HTML to Temporary File and Paste Path"
-msgstr "Копирај изабрано као ХТМЛ у привремену датотеку и убаци путању"
+msgstr "Копирај изабрано као HTML у привремену датотеку и убаци путању"
 
 #: src/input/command.zig:382
 msgid "Copy the selection contents as HTML to a temporary file and paste the path to the file."
-msgstr "Копирај садржај изабраног као ХТМЛ у привремену датотеку и убаци путању до датотеке."
+msgstr "Копирај садржај изабраног као HTML у привремену датотеку и убаци путању до датотеке."
 
 #: src/input/command.zig:389
 msgid "Copy Selection as HTML to Temporary File and Open"
-msgstr "Копирај изабрано као ХТМЛ у привремену датотеку и отвори"
+msgstr "Копирај изабрано као HTML у привремену датотеку и отвори"
 
 #: src/input/command.zig:390
 msgid "Copy the selection contents as HTML to a temporary file and open it."
-msgstr "Копирај садржај изабраног као ХТМЛ у привремену датотеку и отвори је."
+msgstr "Копирај садржај изабраног као HTML у привремену датотеку и отвори је."
 
 #: src/input/command.zig:398
 msgid "Copy Selection as ANSI Sequences to Temporary File and Copy Path"
