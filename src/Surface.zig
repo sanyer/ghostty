@@ -4051,11 +4051,11 @@ pub fn mouseButtonCallback(
     if (button == .middle and action == .press) switch (self.config.middle_click_action) {
         .ignore => {},
         .@"clipboard-paste" => {
-            _ = try self.startClipboardRequest(.standard, .{ .paste = {} });
+            _ = try self.startClipboardRequest(.standard, .{ .paste = .standard });
         },
         .@"primary-paste" => {
             if (self.rt_surface.supportsClipboard(.selection)) {
-                _ = try self.startClipboardRequest(.selection, .{ .paste = {} });
+                _ = try self.startClipboardRequest(.selection, .{ .paste = .selection });
             }
         },
     };
