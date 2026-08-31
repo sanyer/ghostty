@@ -94,6 +94,7 @@ jobs:
       - build-cmake
       - build-flatpak
       - build-libghostty-vt
+      - build-libghostty-vt-freestanding
       - build-libghostty-vt-wasm
       - build-libghostty-vt-features
       - build-libghostty-vt-android
