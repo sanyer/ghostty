@@ -540,7 +540,11 @@ fn initialCapacity(cols: size.CellCountInt) Capacity {
     return cap;
 }
 
-/// This is the allocator we'll use for all our underlying page allocations.
+/// Returns the allocator used for underlying page allocations.
+///
+/// `alloc` is the caller-provided allocator. It is used on native freestanding
+/// targets, where no OS page allocator is available. Other targets select a
+/// platform-specific allocator below.
 inline fn pageAllocator(alloc: Allocator) Allocator {
     // In tests we use our testing allocator so we can detect leaks.
     if (builtin.is_test) return std.testing.allocator;
