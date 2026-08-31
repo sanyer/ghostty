@@ -60,6 +60,7 @@
  * - @ref c-vt-grid-traverse/src/main.c - Grid traversal example using grid refs
  * - @ref c-vt-grid-ref-tracked/src/main.c - Tracked grid ref example
  * - @ref c-vt-compression/src/main.c - Idle scrollback compression example
+ * - @ref c-vt-search/src/main.c - Terminal search example
  *
  */
 
@@ -124,6 +125,12 @@
 /** @example c-vt-kitty-graphics/src/main.c
  * This example demonstrates how to use the system interface to install a
  * PNG decoder callback and send a Kitty Graphics Protocol image.
+ */
+
+/** @example c-vt-search/src/main.c
+ * This example demonstrates how to search terminal contents for a
+ * string, navigate between the matches like a find bar, and read the
+ * viewport matches used to draw highlights.
  */
 
 #ifndef GHOSTTY_VT_H
