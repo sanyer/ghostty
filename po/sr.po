@@ -8,7 +8,7 @@ msgstr ""
 "Project-Id-Version: com.mitchellh.ghostty\n"
 "Report-Msgid-Bugs-To: m@mitchellh.com\n"
 "POT-Creation-Date: 2026-08-10 10:06-0500\n"
-"PO-Revision-Date: 2026-08-29 12:49+0200\n"
+"PO-Revision-Date: 2026-08-31 21:45+0200\n"
 "Last-Translator: Марко Костић <marko.m.kostic@gmail.com>\n"
 "Language-Team: Language SR\n"
 "Language: sr\n"
@@ -65,8 +65,8 @@ msgid ""
 "One or more configuration errors were found. Please review the errors below, and either reload your "
 "configuration or ignore these errors."
 msgstr ""
-"Пронађена је једна или више грешака у подешавањима. Прегледајте грешке испод, и поново учитајте своја "
-"подешавања или занемарите ове грешке."
+"Пронађена је једна или више грешака у подешавањима. Прегледај грешке испод, и поново учитај своја "
+"подешавања или занемари ове грешке."
 
 #: src/apprt/gtk/ui/1.2/config-errors-dialog.blp:12
 msgid "Ignore"
@@ -79,7 +79,7 @@ msgstr "Поново учитај подешавања"
 
 #: src/apprt/gtk/ui/1.2/debug-warning.blp:7 src/apprt/gtk/ui/1.3/debug-warning.blp:6
 msgid "⚠️ You're running a debug build of Ghostty! Performance will be degraded."
-msgstr "⚠️ Покрећете издање Ghostty-ја за отклањање грешака! Перформансе биће смањене."
+msgstr "⚠️ Покрећеш издање Ghostty-ја за отклањање грешака! Перформансе биће смањене."
 
 #: src/apprt/gtk/ui/1.5/inspector-window.blp:5
 msgid "Ghostty: Terminal Inspector"
@@ -110,7 +110,7 @@ msgid ""
 "This terminal is in read-only mode. You can still view, select, and scroll through the content, but no "
 "input events will be sent to the running application."
 msgstr ""
-"Овај терминал је у режиму само за читање. И даље можете прегледати, бирати и помицати садржај, али "
+"Овај терминал је у режиму само за читање. И даље можеш прегледати, бирати и помицати садржај, али "
 "догађаји уноса неће бити послати покренутом програму."
 
 #: src/apprt/gtk/ui/1.2/surface.blp:112
@@ -217,7 +217,7 @@ msgstr "Отвори подешавања у новом прозору"
 
 #: src/apprt/gtk/ui/1.5/title-dialog.blp:5
 msgid "Leave blank to restore the default title."
-msgstr "Оставите празно да бисте вратили подразумевани наслов."
+msgstr "Остави празно да вратиш подразумевани наслов."
 
 #: src/apprt/gtk/ui/1.5/title-dialog.blp:9
 msgid "OK"
@@ -415,7 +415,7 @@ msgstr "Копирај URL у оставу"
 
 #: src/input/command.zig:174
 msgid "Copy the URL under the cursor to the clipboard."
-msgstr "Копирајте URL испод показивача у оставу."
+msgstr "Копирај URL испод показивача у оставу."
 
 #: src/input/command.zig:179
 msgid "Copy Terminal Title to Clipboard"
@@ -439,7 +439,7 @@ msgstr "Убаци из избора"
 
 #: src/input/command.zig:192
 msgid "Paste the contents of the selection clipboard."
-msgstr "Убаците садржај оставе избора."
+msgstr "Убаци садржај оставе избора."
 
 #: src/input/command.zig:197
 msgid "Start Search"
@@ -527,7 +527,7 @@ msgstr "Помакни на врх"
 
 #: src/input/command.zig:256
 msgid "Scroll to the top of the screen."
-msgstr "Помакните на врх екрана."
+msgstr "Помакни на врх екрана."
 
 #: src/input/command.zig:261
 msgid "Scroll to Bottom"
@@ -535,7 +535,7 @@ msgstr "Помакни на дно"
 
 #: src/input/command.zig:262
 msgid "Scroll to the bottom of the screen."
-msgstr "Помакните на дно екрана."
+msgstr "Помакни на дно екрана."
 
 #: src/input/command.zig:267
 msgid "Scroll to Selection"
@@ -543,7 +543,7 @@ msgstr "Помакни до избора"
 
 #: src/input/command.zig:268
 msgid "Scroll to the selected text."
-msgstr "Помакните до изабраног текста."
+msgstr "Помакни до изабраног текста."
 
 #: src/input/command.zig:273
 msgid "Scroll Page Up"
@@ -551,7 +551,7 @@ msgstr "Помакни страницу нагоре"
 
 #: src/input/command.zig:274
 msgid "Scroll the screen up by a page."
-msgstr "Помакните екран нагоре за једну страницу."
+msgstr "Помакни екран нагоре за једну страницу."
 
 #: src/input/command.zig:279
 msgid "Scroll Page Down"
@@ -559,7 +559,7 @@ msgstr "Помакни страницу надоле"
 
 #: src/input/command.zig:280
 msgid "Scroll the screen down by a page."
-msgstr "Помакните екран надоле за једну страницу."
+msgstr "Помакни екран надоле за једну страницу."
 
 #: src/input/command.zig:286
 msgid "Copy Screen to Temporary File and Copy Path"
@@ -567,7 +567,7 @@ msgstr "Копирај екран у привремену датотеку и к
 
 #: src/input/command.zig:287
 msgid "Copy the screen contents to a temporary file and copy the path to the clipboard."
-msgstr "Копирај садржај екрана у привремену датотеку и копирајте путању у оставу."
+msgstr "Копирај садржај екрана у привремену датотеку и копирај путању у оставу."
 
 #: src/input/command.zig:291
 msgid "Copy Screen to Temporary File and Paste Path"
@@ -575,7 +575,7 @@ msgstr "Копирај екран у привремену датотеку и у
 
 #: src/input/command.zig:292
 msgid "Copy the screen contents to a temporary file and paste the path to the file."
-msgstr "Копирајте садржај екрана у привремену датотеку и убаците путању до те датотеке."
+msgstr "Копирај садржај екрана у привремену датотеку и убаци путању до те датотеке."
 
 #: src/input/command.zig:296
 msgid "Copy Screen to Temporary File and Open"
@@ -583,7 +583,7 @@ msgstr "Копирај екран у привремену датотеку и о
 
 #: src/input/command.zig:297
 msgid "Copy the screen contents to a temporary file and open it."
-msgstr "Копирајте садржај екрана у привремену датотеку и отворите је."
+msgstr "Копирај садржај екрана у привремену датотеку и отвори је."
 
 #: src/input/command.zig:305
 msgid "Copy Screen as HTML to Temporary File and Copy Path"
@@ -591,7 +591,7 @@ msgstr "Копирај екран као HTML у привремену датот
 
 #: src/input/command.zig:306
 msgid "Copy the screen contents as HTML to a temporary file and copy the path to the clipboard."
-msgstr "Копирајте садржај екрана као HTML у привремену датотеку и копирајте путању у оставу."
+msgstr "Копирај садржај екрана као HTML у привремену датотеку и копирај путању у оставу."
 
 #: src/input/command.zig:313
 msgid "Copy Screen as HTML to Temporary File and Paste Path"
@@ -599,7 +599,7 @@ msgstr "Копирај екран као HTML у привремену датот
 
 #: src/input/command.zig:314
 msgid "Copy the screen contents as HTML to a temporary file and paste the path to the file."
-msgstr "Копирајте садржај екрана као HTML у привремену датотеку и убаците путању до те датотеке."
+msgstr "Копирај садржај екрана као HTML у привремену датотеку и убаци путању до те датотеке."
 
 #: src/input/command.zig:321
 msgid "Copy Screen as HTML to Temporary File and Open"
@@ -748,7 +748,7 @@ msgstr "Окини преглед језичака"
 
 #: src/input/command.zig:453
 msgid "Toggle the tab overview."
-msgstr "Окините преглед језичака."
+msgstr "Окини преглед језичака."
 
 #: src/input/command.zig:458
 msgid "Change Terminal Title…"
@@ -1052,4 +1052,4 @@ msgstr "Ghostty"
 
 #: src/input/command.zig:709
 msgid "Put a little Ghostty in your terminal."
-msgstr "Убаците мало Ghostty-ја у ваш терминал."
+msgstr "Убаци мало Ghostty-ја у свој терминал."
