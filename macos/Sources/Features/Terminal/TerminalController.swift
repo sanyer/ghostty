@@ -357,7 +357,6 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
 
         c.showWindowSafely(self)
         c.scheduleInitialPresentation {
-            c.showWindow(self)
             if let window = c.window {
                 // If we have a tree size, resize the window's content to match
                 if let treeSize, treeSize.width > 0, treeSize.height > 0 {
