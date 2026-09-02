@@ -174,7 +174,7 @@ msgstr "Zatitu eskumara"
 
 #: src/apprt/gtk/ui/1.2/surface.blp:377
 msgid "Close Split"
-msgstr "Zatikatzea itxi"
+msgstr "Itxi zatikatzea"
 
 #: src/apprt/gtk/ui/1.2/surface.blp:383
 msgid "Tab"
@@ -953,19 +953,19 @@ msgstr "Berrezarri leihoaren tamaina defekutzkora."
 
 #: src/input/command.zig:569
 msgid "Toggle Inspector"
-msgstr "Aldatu azterlea"
+msgstr "Aldatu ikuskatzailea"
 
 #: src/input/command.zig:570
 msgid "Toggle the inspector."
-msgstr "Aldatu azterlea."
+msgstr "Aldatu ikuskatzailea."
 
 #: src/input/command.zig:575
 msgid "Show the GTK Inspector"
-msgstr "Erakutsi GTK azterlea"
+msgstr "Erakutsi GTK ikuskatzailea"
 
 #: src/input/command.zig:576
 msgid "Show the GTK inspector."
-msgstr "Erakutsi GTK azterlea."
+msgstr "Erakutsi GTK ikuskatzailea."
 
 #: src/input/command.zig:581
 msgid "Show On-Screen Keyboard"
