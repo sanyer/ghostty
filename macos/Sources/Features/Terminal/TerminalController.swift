@@ -487,9 +487,19 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
             }
         }
 
+        // showWindow makes regular windows key and ordered front. AppKit can
+        // throw while selecting a tab if its fullscreen stack is inconsistent,
+        // so this must cross the Objective-C exception bridge.
+        // We don't need to dispatch this because `tabbingMode = .disallowed`
+        // for HiddenTitlebarTerminalWindow.
+        controller.showWindowSafely(self)
+
+        // Windows with `macos-titlebar-style = hidden` create new windows when the
+        // new tab binding is pressed, we should cascade those windows as well.
+
         // We're dispatching this async because otherwise the lastCascadePoint doesn't
-        // take effect. Our best theory is there is some next-event-loop-tick logic
-        // that Cocoa is doing that we need to be after.
+        // take effect after position in `showWindow`. Our best theory is there is some
+        // next-event-loop-tick logic that Cocoa is doing that we need to be after.
         controller.scheduleInitialPresentation {
             // Only cascade if we aren't fullscreen and are alone in the tab group.
             if !window.styleMask.contains(.fullScreen) &&
@@ -497,11 +507,6 @@ class TerminalController: BaseTerminalController, TabGroupCloseCoordinator.Contr
                 let hasFixedPos = controller.derivedConfig.windowPositionX != nil && controller.derivedConfig.windowPositionY != nil
                 Self.applyCascade(to: window, hasFixedPos: hasFixedPos)
             }
-
-            // showWindow makes regular windows key and ordered front. AppKit can
-            // throw while selecting a tab if its fullscreen stack is inconsistent,
-            // so this must cross the Objective-C exception bridge.
-            controller.showWindowSafely(self)
 
             // We also activate our app so that it becomes front. This may be
             // necessary for the dock menu.
