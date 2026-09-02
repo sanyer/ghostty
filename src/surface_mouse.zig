@@ -96,6 +96,11 @@ pub fn keyToMouseShape(self: SurfaceMouse) ?MouseShape {
             if (isRectangleSelectState(self.mods)) {
                 // Crosshair (rectangle select)
                 return .crosshair;
+            } else if (isMouseModeOverrideState(self.mods)) {
+                // Shift shows an I-beam so selection is obvious even when
+                // the application cursor is not text (OSC 22). Release
+                // restores mouse_shape below.
+                return .text;
             } else {
                 return self.mouse_shape;
             }
