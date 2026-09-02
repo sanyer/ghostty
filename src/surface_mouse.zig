@@ -239,7 +239,7 @@ test "keyToMouseShape" {
     }
 
     {
-        // crosshair -> default (mouse tracking)
+        // no override restores the application shape (mouse tracking)
         const m: SurfaceMouse = .{
             .physical_key = .alt_left,
             .mouse_event = .x10,
@@ -249,7 +249,7 @@ test "keyToMouseShape" {
             .hidden = false,
         };
 
-        const want: MouseShape = .default;
+        const want: MouseShape = .crosshair;
         const got = m.keyToMouseShape();
         try testing.expect(want == got);
     }
@@ -271,7 +271,7 @@ test "keyToMouseShape" {
     }
 
     {
-        // text -> default (mouse tracking)
+        // no override restores the application shape (mouse tracking)
         const m: SurfaceMouse = .{
             .physical_key = .shift_left,
             .mouse_event = .x10,
@@ -281,7 +281,7 @@ test "keyToMouseShape" {
             .hidden = false,
         };
 
-        const want: MouseShape = .default;
+        const want: MouseShape = .text;
         const got = m.keyToMouseShape();
         try testing.expect(want == got);
     }
@@ -319,7 +319,7 @@ test "keyToMouseShape" {
     }
 
     {
-        // crosshair -> text (no mouse tracking)
+        // no override restores the application shape (no mouse tracking)
         const m: SurfaceMouse = .{
             .physical_key = .alt_left,
             .mouse_event = .none,
@@ -329,7 +329,7 @@ test "keyToMouseShape" {
             .hidden = false,
         };
 
-        const want: MouseShape = .text;
+        const want: MouseShape = .crosshair;
         const got = m.keyToMouseShape();
         try testing.expect(want == got);
     }
