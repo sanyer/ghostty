@@ -88,7 +88,7 @@ pub fn keyToMouseShape(self: SurfaceMouse) ?MouseShape {
                 // Normal override state
                 return .text;
             } else {
-                return .default;
+                return self.mouse_shape;
             }
         },
 
@@ -97,7 +97,7 @@ pub fn keyToMouseShape(self: SurfaceMouse) ?MouseShape {
                 // Crosshair (rectangle select)
                 return .crosshair;
             } else {
-                return .text;
+                return self.mouse_shape;
             }
         },
 
