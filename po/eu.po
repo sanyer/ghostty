@@ -170,7 +170,7 @@ msgstr "Zatitu ezkerrera"
 #: src/apprt/gtk/ui/1.2/surface.blp:371 src/apprt/gtk/ui/1.5/window.blp:195
 #: src/apprt/gtk/ui/1.5/window.blp:273 src/input/command.zig:482
 msgid "Split Right"
-msgstr "Zatitu eskumara"
+msgstr "Zatitu eskuinera"
 
 #: src/apprt/gtk/ui/1.2/surface.blp:377
 msgid "Close Split"
@@ -411,7 +411,7 @@ msgstr ""
 
 #: src/input/command.zig:159
 msgid "Copy Selection as Plain Text to Clipboard"
-msgstr "Kopiatu aukeraketa arbelera testu arrunt gisa"
+msgstr "Kopiatu hautapena arbelera testu arrunt gisa"
 
 #: src/input/command.zig:160
 msgid "Copy the selected text as plain text to the clipboard."
@@ -419,7 +419,7 @@ msgstr "Kopiatu aukeratutako testua arbelera testu arrunt gisa."
 
 #: src/input/command.zig:163
 msgid "Copy Selection as ANSI Sequences to Clipboard"
-msgstr "Kopiatu aukeraketa arbelera ANSI sekuentzia gisa"
+msgstr "Kopiatu hautapena arbelera ANSI sekuentzia gisa"
 
 #: src/input/command.zig:164
 msgid "Copy the selected text as ANSI escape sequences to the clipboard."
@@ -427,7 +427,7 @@ msgstr "Kopiatu aukeueratutako testua arbelera ANSI eskape-sekuentzia gisa"
 
 #: src/input/command.zig:167
 msgid "Copy Selection as HTML to Clipboard"
-msgstr "Kopiatu aukeraketa arbelera HTML gisa"
+msgstr "Kopiatu hautapena arbelera HTML gisa"
 
 #: src/input/command.zig:168
 msgid "Copy the selected text as HTML to the clipboard."
@@ -463,11 +463,11 @@ msgstr "Itsatsi arbel nagusiaren edukiak"
 
 #: src/input/command.zig:191
 msgid "Paste from Selection"
-msgstr "Itsatsi aukeraketatik"
+msgstr "Itsatsi hautapenetik"
 
 #: src/input/command.zig:192
 msgid "Paste the contents of the selection clipboard."
-msgstr "Itsatsi aukeraketa arbelaren edukiak"
+msgstr "Itsatsi hautapena arbelaren edukiak"
 
 #: src/input/command.zig:197
 msgid "Start Search"
@@ -479,7 +479,7 @@ msgstr "Hasi bilaketa beste bat aktibo ez badago"
 
 #: src/input/command.zig:203
 msgid "Search Selection"
-msgstr "Bilatu aukeraketa"
+msgstr "Bilatu hautapena"
 
 #: src/input/command.zig:204
 msgid "Start a search for the current text selection."
@@ -567,7 +567,7 @@ msgstr "Joan pantailaren beheko aldera"
 
 #: src/input/command.zig:267
 msgid "Scroll to Selection"
-msgstr "Joan aukeraketara"
+msgstr "Joan hautapenera"
 
 #: src/input/command.zig:268
 msgid "Scroll to the selected text."
@@ -808,7 +808,7 @@ msgstr "Mugitu fitxa eskuinera"
 
 #: src/input/command.zig:440
 msgid "Move the current tab to the right."
-msgstr "Mugitu uneko fitxa eskumara."
+msgstr "Mugitu uneko fitxa eskuinera."
 
 #: src/input/command.zig:446
 msgid "Move Tab to New Window"
@@ -844,7 +844,7 @@ msgstr "Banatu terminala ezkerrera."
 
 #: src/input/command.zig:483
 msgid "Split the terminal to the right."
-msgstr "Banatu terminala eskumara."
+msgstr "Banatu terminala eskuinera."
 
 #: src/input/command.zig:488
 msgid "Split the terminal up."
@@ -880,11 +880,11 @@ msgstr "Eraman fokua ezkerrera, ezer baldin badago."
 
 #: src/input/command.zig:515
 msgid "Focus Split: Right"
-msgstr "Eraman fokua: eskumara"
+msgstr "Eraman fokua: eskuinera"
 
 #: src/input/command.zig:516
 msgid "Focus the split to the right, if it exists."
-msgstr "Eraman fokua eskumara, ezer baldin badago."
+msgstr "Eraman fokua eskuinera, ezer baldin badago."
 
 #: src/input/command.zig:520
 msgid "Focus Split: Up"
@@ -1022,11 +1022,11 @@ msgstr "Itxi fitxa guztian unekoa ezik."
 
 #: src/input/command.zig:623
 msgid "Close Tabs to the Right"
-msgstr "Itxi eskumako fitxak"
+msgstr "Itxi eskuineko fitxak"
 
 #: src/input/command.zig:624
 msgid "Close all tabs to the right of the current one."
-msgstr "Itxi unekoaren eskuman dauden fitxa guztiak."
+msgstr "Itxi unekoaren eskuinean dauden fitxa guztiak."
 
 #: src/input/command.zig:631
 msgid "Close the current window."
