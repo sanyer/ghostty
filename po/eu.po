@@ -805,7 +805,7 @@ msgstr "Mugitu uneko fitxa ezkerrera."
 
 #: src/input/command.zig:439
 msgid "Move Tab Right"
-msgstr "Mugitu fitxa eskumara"
+msgstr "Mugitu fitxa eskuinera"
 
 #: src/input/command.zig:440
 msgid "Move the current tab to the right."
