@@ -909,7 +909,7 @@ msgstr "Eraman fokua leihora: aurrekoa"
 
 #: src/input/command.zig:534
 msgid "Focus the previous window, if any."
-msgstr "Eraman faokua aurreko leihora, baldin badago."
+msgstr "Eraman fokua aurreko leihora, baldin badago."
 
 #: src/input/command.zig:538
 msgid "Focus Window: Next"
