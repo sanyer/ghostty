@@ -598,8 +598,7 @@ msgid ""
 "Copy the screen contents to a temporary file and copy the path to the "
 "clipboard."
 msgstr ""
-"Kopiatu pantailaren edukia behin-behineko fitxategi batera eta fitxategiaren bidea arbelera "
-"kopiatu."
+"Kopiatu pantailaren edukia behin-behineko fitxategi batera eta kopiatu fitxategiaren bidea arbelera."
 
 #: src/input/command.zig:291
 msgid "Copy Screen to Temporary File and Paste Path"
