@@ -986,7 +986,7 @@ msgstr ""
 
 #: src/input/command.zig:593
 msgid "Open Config in New Terminal Window"
-msgstr "Ireki konfigurazio terminal berri baten"
+msgstr "Ireki konfigurazioa terminal-leiho berri batean"
 
 #: src/input/command.zig:594
 msgid "Open the config file in a new window using $EDITOR or $VISUAL."
