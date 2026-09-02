@@ -495,7 +495,7 @@ msgstr "Amaitu uneko bilaketa eta ezkutatu interfazeko elementuak."
 
 #: src/input/command.zig:215
 msgid "Next Search Result"
-msgstr "Hurrengo bilaketaren emaitza"
+msgstr "Hurrengo bilaketa-emaitza"
 
 #: src/input/command.zig:216
 msgid "Navigate to the next search result, if any."
@@ -503,7 +503,7 @@ msgstr "Joan hurrengo bilaketa emaitzera, baldin badago."
 
 #: src/input/command.zig:219
 msgid "Previous Search Result"
-msgstr "Aurreko bilaketa emaitza"
+msgstr "Aurreko bilaketa-emaitza"
 
 #: src/input/command.zig:220
 msgid "Navigate to the previous search result, if any."
@@ -655,27 +655,27 @@ msgstr ""
 #: src/input/command.zig:330
 msgid "Copy Screen as ANSI Sequences to Temporary File and Copy Path"
 msgstr ""
-"Kopiatu pantaila ANSI sekuntzia gisa fitxategi batera eta kopiatu bidea."
+"Kopiatu pantaila ANSI sekuentzia gisa fitxategi batera eta kopiatu bidea."
 
 #: src/input/command.zig:331
 msgid ""
 "Copy the screen contents as ANSI escape sequences to a temporary file and "
 "copy the path to the clipboard."
 msgstr ""
-"Kopiatu pantailaren edukia ANSI sekuntzia gisa fitxategi batera eta kopiatu "
+"Kopiatu pantailaren edukia ANSI sekuentzia gisa fitxategi batera eta kopiatu "
 "bere bidea arbelera."
 
 #: src/input/command.zig:338
 msgid "Copy Screen as ANSI Sequences to Temporary File and Paste Path"
 msgstr ""
-"Kopiatu pantaila ANSI sekuntzia gisa fitxategi batera eta itsatsi bere bidea"
+"Kopiatu pantaila ANSI sekuentzia gisa fitxategi batera eta itsatsi bere bidea"
 
 #: src/input/command.zig:339
 msgid ""
 "Copy the screen contents as ANSI escape sequences to a temporary file and "
 "paste the path to the file."
 msgstr ""
-"Kopiatu pantailaren edukia ANSI sekuntzia gisa fitxategi batera eta "
+"Kopiatu pantailaren edukia ANSI sekuentzia gisa fitxategi batera eta "
 "fitxategiaren bidea itsatsi."
 
 #: src/input/command.zig:346
@@ -861,7 +861,7 @@ msgstr "Eraman fokua: aurrekoa"
 
 #: src/input/command.zig:501
 msgid "Focus the previous split, if any."
-msgstr "Eraman fokua aurreko banaketara, baldin badago."
+msgstr "Eraman fokua aurreko zatikatzera, baldin badago."
 
 #: src/input/command.zig:505
 msgid "Focus Split: Next"
@@ -869,7 +869,7 @@ msgstr "Eraman fokua: hurrengoa"
 
 #: src/input/command.zig:506
 msgid "Focus the next split, if any."
-msgstr "Eraman fokua hurrengo banaketara, baldin badago."
+msgstr "Eraman fokua hurrengo zatikatzera, baldin badago."
 
 #: src/input/command.zig:510
 msgid "Focus Split: Left"
@@ -921,11 +921,11 @@ msgstr "Eraman fokua hurrengo leihora, baldin badago."
 
 #: src/input/command.zig:545
 msgid "Toggle Split Zoom"
-msgstr "Banaketaren zooma aldatu"
+msgstr "Zatikatzearen zooma aldatu"
 
 #: src/input/command.zig:546
 msgid "Toggle the zoom state of the current split."
-msgstr "Uneko banaketaren zoom egoera aldatu."
+msgstr "Uneko zatikatzearen zoom egoera aldatu."
 
 #: src/input/command.zig:551
 msgid "Toggle Read-Only Mode"
@@ -937,11 +937,11 @@ msgstr "Uneko gainazalaren irakurketa-modua aldatu."
 
 #: src/input/command.zig:557
 msgid "Equalize Splits"
-msgstr "Berdindu banaketak"
+msgstr "Berdindu zatikatzeak"
 
 #: src/input/command.zig:558
 msgid "Equalize the size of all splits."
-msgstr "Berdindu banaketa guztien tamainak"
+msgstr "Berdindu zatikatze guztien tamainak"
 
 #: src/input/command.zig:563
 msgid "Reset Window Size"
