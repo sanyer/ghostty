@@ -152,8 +152,19 @@ pub fn OffsetHashMap(
         /// memory. The backing memory must be aligned to base_align.
         pub fn init(buf: OffsetBuf, l: Layout) Self {
             assert(base_align.check(@intFromPtr(buf.start())));
+            return fromUnmanaged(buf, Unmanaged.init(buf, l));
+        }
 
-            const m = Unmanaged.init(buf, l);
+        /// Like `init`, but for backing memory that the caller guarantees
+        /// is already zero-filled (e.g. fresh OS pages). Only the header
+        /// is written: all-zero slot metadata already means every slot is
+        /// free, so the metadata array is left untouched.
+        pub fn initAssumeZeroed(buf: OffsetBuf, l: Layout) Self {
+            assert(base_align.check(@intFromPtr(buf.start())));
+            return fromUnmanaged(buf, Unmanaged.initAssumeZeroed(buf, l));
+        }
+
+        fn fromUnmanaged(buf: OffsetBuf, m: Unmanaged) Self {
             return .{ .metadata = getOffset(
                 Unmanaged.Metadata,
                 buf,
@@ -344,6 +355,17 @@ fn HashMapUnmanaged(
         /// Initialize a hash map with a given capacity and a buffer. The
         /// buffer must fit within the size defined by `layoutForCapacity`.
         pub fn init(buf: OffsetBuf, layout: Layout) Self {
+            var map = initAssumeZeroed(buf, layout);
+            map.initMetadatas();
+            return map;
+        }
+
+        /// Like `init`, but for a buffer that the caller guarantees is
+        /// already zero-filled. Only the header is written: an all-zero
+        /// metadata byte is a free slot (see `Metadata.isFree`), so the
+        /// slot metadata is left untouched. Behavior is undefined if the
+        /// metadata region is not zero.
+        pub fn initAssumeZeroed(buf: OffsetBuf, layout: Layout) Self {
             assert(base_align.check(@intFromPtr(buf.start())));
 
             // Get all our main pointers
@@ -351,13 +373,12 @@ fn HashMapUnmanaged(
             const metadata_ptr: [*]Metadata = @ptrCast(metadata_buf.start());
 
             // Build our map
-            var map: Self = .{ .metadata = metadata_ptr };
+            const map: Self = .{ .metadata = metadata_ptr };
             const hdr = map.header();
             hdr.capacity = layout.capacity;
             hdr.size = 0;
             if (@sizeOf([*]K) != 0) hdr.keys = metadata_buf.member(K, layout.keys_start);
             if (@sizeOf([*]V) != 0) hdr.values = metadata_buf.member(V, layout.vals_start);
-            map.initMetadatas();
 
             return map;
         }
