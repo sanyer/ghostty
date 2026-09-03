@@ -43,6 +43,11 @@ const page_preheat = 4;
 /// we preheat that one and let the pool grow on demand.
 const node_preheat = 1;
 
+/// The number of pins we preheat the pin pool with: the viewport pin that
+/// every PageList tracks and the cursor pin that every Screen tracks.
+/// Selections, searches, and so on grow the pool on demand.
+const pin_preheat = 2;
+
 /// The list of pages in the screen. These are expected to be in order
 /// where the first page is the topmost page (scrollback) and the last is
 /// the bottommost page (the current active page).
@@ -370,7 +375,7 @@ pub const MemoryPool = struct {
         errdefer node_pool.deinit();
         var page_pool = try PagePool.initCapacity(gen_alloc, page_alloc, preheat);
         errdefer page_pool.deinit();
-        var pin_pool = try PinPool.initCapacity(gen_alloc, 8);
+        var pin_pool = try PinPool.initCapacity(gen_alloc, pin_preheat);
         errdefer pin_pool.deinit();
         return .{
             .alloc = gen_alloc,
@@ -664,11 +669,10 @@ pub fn init(
     try tw.check(.viewport_pin);
     const viewport_pin = try pool.pins.create();
     viewport_pin.* = .{ .node = page_list.first.? };
-    var tracked_pins: PinSet = .{};
-    errdefer tracked_pins.deinit(pool.alloc);
 
     try tw.check(.viewport_pin_track);
-    try tracked_pins.putNoClobber(pool.alloc, viewport_pin, {});
+    var tracked_pins = try initTrackedPins(pool.alloc, viewport_pin);
+    errdefer tracked_pins.deinit(pool.alloc);
 
     errdefer comptime unreachable;
     const result: PageList = .{
@@ -688,6 +692,17 @@ pub fn init(
     };
     result.assertIntegrity();
     return result;
+}
+
+/// Create the tracked pin set for a new PageList with the viewport pin
+/// already tracked. The set is sized for exactly the viewport pin and the
+/// cursor pin that every Screen tracks.
+fn initTrackedPins(alloc: Allocator, viewport_pin: *Pin) Allocator.Error!PinSet {
+    var set: PinSet = .{};
+    errdefer set.deinit(alloc);
+    try set.entries.setCapacity(alloc, pin_preheat);
+    set.putAssumeCapacityNoClobber(viewport_pin, {});
+    return set;
 }
 
 const initPages_tw = tripwire.module(enum {
@@ -1098,9 +1113,8 @@ pub fn clone(
     // Create our viewport. In a clone, the viewport always goes
     // to the top.
     const viewport_pin = try pool.pins.create();
-    var tracked_pins: PinSet = .{};
+    var tracked_pins = try initTrackedPins(pool.alloc, viewport_pin);
     errdefer tracked_pins.deinit(pool.alloc);
-    try tracked_pins.putNoClobber(pool.alloc, viewport_pin, {});
 
     // Our list of pages
     var page_list: List = .{};
@@ -7560,9 +7574,8 @@ pub const Builder = struct {
         viewport_pin.* = active_top;
 
         // Setup our one viewport tracked pin
-        var tracked_pins: PinSet = .{};
+        var tracked_pins = try initTrackedPins(self.pool.alloc, viewport_pin);
         errdefer tracked_pins.deinit(self.pool.alloc);
-        try tracked_pins.putNoClobber(self.pool.alloc, viewport_pin, {});
 
         // Initialize limits
         var limits: Limits = .init(self.options.cols, self.options.rows);
