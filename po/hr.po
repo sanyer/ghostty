@@ -417,11 +417,11 @@ msgstr "Kopiraj odabrano kao obični tekst u međuspremnik"
 
 #: src/input/command.zig:160
 msgid "Copy the selected text as plain text to the clipboard."
-msgstr "Kopiraj odabrani tekst kao obični u međuspremnik."
+msgstr "Kopiraj odabrani tekst kao obični tekst u međuspremnik."
 
 #: src/input/command.zig:163
 msgid "Copy Selection as ANSI Sequences to Clipboard"
-msgstr "Kopiraj odabrano kao ANSI sekvencu u međuspremnik"
+msgstr "Kopiraj odabrano kao ANSI niz u međuspremnik"
 
 #: src/input/command.zig:164
 msgid "Copy the selected text as ANSI escape sequences to the clipboard."
@@ -593,19 +593,19 @@ msgstr "Pomakni zaslon prema dolje za jednu stranicu."
 
 #: src/input/command.zig:286
 msgid "Copy Screen to Temporary File and Copy Path"
-msgstr "Kopiraj zaslon u privremenu datoteku i kopiraj put."
+msgstr "Kopiraj zaslon u privremenu datoteku i kopiraj putanju."
 
 #: src/input/command.zig:287
 msgid ""
 "Copy the screen contents to a temporary file and copy the path to the "
 "clipboard."
 msgstr ""
-"Kopiraj sadržaj zaslona u privremenu datoteku i kopiraj put "
+"Kopiraj sadržaj zaslona u privremenu datoteku i kopiraj putanju "
 "međuspremnika."
 
 #: src/input/command.zig:291
 msgid "Copy Screen to Temporary File and Paste Path"
-msgstr "Kopiraj zaslon u privremenu datoteku i zalijepi put."
+msgstr "Kopiraj zaslon u privremenu datoteku i zalijepi putanju."
 
 #: src/input/command.zig:292
 msgid ""
@@ -819,7 +819,7 @@ msgstr "Pomakni karticu u novi prozor."
 
 #: src/input/command.zig:447
 msgid "Move the current tab to a new window."
-msgstr "Prebaci trebutnu karticu u novi prozor"
+msgstr "Prebaci trenutnu karticu u novi prozor"
 
 #: src/input/command.zig:452
 msgid "Toggle Tab Overview"
@@ -827,7 +827,7 @@ msgstr "Uključi/isključi pregled kartica."
 
 #: src/input/command.zig:453
 msgid "Toggle the tab overview."
-msgstr "Uključi/isključi pregled kartica."
+msgstr "Uključi ili isključi pregled kartica."
 
 #: src/input/command.zig:458
 msgid "Change Terminal Title…"
@@ -859,7 +859,7 @@ msgstr "Podijeli terminal prema dolje."
 
 #: src/input/command.zig:500
 msgid "Focus Split: Previous"
-msgstr "Fokusiraj podjelu: prethodnu."
+msgstr "Fokusiraj podjelu: prethodna."
 
 #: src/input/command.zig:501
 msgid "Focus the previous split, if any."
@@ -935,7 +935,7 @@ msgstr "Uključi/Isključi način rada samo za čitanje"
 
 #: src/input/command.zig:552
 msgid "Toggle read-only mode for the current surface."
-msgstr "Uključi ili isključi način rada samo za čitanje za tenutnu površinu."
+msgstr "Uključi ili isključi način rada samo za čitanje za trenutnu površinu."
 
 #: src/input/command.zig:557
 msgid "Equalize Splits"
@@ -971,7 +971,7 @@ msgstr "Prikaži GTK inspektor."
 
 #: src/input/command.zig:581
 msgid "Show On-Screen Keyboard"
-msgstr "Pokaži tipkovnicu na ekrnau"
+msgstr "Pokaži tipkovnicu na ekranu"
 
 #: src/input/command.zig:582
 msgid "Show the on-screen keyboard if present."
@@ -979,19 +979,19 @@ msgstr "Pokaži tipkovnicu na ekranu ako je prisutna."
 
 #: src/input/command.zig:588
 msgid "Open Config Using OS editor"
-msgstr "Otvori konfiguraciju koristeči uređivač teksta OS-a"
+msgstr "Otvori postavke koristeći uređivač teksta OS-a"
 
 #: src/input/command.zig:589
 msgid "Open the config file with the OS's default editor."
-msgstr "Otvori konfiguraciju koristeči zadani uređivač teksta OS-a"
+msgstr "Otvori datoteku postavki koristeći zadani uređivač teksta OS-a"
 
 #: src/input/command.zig:593
 msgid "Open Config in New Terminal Window"
-msgstr "Otvori konfiguraciju u novom prozoru terminala"
+msgstr "Otvori postavke u novom prozoru terminala"
 
 #: src/input/command.zig:594
 msgid "Open the config file in a new window using $EDITOR or $VISUAL."
-msgstr "Otvori konfiguraciju u novom prozoru koristeči $EIDTOR ili $VISUAL."
+msgstr "Otvori datoteku postavki u novom prozoru koristeći $EIDTOR ili $VISUAL."
 
 #: src/input/command.zig:600
 msgid "Reload Config"
@@ -999,7 +999,7 @@ msgstr "Ponovno učitaj postavke"
 
 #: src/input/command.zig:601
 msgid "Reload the config file."
-msgstr "Ponovno učitaj datotku postavki."
+msgstr "Ponovno učitaj datoteku postavki."
 
 #: src/input/command.zig:606
 msgid "Close Terminal"
@@ -1119,7 +1119,7 @@ msgstr "Ponovno odradi"
 
 #: src/input/command.zig:697
 msgid "Redo the last undone action."
-msgstr "Otkaži zadnju otkazanu akciju."
+msgstr "Otkaži zadnju otkazanu radnju."
 
 #: src/input/command.zig:703
 msgid "Quit the application."
@@ -1131,4 +1131,4 @@ msgstr "Ghostty"
 
 #: src/input/command.zig:709
 msgid "Put a little Ghostty in your terminal."
-msgstr "Stavi mali Ghostty u svoj terminal."
+msgstr "Stavi malog Ghosttyja u svoj terminal."
