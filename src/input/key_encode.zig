@@ -2033,6 +2033,28 @@ test "legacy: esc with utf8 (dead key state)" {
     try testing.expectEqualStrings("A", writer.buffered());
 }
 
+test "legacy: alt+escape with modify other state 2" {
+    var buf: [128]u8 = undefined;
+
+    {
+        var writer: std.Io.Writer = .fixed(&buf);
+        try legacy(&writer, .{
+            .key = .escape,
+            .mods = .{ .alt = true },
+        }, .{});
+        try testing.expectEqualStrings("\x1b\x1b", writer.buffered());
+    }
+
+    {
+        var writer: std.Io.Writer = .fixed(&buf);
+        try legacy(&writer, .{
+            .key = .escape,
+            .mods = .{ .alt = true },
+        }, .{ .modify_other_keys_state_2 = true });
+        try testing.expectEqualStrings("\x1b[27;3;27~", writer.buffered());
+    }
+}
+
 test "legacy: ctrl+shift+minus (underscore on US)" {
     var buf: [128]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buf);
@@ -2379,6 +2401,35 @@ test "legacy: keypad 1" {
     try testing.expectEqualStrings("1", writer.buffered());
 }
 
+test "legacy: keypad 1 with modify other state 2" {
+    var buf: [128]u8 = undefined;
+
+    {
+        var writer: std.Io.Writer = .fixed(&buf);
+        try legacy(&writer, .{
+            .key = .numpad_1,
+            .mods = .{ .ctrl = true },
+            .utf8 = "1",
+        }, .{
+            .modify_other_keys_state_2 = true,
+        });
+        try testing.expectEqualStrings("1", writer.buffered());
+    }
+
+    {
+        var writer: std.Io.Writer = .fixed(&buf);
+        try legacy(&writer, .{
+            .key = .numpad_1,
+            .mods = .{ .ctrl = true },
+            .utf8 = "1",
+        }, .{
+            .keypad_key_application = true,
+            .modify_other_keys_state_2 = true,
+        });
+        try testing.expectEqualStrings("\x1bO5q", writer.buffered());
+    }
+}
+
 test "legacy: keypad 1 with application keypad" {
     var buf: [128]u8 = undefined;
     var writer: std.Io.Writer = .fixed(&buf);
@@ -2478,6 +2529,91 @@ test "legacy: f1" {
             .consumed_mods = .{},
         }, .{});
         try testing.expectEqualStrings("\x1b[15;5~", writer.buffered());
+    }
+}
+
+test "legacy: f13 through f25" {
+    const Case = struct { key: key.Key, code: u8 };
+    const cases = [_]Case{
+        .{ .key = .f13, .code = 25 },
+        .{ .key = .f14, .code = 26 },
+        .{ .key = .f15, .code = 28 },
+        .{ .key = .f16, .code = 29 },
+        .{ .key = .f17, .code = 31 },
+        .{ .key = .f18, .code = 32 },
+        .{ .key = .f19, .code = 33 },
+        .{ .key = .f20, .code = 34 },
+        .{ .key = .f21, .code = 42 },
+        .{ .key = .f22, .code = 43 },
+        .{ .key = .f23, .code = 44 },
+        .{ .key = .f24, .code = 45 },
+        .{ .key = .f25, .code = 46 },
+    };
+
+    var buf: [128]u8 = undefined;
+    var expected_buf: [32]u8 = undefined;
+    for (cases) |case| {
+        {
+            var writer: std.Io.Writer = .fixed(&buf);
+            try legacy(&writer, .{ .key = case.key }, .{});
+            const expected = try std.fmt.bufPrint(
+                &expected_buf,
+                "\x1b[{}~",
+                .{case.code},
+            );
+            try testing.expectEqualStrings(expected, writer.buffered());
+        }
+
+        {
+            var writer: std.Io.Writer = .fixed(&buf);
+            try legacy(&writer, .{
+                .key = case.key,
+                .mods = .{ .ctrl = true },
+            }, .{ .modify_other_keys_state_2 = true });
+            const expected = try std.fmt.bufPrint(
+                &expected_buf,
+                "\x1b[{};5~",
+                .{case.code},
+            );
+            try testing.expectEqualStrings(expected, writer.buffered());
+        }
+    }
+}
+
+test "legacy: help and context menu" {
+    const Case = struct { key: key.Key, code: u8 };
+    const cases = [_]Case{
+        .{ .key = .help, .code = 28 },
+        .{ .key = .context_menu, .code = 29 },
+    };
+
+    var buf: [128]u8 = undefined;
+    var expected_buf: [32]u8 = undefined;
+    for (cases) |case| {
+        {
+            var writer: std.Io.Writer = .fixed(&buf);
+            try legacy(&writer, .{ .key = case.key }, .{});
+            const expected = try std.fmt.bufPrint(
+                &expected_buf,
+                "\x1b[{}~",
+                .{case.code},
+            );
+            try testing.expectEqualStrings(expected, writer.buffered());
+        }
+
+        {
+            var writer: std.Io.Writer = .fixed(&buf);
+            try legacy(&writer, .{
+                .key = case.key,
+                .mods = .{ .ctrl = true },
+            }, .{ .modify_other_keys_state_2 = true });
+            const expected = try std.fmt.bufPrint(
+                &expected_buf,
+                "\x1b[{};5~",
+                .{case.code},
+            );
+            try testing.expectEqualStrings(expected, writer.buffered());
+        }
     }
 }
 
