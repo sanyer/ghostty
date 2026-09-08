@@ -747,7 +747,7 @@ msgstr ""
 
 #: src/input/command.zig:389
 msgid "Copy Selection as HTML to Temporary File and Open"
-msgstr "Kopiraj odabir u privremenu datoteku kao HTML i otvori."
+msgstr "Kopiraj odabir u privremenu datoteku kao HTML i otvori je."
 
 #: src/input/command.zig:390
 msgid "Copy the selection contents as HTML to a temporary file and open it."
@@ -779,7 +779,7 @@ msgstr ""
 
 #: src/input/command.zig:414
 msgid "Copy Selection as ANSI Sequences to Temporary File and Open"
-msgstr "Kopiraj odabir u privremenu datoteku kao ANSI nizove i otvori."
+msgstr "Kopiraj odabir u privremenu datoteku kao ANSI nizove i otvori je."
 
 #: src/input/command.zig:415
 msgid ""
@@ -971,11 +971,11 @@ msgstr "Prikaži GTK inspektor."
 
 #: src/input/command.zig:581
 msgid "Show On-Screen Keyboard"
-msgstr "Pokaži tipkovnicu na ekranu"
+msgstr "Pokaži tipkovnicu na zaslonu"
 
 #: src/input/command.zig:582
 msgid "Show the on-screen keyboard if present."
-msgstr "Pokaži tipkovnicu na ekranu ako je prisutna."
+msgstr "Pokaži tipkovnicu na zaslonu ako je prisutna."
 
 #: src/input/command.zig:588
 msgid "Open Config Using OS editor"
@@ -1051,11 +1051,11 @@ msgstr "Uključi ili isključi maksimizaciju trenutnog prozora."
 
 #: src/input/command.zig:648
 msgid "Toggle Fullscreen"
-msgstr "Uključi/Isključi puni ekran"
+msgstr "Uključi/Isključi puni zaslon"
 
 #: src/input/command.zig:649
 msgid "Toggle the fullscreen state of the current window."
-msgstr "Uključi ili isključi puni ekran trenutnog prozora."
+msgstr "Uključi ili isključi puni zaslon trenutnog prozora."
 
 #: src/input/command.zig:654
 msgid "Toggle Window Decorations"
@@ -1131,4 +1131,4 @@ msgstr "Ghostty"
 
 #: src/input/command.zig:709
 msgid "Put a little Ghostty in your terminal."
-msgstr "Stavi malog Ghosttyja u svoj terminal."
+msgstr "Stavi maloga Ghosttyja u svoj terminal."
