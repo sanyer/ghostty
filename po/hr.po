@@ -1087,7 +1087,7 @@ msgstr "Uključi/isključi obavještavanje miša"
 
 #: src/input/command.zig:673
 msgid "Toggle whether mouse events are reported to terminal applications."
-msgstr "Uključi ili isključi obavještava li terminal o događajima miša."
+msgstr "Uključi ili isključi obavještava li terminal aplikacije o događajima miša."
 
 #: src/input/command.zig:678
 msgid "Toggle Background Opacity"
