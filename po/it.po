@@ -480,7 +480,7 @@ msgstr "Inizia ricerca"
 
 #: src/input/command.zig:198
 msgid "Start a search if one isn't already active."
-msgstr "Inizia una ricerca se non è già attiva."
+msgstr "Inizia una ricerca se non è già in corso."
 
 #: src/input/command.zig:203
 msgid "Search Selection"
@@ -1131,11 +1131,11 @@ msgstr "Annulla l'ultima azione."
 
 #: src/input/command.zig:696
 msgid "Redo"
-msgstr "Ripeti"
+msgstr "Ripristina"
 
 #: src/input/command.zig:697
 msgid "Redo the last undone action."
-msgstr "Ripeti l'ultima azione annullata."
+msgstr "Ripristina l'ultima azione annullata."
 
 #: src/input/command.zig:703
 msgid "Quit the application."
