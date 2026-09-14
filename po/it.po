@@ -497,8 +497,8 @@ msgstr "Termina ricerca"
 #: src/input/command.zig:210
 msgid "End the current search if any and hide any GUI elements."
 msgstr ""
-"Termina la ricerca in corso, se presente, e nascondi "
-"gli eventuali elementi dell'interfaccia grafica."
+"Termina la ricerca in corso, se attiva, e nascondi "
+"i relativi elementi dell'interfaccia grafica."
 
 #: src/input/command.zig:215
 msgid "Next Search Result"
