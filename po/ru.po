@@ -352,7 +352,7 @@ msgstr "Все сессии терминала в этом окне будут �
 
 #: src/apprt/gtk/class/close_confirmation_dialog.zig:196
 msgid "The currently running process in this split will be terminated."
-msgstr "Текущий процесс в этой области будет завершён."
+msgstr "Процесс, работающий в этой области, будет завершён."
 
 #: src/apprt/gtk/class/surface.zig:1181
 msgid "Command Finished"
