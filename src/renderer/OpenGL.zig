@@ -69,7 +69,6 @@ pub fn init(alloc: Allocator, opts: rendererpkg.Options) !OpenGL {
         egl.c.EGL_GREEN_SIZE,      8,
         egl.c.EGL_BLUE_SIZE,       8,
         egl.c.EGL_ALPHA_SIZE,      8,
-        egl.c.EGL_NONE,
     }) catch |err| {
         log.warn("failed to choose config err={}", .{err});
         return err;
@@ -80,7 +79,6 @@ pub fn init(alloc: Allocator, opts: rendererpkg.Options) !OpenGL {
         egl.c.EGL_CONTEXT_MAJOR_VERSION,       MIN_VERSION_MAJOR,
         egl.c.EGL_CONTEXT_MINOR_VERSION,       MIN_VERSION_MINOR,
         egl.c.EGL_CONTEXT_OPENGL_PROFILE_MASK, egl.c.EGL_CONTEXT_OPENGL_CORE_PROFILE_BIT,
-        egl.c.EGL_NONE,
     }) catch |err| {
         log.warn("failed to create EGL context err={}", .{err});
         return err;
