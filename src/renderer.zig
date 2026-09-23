@@ -34,10 +34,15 @@ pub const lib = @import("lib/main.zig");
 
 /// The implementation to use for the renderer. This is comptime chosen
 /// so that every build has exactly one renderer implementation.
-pub const Renderer = switch (build_config.renderer) {
-    .metal => GenericRenderer(Metal),
-    .opengl => GenericRenderer(OpenGL),
+pub const Renderer = GenericRenderer(GraphicsAPI);
+
+const GraphicsAPI = switch (build_config.renderer) {
+    .metal => Metal,
+    .opengl => OpenGL,
 };
+
+/// The app-scoped render device from which surface renderers are created.
+pub const Device = GraphicsAPI.Device;
 
 /// The health status of a renderer. These must be shared across all
 /// renderers even if some states aren't reachable so that our API users
