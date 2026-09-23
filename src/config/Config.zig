@@ -2512,6 +2512,25 @@ keybind: Keybinds = .{},
 /// Available since: 1.0.1
 @"title-report": bool = false,
 
+/// If true, allows the running program to resize the window using the
+/// xterm `CSI 8 ; rows ; columns t` escape sequence. If a parameter is zero
+/// or omitted, the current size of that dimension is kept. Sizes smaller
+/// than 40 columns by 10 rows are raised to that size so that a program
+/// can't shrink the window to hide its output.
+///
+/// The request is ignored if the terminal is in a split, in a window with
+/// multiple tabs, fullscreen, or the quick terminal. As with `window-width`
+/// and `window-height`, the window manager may limit the size and sizes
+/// larger than the screen are clamped to the screen.
+///
+/// This is disabled by default because it lets any program, including one
+/// running on a remote machine, change the size of your window.
+///
+/// This is currently only supported on macOS.
+///
+/// Available since: 1.4.0
+@"vt-window-resize-allowed": bool = false,
+
 /// The total amount of bytes that can be used for image data (e.g. the Kitty
 /// image protocol) per terminal screen. The maximum value is 4,294,967,295
 /// (4GiB). The default is 320MB. If this is set to zero, then all image
