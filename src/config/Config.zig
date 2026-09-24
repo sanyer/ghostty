@@ -2519,14 +2519,12 @@ keybind: Keybinds = .{},
 /// can't shrink the window to hide its output.
 ///
 /// The request is ignored if the terminal is in a split, in a window with
-/// multiple tabs, fullscreen, or the quick terminal. As with `window-width`
-/// and `window-height`, the window manager may limit the size and sizes
-/// larger than the screen are clamped to the screen.
+/// multiple tabs, or the quick terminal, or if the window manager controls
+/// the window size, such as when it is fullscreen, maximized, or tiled.
+/// Sizes larger than the screen are clamped to the screen.
 ///
 /// This is disabled by default because it lets any program, including one
 /// running on a remote machine, change the size of your window.
-///
-/// This is currently only supported on macOS.
 ///
 /// Available since: 1.4.0
 @"vt-window-resize-allowed": bool = false,
