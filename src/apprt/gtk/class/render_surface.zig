@@ -258,7 +258,7 @@ pub const RenderSurface = extern struct {
         const surface = native.getSurface() orelse return;
         const layout = scale_util.widgetLayoutForSize(widget, css_width, css_height);
 
-        log.info(
+        log.debug(
             "surface scale {s}: css={}x{} device={}x{} surface={d} effective={d} surface_factor={} widget_factor={}",
             .{
                 event,
