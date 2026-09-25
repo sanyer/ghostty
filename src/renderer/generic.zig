@@ -222,6 +222,12 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
         /// Health of the most recently completed frame.
         health: std.atomic.Value(Health) = .{ .raw = .healthy },
 
+        /// Health of how well the apprt can present our frames.
+        ///
+        /// This is separate from `health` because a renderer
+        /// can produce healthy frames that the apprt can't present.
+        presentation_health: std.atomic.Value(Health) = .{ .raw = .healthy },
+
         /// True when we have a graphics context that can create GPU
         /// resources. Creating any GPU resource while this is false is invalid.
         display_realized: bool = true,
@@ -1148,6 +1154,17 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
             self.custom_shader_focused_changed = true;
 
             self.syncDisplayLink(null, null);
+        }
+
+        /// Called when the apprt reports a change in how well
+        /// frames can be presented.
+        pub fn setPresentationHealth(self: *Self, health: Health) void {
+            self.presentation_health.store(health, .seq_cst);
+        }
+
+        /// Returns how well frames can be presented.
+        pub fn presentationHealth(self: *Self) Health {
+            return self.presentation_health.load(.seq_cst);
         }
 
         /// Callback when the window is visible or occluded.

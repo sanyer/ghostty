@@ -155,8 +155,20 @@ pub const RenderSurface = extern struct {
         // currently displaying.
         if (priv.core_surface) |core| {
             if (core.renderer.takeFrame()) |frame| {
-                self.rebuildTexture(frame) catch |err| {
-                    log.warn("error building texture from frame err={}", .{err});
+                self.rebuildTexture(frame) catch |err| switch (err) {
+                    // GTK can't import our DMABUFs, e.g. due to an
+                    // incompatible format modifier on multi-GPU setups.
+                    // Report unhealthy presentation health so the
+                    // renderer presents via CPU readback instead.
+                    error.DmabufBuildFailed => {
+                        log.warn(
+                            "failed to import dmabuf, asking renderer for CPU presentation",
+                            .{},
+                        );
+                        core.reportPresentationHealth(.unhealthy);
+                    },
+
+                    else => log.warn("error building texture from frame err={}", .{err}),
                 };
             }
         }
