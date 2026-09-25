@@ -92,6 +92,10 @@ pub fn Renderer(comptime GraphicsAPI: type) type {
 
         pub const ExportedFrame = if (@hasDecl(GraphicsAPI, "ExportedFrame")) GraphicsAPI.ExportedFrame else void;
 
+        /// Whether +Y is down in the coordinate space of exported
+        /// frames. Apprts use this to orient frames when presenting.
+        pub const custom_shader_y_is_down = GraphicsAPI.custom_shader_y_is_down;
+
         const Target = GraphicsAPI.Target;
         const Buffer = GraphicsAPI.Buffer;
         const Sampler = GraphicsAPI.Sampler;
