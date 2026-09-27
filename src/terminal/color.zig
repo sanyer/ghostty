@@ -1,7 +1,7 @@
 const colorpkg = @This();
 
 const std = @import("std");
-const parse_int = @import("parse_int.zig");
+const lib = @import("lib.zig");
 const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const assert = @import("../quirks.zig").inlineAssert;
@@ -717,7 +717,7 @@ pub const RGB = packed struct(u24) {
             return error.InvalidFormat;
         }
 
-        const color = parse_int.parse(u16, value, 16) catch {
+        const color = lib.parseInt(u16, value, 16) catch {
             @branchHint(.cold);
             return error.InvalidFormat;
         };

@@ -2,7 +2,6 @@
 //! Specification: https://sw.kovidgoyal.net/kitty/text-sizing-protocol/
 
 const std = @import("std");
-const parse_int = @import("../../parse_int.zig");
 
 const assert = @import("../../../quirks.zig").inlineAssert;
 
@@ -48,7 +47,7 @@ pub const OSC = struct {
         InvalidValue,
     }!void {
         // All values are numeric, so we can do a small hack here
-        const v = parse_int.parse(
+        const v = lib.parseInt(
             u4,
             value,
             10,

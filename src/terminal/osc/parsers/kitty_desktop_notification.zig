@@ -2,7 +2,7 @@
 //! Specification: https://sw.kovidgoyal.net/kitty/desktop-notifications/
 
 const std = @import("std");
-const parse_int = @import("../../parse_int.zig");
+const lib = @import("../../lib.zig");
 
 const assert = @import("../../../quirks.zig").inlineAssert;
 
@@ -208,7 +208,7 @@ pub const Option = enum {
             .t => unreachable,
             .u => .init(value),
             .w => value: {
-                const tmp = parse_int.parse(i32, value, 10) catch break :value key.default();
+                const tmp = lib.parseInt(i32, value, 10) catch break :value key.default();
                 // negative values less than -1 are not allowed
                 if (tmp < -1) break :value key.default();
                 break :value tmp;

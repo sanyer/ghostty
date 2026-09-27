@@ -6,7 +6,7 @@
 //! and form a stack.
 
 const std = @import("std");
-const parse_int = @import("../../parse_int.zig");
+const lib = @import("../../lib.zig");
 const Parser = @import("../../osc.zig").Parser;
 const OSCCommand = @import("../../osc.zig").Command;
 
@@ -163,7 +163,7 @@ pub const Field = enum {
             return switch (self) {
                 .type => .parse(value),
                 .exit => .parse(value),
-                .pid, .pidfdid, .status => parse_int.parse(
+                .pid, .pidfdid, .status => lib.parseInt(
                     u64,
                     value,
                     10,

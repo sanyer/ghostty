@@ -7,7 +7,7 @@ const math = std.math;
 
 /// Parse ASCII digits in the given base. Signed types allow a leading sign;
 /// unsigned types accept digits only.
-pub fn parse(
+pub fn parseInt(
     comptime T: type,
     value: []const u8,
     comptime base: u8,
@@ -48,28 +48,28 @@ fn parseWithSign(
 
 test "protocol integer parsing" {
     const testing = std.testing;
-    try testing.expectEqual(42, try parse(u8, "042", 10));
-    try testing.expectEqual(255, try parse(u8, "fF", 16));
-    try testing.expectEqual(42, try parse(i32, "+42", 10));
-    try testing.expectEqual(-2147483648, try parse(i32, "-2147483648", 10));
-    try testing.expectEqual(2147483647, try parse(i32, "2147483647", 10));
-    try testing.expectEqual(-4, try parse(i3, "-4", 10));
-    try testing.expectError(error.Overflow, parse(i3, "4", 10));
-    try testing.expectError(error.Overflow, parse(u8, "256", 10));
-    try testing.expectError(error.Overflow, parse(i32, "2147483648", 10));
-    try testing.expectError(error.Overflow, parse(i32, "-2147483649", 10));
+    try testing.expectEqual(42, try parseInt(u8, "042", 10));
+    try testing.expectEqual(255, try parseInt(u8, "fF", 16));
+    try testing.expectEqual(42, try parseInt(i32, "+42", 10));
+    try testing.expectEqual(-2147483648, try parseInt(i32, "-2147483648", 10));
+    try testing.expectEqual(2147483647, try parseInt(i32, "2147483647", 10));
+    try testing.expectEqual(-4, try parseInt(i3, "-4", 10));
+    try testing.expectError(error.Overflow, parseInt(i3, "4", 10));
+    try testing.expectError(error.Overflow, parseInt(u8, "256", 10));
+    try testing.expectError(error.Overflow, parseInt(i32, "2147483648", 10));
+    try testing.expectError(error.Overflow, parseInt(i32, "-2147483649", 10));
     for ([_][]const u8{
         "", "4_2", "4__2", "_42", "42_", " 42", "42 ", "0x2a", "4.2", "4e2", "\xff",
     }) |value| {
-        try testing.expectError(error.InvalidCharacter, parse(u8, value, 10));
-        try testing.expectError(error.InvalidCharacter, parse(i32, value, 10));
+        try testing.expectError(error.InvalidCharacter, parseInt(u8, value, 10));
+        try testing.expectError(error.InvalidCharacter, parseInt(i32, value, 10));
     }
     for ([_][]const u8{ "+42", "-0", "-42" }) |value| {
-        try testing.expectError(error.InvalidCharacter, parse(u8, value, 10));
+        try testing.expectError(error.InvalidCharacter, parseInt(u8, value, 10));
     }
     for ([_][]const u8{ "+", "-", "-4_2", "+4__2" }) |value| {
-        try testing.expectError(error.InvalidCharacter, parse(i32, value, 10));
+        try testing.expectError(error.InvalidCharacter, parseInt(i32, value, 10));
     }
-    try testing.expectError(error.InvalidCharacter, parse(u16, "f_f", 16));
-    try testing.expectError(error.InvalidCharacter, parse(u16, "0xff", 16));
+    try testing.expectError(error.InvalidCharacter, parseInt(u16, "f_f", 16));
+    try testing.expectError(error.InvalidCharacter, parseInt(u16, "0xff", 16));
 }

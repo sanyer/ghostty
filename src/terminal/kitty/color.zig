@@ -1,5 +1,5 @@
 const std = @import("std");
-const parse_int = @import("../parse_int.zig");
+const lib = @import("../lib.zig");
 const terminal = @import("../main.zig");
 const RGB = terminal.color.RGB;
 const Terminator = terminal.osc.Terminator;
@@ -49,7 +49,7 @@ pub const Kind = union(enum) {
 
     pub fn parse(key: []const u8) ?Kind {
         if (std.meta.stringToEnum(Special, key)) |s| return .{ .special = s };
-        return .{ .palette = parse_int.parse(u8, key, 10) catch return null };
+        return .{ .palette = lib.parseInt(u8, key, 10) catch return null };
     }
 
     /// Returns true when a terminal has built-in state for this key.

@@ -1,5 +1,5 @@
 const std = @import("std");
-const parse_int = @import("../../parse_int.zig");
+const lib = @import("../../lib.zig");
 
 const Parser = @import("../../osc.zig").Parser;
 const Command = @import("../../osc.zig").Command;
@@ -26,7 +26,7 @@ pub fn parse(parser: *Parser, _: ?u8) ?*Command {
                     ';' => {
                         parser.command = .{
                             .conemu_sleep = .{
-                                .duration_ms = if (parse_int.parse(u16, data[2..], 10)) |num| @min(num, 10_000) else |_| 100,
+                                .duration_ms = if (lib.parseInt(u16, data[2..], 10)) |num| @min(num, 10_000) else |_| 100,
                             },
                         };
                         return &parser.command;
@@ -194,7 +194,7 @@ pub fn parse(parser: *Parser, _: ?u8) ?*Command {
                         // parse the progress value
                         parser.command.conemu_progress_report.progress = value: {
                             break :value @intCast(std.math.clamp(
-                                parse_int.parse(usize, data[4..], 10) catch break :value null,
+                                lib.parseInt(usize, data[4..], 10) catch break :value null,
                                 0,
                                 100,
                             ));

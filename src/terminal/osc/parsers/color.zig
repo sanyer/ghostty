@@ -1,5 +1,5 @@
 const std = @import("std");
-const parse_int = @import("../../parse_int.zig");
+const lib = @import("../../lib.zig");
 const Allocator = std.mem.Allocator;
 
 const DynamicColor = @import("../../color.zig").Dynamic;
@@ -175,7 +175,7 @@ fn parseGetSetAnsiColor(
         const spec_str = it.next() orelse return result;
 
         // Color must be numeric. u9 because that'll fit our palette + special
-        const color: u9 = parse_int.parse(
+        const color: u9 = lib.parseInt(
             u9,
             color_str,
             10,
@@ -248,7 +248,7 @@ fn parseResetAnsiColor(
         if (color_str.len == 0) continue;
 
         // Color must be numeric. u9 because that'll fit our palette + special
-        const color: u9 = parse_int.parse(
+        const color: u9 = lib.parseInt(
             u9,
             color_str,
             10,

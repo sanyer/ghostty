@@ -1,6 +1,5 @@
 //! https://gitlab.freedesktop.org/Per_Bothner/specifications/blob/master/proposals/semantic-prompts.md
 const std = @import("std");
-const parse_int = @import("../../parse_int.zig");
 
 const lib = @import("../../lib.zig");
 const Parser = @import("../../osc.zig").Parser;
@@ -169,7 +168,7 @@ pub const Option = enum {
             // If we're looking for exit_code we special case it.
             // as the first value.
             if (comptime self == .exit_code) {
-                return parse_int.parse(
+                return lib.parseInt(
                     i32,
                     full,
                     10,
