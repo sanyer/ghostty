@@ -1,5 +1,9 @@
 //! Integer parsing for terminal protocols, without Zig digit separators.
+//!
+//! Adapted from Zig's `std.fmt.parseInt` (MIT license). See
+//! src/lib/compat/README.md for license and details.
 const std = @import("std");
+const math = std.math;
 
 /// Parse ASCII digits in the given base. Signed types allow a leading sign;
 /// unsigned types accept digits only.
@@ -9,16 +13,37 @@ pub fn parse(
     comptime base: u8,
 ) std.fmt.ParseIntError!T {
     comptime std.debug.assert(base >= 2 and base <= 36);
-    const digits = if (@typeInfo(T).int.signedness == .signed and
-        value.len > 0 and (value[0] == '+' or value[0] == '-'))
-        value[1..]
-    else
-        value;
-    if (digits.len == 0) return error.InvalidCharacter;
-    for (digits) |c| {
-        _ = try std.fmt.charToDigit(c, base);
+    if (value.len == 0) return error.InvalidCharacter;
+    if (@typeInfo(T).int.signedness == .signed) {
+        if (value[0] == '+') return parseWithSign(T, value[1..], base, .pos);
+        if (value[0] == '-') return parseWithSign(T, value[1..], base, .neg);
     }
-    return std.fmt.parseInt(T, value, base);
+    return parseWithSign(T, value, base, .pos);
+}
+
+fn parseWithSign(
+    comptime T: type,
+    value: []const u8,
+    comptime base: u8,
+    comptime sign: enum { pos, neg },
+) std.fmt.ParseIntError!T {
+    if (value.len == 0) return error.InvalidCharacter;
+
+    const add = switch (sign) {
+        .pos => math.add,
+        .neg => math.sub,
+    };
+
+    const info = @typeInfo(T).int;
+    const Accumulate = std.meta.Int(info.signedness, @max(8, info.bits));
+    var accumulate: Accumulate = 0;
+    for (value) |c| {
+        const digit = try std.fmt.charToDigit(c, base);
+        accumulate = try math.mul(Accumulate, accumulate, base);
+        accumulate = try add(Accumulate, accumulate, @intCast(digit));
+    }
+
+    return math.cast(T, accumulate) orelse return error.Overflow;
 }
 
 test "protocol integer parsing" {
@@ -28,6 +53,8 @@ test "protocol integer parsing" {
     try testing.expectEqual(42, try parse(i32, "+42", 10));
     try testing.expectEqual(-2147483648, try parse(i32, "-2147483648", 10));
     try testing.expectEqual(2147483647, try parse(i32, "2147483647", 10));
+    try testing.expectEqual(-4, try parse(i3, "-4", 10));
+    try testing.expectError(error.Overflow, parse(i3, "4", 10));
     try testing.expectError(error.Overflow, parse(u8, "256", 10));
     try testing.expectError(error.Overflow, parse(i32, "2147483648", 10));
     try testing.expectError(error.Overflow, parse(i32, "-2147483649", 10));
