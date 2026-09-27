@@ -7,6 +7,12 @@ const math = std.math;
 
 /// Parse ASCII digits in the given base. Signed types allow a leading sign;
 /// unsigned types accept digits only.
+///
+/// This exists because `std.fmt.parseInt` implements Zig integer literal
+/// syntax rather than what terminal protocols specify: it ignores `_` digit
+/// separators (so `4_2` parses as 42) and accepts a leading `+` or `-` even
+/// for unsigned types. Accepting that input makes us diverge from other
+/// terminals, so don't replace this with `std.fmt.parseInt`.
 pub fn parseInt(
     comptime T: type,
     value: []const u8,
