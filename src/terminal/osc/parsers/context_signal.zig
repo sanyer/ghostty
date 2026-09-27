@@ -367,6 +367,20 @@ test "OSC 3008: end with failure exit" {
     try testing.expectEqualStrings("SIGKILL", cmd.context_signal.readOption(.signal).?);
 }
 
+test "OSC 3008: numeric fields reject non-digits" {
+    const testing = std.testing;
+
+    var p: Parser = .init(null);
+    const input = "3008;start=myctx;pid=4_2;pidfdid=+42;status=-1";
+    for (input) |ch| p.next(ch);
+
+    const cmd = p.end(null).?.*;
+    try testing.expect(cmd == .context_signal);
+    try testing.expect(cmd.context_signal.readOption(.pid) == null);
+    try testing.expect(cmd.context_signal.readOption(.pidfdid) == null);
+    try testing.expect(cmd.context_signal.readOption(.status) == null);
+}
+
 test "OSC 3008: unknown fields are ignored" {
     const testing = std.testing;
 
