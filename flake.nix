@@ -32,7 +32,7 @@
     };
 
     zon2nix = {
-      url = "github:jcollie/zon2nix?ref=main";
+      url = "github:jcollie/zon2nix?ref=v0.8.1";
       inputs = {
         nixpkgs.follows = "nixpkgs";
       };
