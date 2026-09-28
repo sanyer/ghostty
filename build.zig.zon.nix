@@ -8,7 +8,33 @@
   zig_0_16,
   zstd,
   name ? "zig-packages",
+  # Accepted and ignored. Expressions from zon2nix before 0.8 built the
+  # packages with `linkFarm`, and some callers override it with a version that
+  # copies, to work around Zig mishandling symlinked package directories
+  # (https://codeberg.org/ziglang/zig/issues/32121). The packages are real
+  # directories now, so the override is not needed, and is taken here only so
+  # that passing it is not an error.
+  linkFarm ? null,
 }: let
+  # A git repository, checked out the way Zig reads it: every file as
+  # committed. An ordinary checkout applies the repository's `.gitattributes`,
+  # which can rewrite a file's line endings or run it through a filter, and
+  # the package would then no longer match its hash. Pointing git at its
+  # built-in empty tree for attributes turns them all off, and `core.autocrlf`
+  # is turned off too, since it converts line endings even without them.
+  # zon2nix computes the hash with exactly these settings.
+  fetchZigGit = args:
+    fetchgit (
+      args
+      // {
+        fetchSubmodules = false;
+        preFetch = ''
+          export GIT_ATTR_SOURCE=4b825dc642cb6eb9a060e54bf8d69288fbee4904
+          export GIT_CONFIG_COUNT=1 GIT_CONFIG_KEY_0=core.autocrlf GIT_CONFIG_VALUE_0=false
+        '';
+      }
+    );
+
   # Every package, by the hash Zig knows it by, as Nix fetches it.
   packages = {
     "aro-0.0.0-JSD1Qk6lNgDdcDV4Vh7Sfy-34m2TluIVOdPzMmj_0BjX" = fetchzip {
@@ -129,24 +155,22 @@
       url = "https://codeberg.org/vancluever/translate-c/archive/4e879eb8aba615de112eabd1231ea6e01920cead.tar.gz";
       hash = "sha256-/sT7W8Kp+O11xaFBgpb/kDiWzfQ0MuXk/d/TuGq1Am8=";
     };
-    "uucode-0.2.0-ZZjBPlK5VADj7fdoq7G8LIHzD5o6FSkcBXXrRWr4jnrA" = fetchgit {
+    "uucode-0.2.0-ZZjBPlK5VADj7fdoq7G8LIHzD5o6FSkcBXXrRWr4jnrA" = fetchZigGit {
       name = "uucode";
       url = "https://github.com/jacobsandlund/uucode";
       rev = "2826a37a4562284fdacd8fa029d49509cc9bffcd";
       hash = "sha256-R5RXW5tWIaDq5JOF2+oWd5YOYOyns6WH7f687WE+b20=";
-      fetchSubmodules = false;
     };
     "uucode-0.2.0-ZZjBPuuFVgC8YZ8eld4fOKsZANLIhTFMzULQxhkLi1C7" = fetchzip {
       name = "uucode";
       url = "https://github.com/jacobsandlund/uucode/archive/9d55524551411b493cca41ca06363625d90aff1e.tar.gz";
       hash = "sha256-KZbp/0dlJc5BdxM19ZOXH74WEjEilTvzie/BjT1aYvw=";
     };
-    "vaxis-0.6.0-BWNV_MjFCQCs9UDHiRkrgw_ayeiPkzOe4xVbaAqXkUWW" = fetchgit {
+    "vaxis-0.6.0-BWNV_MjFCQCs9UDHiRkrgw_ayeiPkzOe4xVbaAqXkUWW" = fetchZigGit {
       name = "vaxis";
       url = "https://github.com/rockorager/libvaxis.git";
       rev = "c1e1f23be38951c425cdf31af455ba23ef178940";
       hash = "sha256-bIXu8lGwGo42QbItC0jOi/eN7u+f4snknBexw7dc0DI=";
-      fetchSubmodules = false;
     };
     "vaxis-0.6.0-BWNV_CrbCQCscGpzsAlR402rYQ_tV3aAl081c2iRRkka" = fetchzip {
       name = "vaxis";
@@ -198,12 +222,11 @@
       url = "https://deps.files.ghostty.org/wayland-0.6.0-lQa1kqz8AQADQmdNJsNhLoNHcnEGEUjrOaPV-dtEnEmX.tar.gz";
       hash = "sha256-3m/ITNhZUJ/5uD/Tqm+0uZSktGoYgWF5oldOqOCUkIE=";
     };
-    "zigimg-0.1.0-8_eo2oyaFwBZwJpmqPkCfVXWBrHcqbYwmrp1I6bTD3lI" = fetchgit {
+    "zigimg-0.1.0-8_eo2oyaFwBZwJpmqPkCfVXWBrHcqbYwmrp1I6bTD3lI" = fetchZigGit {
       name = "zigimg";
       url = "https://github.com/zigimg/zigimg";
       rev = "d695acd97c02e57bb151e8f659d1280f5cd6ca70";
       hash = "sha256-0IYATQldT6eJxRR2T/2CsIYZuzomqjvmdVyjmsjguyE=";
-      fetchSubmodules = false;
     };
     "N-V-__8AAB0eQwD-0MdOEBmz7intriBReIsIDNlukNVoNu6o" = fetchzip {
       name = "zlib";
