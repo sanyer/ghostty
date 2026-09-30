@@ -130,7 +130,7 @@ fn commandDataTyped(
     comptime data: CommandData,
     out: *data.OutType(),
 ) bool {
-    const command = command_.?;
+    const command = command_ orelse return false;
     switch (data) {
         .invalid => return false,
         .change_window_title_str => switch (command.*) {
