@@ -4936,10 +4936,10 @@ pub fn fullReset(self: *Terminal) void {
         .alternate,
     );
 
-    // Reset our screens
+    // Reset our screen
     self.screens.active.reset();
 
-    // Rest our basic state
+    // Reset our basic state
     const visible = self.flags.visible;
     const resize_pull_scrollback = self.flags.resize_pull_scrollback;
     self.modes.reset();
@@ -4968,6 +4968,7 @@ pub fn fullReset(self: *Terminal) void {
         .right = self.cols - 1,
     };
     self.setCursorStyle(.default);
+    self.colors.palette.resetAll();
 
     // Always mark dirty so we redraw everything
     self.flags.dirty.clear = true;
