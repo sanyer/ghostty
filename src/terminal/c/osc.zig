@@ -169,6 +169,12 @@ test "command type null" {
     try testing.expectEqual(.invalid, commandType(null));
 }
 
+test "command data null" {
+    const testing = std.testing;
+    var title: [*:0]const u8 = undefined;
+    try testing.expect(!commandData(null, .change_window_title_str, @ptrCast(&title)));
+}
+
 test "change window title" {
     const testing = std.testing;
     var p: Parser = undefined;
